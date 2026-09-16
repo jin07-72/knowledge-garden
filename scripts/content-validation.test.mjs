@@ -111,3 +111,18 @@ test("validate-content recursively reports Markdown validation failures", () => 
   assert.doesNotMatch(result.stderr, /ignored\.txt/)
   assert.equal(result.stdout, "")
 })
+
+test("validate-content counts nested valid Markdown files", () => {
+  const validatorScript = fileURLToPath(new URL("./validate-content.mjs", import.meta.url))
+  const fixtureDirectory = new URL("./fixtures/content-validation-success-cli/", import.meta.url)
+  const result = spawnSync(process.execPath, [validatorScript], {
+    cwd: fileURLToPath(fixtureDirectory),
+    encoding: "utf8",
+    env: process.env,
+    shell: false,
+  })
+
+  assert.equal(result.status, 0)
+  assert.equal(result.stderr, "")
+  assert.equal(result.stdout, "Validated 2 Markdown files.\n")
+})
