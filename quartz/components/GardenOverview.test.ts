@@ -19,3 +19,20 @@ test("counts published notes by domain and excludes domain indexes", () => {
     total: 3,
   })
 })
+
+test("excludes nested folder indexes and unlisted notes", () => {
+  const files = [
+    { slug: "reading/topics/index" },
+    { slug: "reading/published" },
+    { slug: "reading/unlisted", frontmatter: { unlisted: true } },
+    { slug: "reading/visible", frontmatter: { unlisted: false } },
+  ]
+
+  assert.deepEqual(countDomains(files), {
+    reading: 2,
+    technology: 0,
+    language: 0,
+    life: 0,
+    total: 2,
+  })
+})

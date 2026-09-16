@@ -8,14 +8,21 @@ const domains = [
   { slug: "life", number: "04", title: "生活实验", detail: "观察、复盘与实践记录" },
 ] as const
 
-type SlugData = { slug?: string }
+type SlugData = {
+  slug?: string
+  frontmatter?: {
+    [key: string]: unknown
+    unlisted?: boolean
+  }
+}
 
 export function countDomains(files: SlugData[]) {
   const result = { reading: 0, technology: 0, language: 0, life: 0, total: 0 }
   for (const file of files) {
+    if (file.frontmatter?.unlisted === true) continue
     const slug = file.slug ?? ""
     for (const domain of domains) {
-      if (slug.startsWith(`${domain.slug}/`) && slug !== `${domain.slug}/index`) {
+      if (slug.startsWith(`${domain.slug}/`) && !slug.endsWith("/index")) {
         result[domain.slug] += 1
         result.total += 1
       }

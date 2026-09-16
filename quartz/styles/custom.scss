@@ -60,7 +60,7 @@ input,
 }
 
 .garden-stats {
-  color: var(--gray);
+  color: var(--darkgray);
   font-family: var(--codeFont);
   font-size: 0.8rem;
 }
@@ -125,7 +125,7 @@ body:not([data-slug="index"]) .recent-notes {
 }
 
 .domain-card small {
-  color: var(--gray);
+  color: var(--darkgray);
 }
 
 @media all and ($mobile) {
