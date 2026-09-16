@@ -1,45 +1,44 @@
 # yaml-language-server: $schema=./quartz/plugins/quartz-plugins.schema.json
 configuration:
-  pageTitle: Quartz 5
-  pageTitleSuffix: ""
+  pageTitle: Knowledge Garden
+  pageTitleSuffix: " · Personal Notes"
   enableSPA: true
   enablePopovers: true
-  analytics:
-    provider: plausible
-  locale: en-US
+  analytics: null
+  locale: zh-CN
   baseUrl: localhost:8080
   ignorePatterns:
     - private
     - templates
     - .obsidian
   theme:
-    fontOrigin: googleFonts
-    cdnCaching: true
+    fontOrigin: local
+    cdnCaching: false
     typography:
       header: Schibsted Grotesk
       body: Source Sans Pro
       code: IBM Plex Mono
     colors:
       lightMode:
-        light: "#faf8f8"
-        lightgray: "#e5e5e5"
-        gray: "#b8b8b8"
-        darkgray: "#4e4e4e"
-        dark: "#2b2b2b"
-        secondary: "#284b63"
-        tertiary: "#84a59d"
-        highlight: rgba(143, 159, 169, 0.15)
-        textHighlight: "#fff23688"
+        light: "#101318"
+        lightgray: "#252b34"
+        gray: "#566170"
+        darkgray: "#c2ccd6"
+        dark: "#f0f4f8"
+        secondary: "#8bd5ca"
+        tertiary: "#f5a97f"
+        highlight: "rgba(139, 213, 202, 0.12)"
+        textHighlight: "rgba(245, 169, 127, 0.26)"
       darkMode:
-        light: "#161618"
-        lightgray: "#393639"
-        gray: "#646464"
-        darkgray: "#d4d4d4"
-        dark: "#ebebec"
-        secondary: "#7b97aa"
-        tertiary: "#84a59d"
-        highlight: rgba(143, 159, 169, 0.15)
-        textHighlight: "#b3aa0288"
+        light: "#101318"
+        lightgray: "#252b34"
+        gray: "#566170"
+        darkgray: "#c2ccd6"
+        dark: "#f0f4f8"
+        secondary: "#8bd5ca"
+        tertiary: "#f5a97f"
+        highlight: "rgba(139, 213, 202, 0.12)"
+        textHighlight: "rgba(245, 169, 127, 0.26)"
 plugins:
   - source: "@quartz-community/created-modified-date"
     enabled: true
@@ -82,7 +81,7 @@ plugins:
     order: 50
     layout:
       position: right
-      priority: 30
+      priority: 20
   - source: "@quartz-community/crawl-links"
     enabled: true
     options:
@@ -110,6 +109,8 @@ plugins:
     order: 92
   - source: "@quartz-community/quartz-fonts"
     enabled: true
+    options:
+      fontOrigin: local
   - source: "@quartz-themes/core"
     enabled: true
     options:
@@ -124,7 +125,7 @@ plugins:
     options: {}
     order: 45
   - source: "@quartz-community/encrypted-pages"
-    enabled: true
+    enabled: false
     options:
       iterations: 600000
       passwordField: password
@@ -179,7 +180,7 @@ plugins:
     enabled: true
     layout:
       position: right
-      priority: 50
+      priority: 30
   - source: "@quartz-community/article-title"
     enabled: true
     layout:
@@ -191,7 +192,7 @@ plugins:
       position: beforeBody
       priority: 20
   - source: "@quartz-community/tag-list"
-    enabled: false
+    enabled: true
     layout:
       position: beforeBody
       priority: 30
@@ -201,11 +202,7 @@ plugins:
       position: left
       priority: 10
   - source: "@quartz-community/darkmode"
-    enabled: true
-    layout:
-      position: left
-      priority: 30
-      group: toolbar
+    enabled: false
   - source: "@quartz-community/reader-mode"
     enabled: true
     layout:
@@ -236,7 +233,16 @@ plugins:
       position: footer
       priority: 50
   - source: "@quartz-community/recent-notes"
-    enabled: false
+    enabled: true
+    options:
+      title: 最近更新
+      limit: 4
+      showTags: true
+      hideTagPages: true
+      hideFolderPages: true
+    layout:
+      position: afterBody
+      priority: 20
   - source: "@quartz-community/spacer"
     enabled: true
     options: {}

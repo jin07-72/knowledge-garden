@@ -1,3 +1,152 @@
 @use "./variables.scss" as *;
 
-// put your custom CSS here!
+:root {
+  color-scheme: dark;
+}
+
+body {
+  background:
+    radial-gradient(circle at 85% 8%, rgba(139, 213, 202, 0.06), transparent 28rem), var(--light);
+}
+
+a,
+button,
+input,
+[tabindex] {
+  &:focus-visible {
+    outline: 2px solid var(--secondary);
+    outline-offset: 3px;
+    border-radius: 0.3rem;
+  }
+}
+
+.page-title a::before {
+  content: "~/";
+  color: var(--secondary);
+  font-family: var(--codeFont);
+  margin-right: 0.15rem;
+}
+
+.page-title a {
+  letter-spacing: -0.03em;
+}
+
+.sidebar {
+  border-color: var(--lightgray);
+}
+
+.center article {
+  max-width: 72ch;
+}
+
+.center article h1,
+.center article h2,
+.center article h3 {
+  letter-spacing: -0.025em;
+}
+
+.center article code,
+.search-button,
+.content-meta {
+  font-family: var(--codeFont);
+}
+
+.garden-kicker {
+  color: var(--secondary);
+  font-family: var(--codeFont);
+  font-size: 0.78rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.garden-stats {
+  color: var(--gray);
+  font-family: var(--codeFont);
+  font-size: 0.8rem;
+}
+
+body:not([data-slug="index"]) .recent-notes {
+  display: none;
+}
+
+.garden-hero {
+  margin: 1.25rem 0 2.25rem;
+  font-size: clamp(2.2rem, 7vw, 4.7rem);
+  line-height: 0.98;
+  letter-spacing: -0.065em;
+  max-width: 10ch;
+}
+
+.garden-hero::after {
+  content: "_";
+  color: var(--tertiary);
+}
+
+.domain-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.85rem;
+  margin: 2rem 0;
+}
+
+.domain-card {
+  display: block;
+  min-height: 8rem;
+  padding: 1.15rem;
+  color: var(--dark);
+  text-decoration: none;
+  border: 1px solid var(--lightgray);
+  border-radius: 0.65rem;
+  background: rgba(24, 29, 36, 0.82);
+  transition:
+    transform 140ms ease,
+    border-color 140ms ease,
+    background 140ms ease;
+}
+
+.domain-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--secondary);
+  background: rgba(37, 43, 52, 0.9);
+}
+
+.domain-card span {
+  display: block;
+  margin-bottom: 1.8rem;
+  color: var(--secondary);
+  font-family: var(--codeFont);
+  font-size: 0.75rem;
+}
+
+.domain-card strong {
+  display: block;
+  margin-bottom: 0.35rem;
+  font-size: 1.05rem;
+}
+
+.domain-card small {
+  color: var(--gray);
+}
+
+@media all and ($mobile) {
+  .domain-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .garden-hero {
+    font-size: clamp(2.3rem, 14vw, 3.6rem);
+  }
+
+  .center article {
+    max-width: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}
