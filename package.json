@@ -17,6 +17,9 @@
     "check": "tsc --noEmit && npx prettier . --check",
     "format": "npx prettier . --write",
     "test": "tsx --test",
+    "test:site": "node --test scripts/*.test.mjs",
+    "validate:content": "node scripts/validate-content.mjs",
+    "verify:site": "npm run test:site && npm run validate:content && npm run check && npx quartz build && node scripts/check-built-links.mjs",
     "profile": "0x -D prof ./quartz/bootstrap-cli.mjs build --concurrency=1",
     "install-plugins": "npx tsx ./quartz/plugins/loader/install-plugins.ts",
     "prebuild": "npm run install-plugins"
