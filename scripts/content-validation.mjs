@@ -5,8 +5,8 @@ function hasText(value) {
 }
 
 function getFrontmatter(source) {
-  const match = source.match(/^---[ \t]*\r?\n([\s\S]*?)^---[ \t]*(?:\r?\n|$)/m)
-  return match?.[1]
+  const match = source.match(/^---[ \t]*\r?\n(?:([\s\S]*?)\r?\n)?---[ \t]*(?:\r?\n|$)/)
+  return match ? (match[1] ?? "") : undefined
 }
 
 export function isPrivatePath(filePath) {

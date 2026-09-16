@@ -23,6 +23,21 @@ test("source without frontmatter reports a path-specific error", () => {
   ])
 })
 
+test("frontmatter after body text is not accepted", () => {
+  const source = `Body text comes first.
+---
+title: Reading note
+date: 2026-09-16
+description: A concise description.
+tags:
+  - reading
+---`
+
+  assert.deepEqual(validateNote("content/reading/misplaced.md", source), [
+    "content/reading/misplaced.md: missing frontmatter",
+  ])
+})
+
 test("empty frontmatter reports each missing required field", () => {
   const source = `---
 ---
