@@ -14,7 +14,7 @@ export function isPrivatePath(filePath) {
 }
 
 export function validateNote(filePath, source) {
-  const frontmatter = getFrontmatter(source)
+  const frontmatter = getFrontmatter(source.startsWith("\uFEFF") ? source.slice(1) : source)
 
   if (frontmatter === undefined) {
     return [`${filePath}: missing frontmatter`]
@@ -23,8 +23,9 @@ export function validateNote(filePath, source) {
   let data
   try {
     data = parse(frontmatter)
-  } catch {
-    return [`${filePath}: invalid YAML frontmatter`]
+  } catch (error) {
+    const reason = typeof error?.code === "string" ? error.code : "parse error"
+    return [`${filePath}: invalid YAML frontmatter (${reason})`]
   }
 
   const errors = []
