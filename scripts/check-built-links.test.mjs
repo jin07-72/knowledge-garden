@@ -87,6 +87,7 @@ test("validates dotted page slugs while ignoring dotted static references", asyn
     {
       "index.html": `
         <a href="./release-1.2/">Missing release</a>
+        <a href="./release-1.2">Missing release without slash</a>
         <a href="./Node.js/#missing">Node.js</a>
         <a href="./Node.js#missing-no-slash">Node.js file-like slug</a>
         <link rel="stylesheet" href="./styles.v1.css">
@@ -98,6 +99,7 @@ test("validates dotted page slugs while ignoring dotted static references", asyn
       assert.deepEqual(await checkBuiltLinks(root), [
         "index.html -> ./Node.js#missing-no-slash",
         "index.html -> ./Node.js/#missing",
+        "index.html -> ./release-1.2",
         "index.html -> ./release-1.2/",
       ])
     },
@@ -152,6 +154,30 @@ test("does not scan script raw text for anchors or ids", async () => {
     },
     async (root) => {
       assert.deepEqual(await checkBuiltLinks(root), ["index.html -> ./reading/#ghost"])
+    },
+  )
+})
+
+test("accepts a self-anchor in a complete HTML document", async () => {
+  await withSite(
+    {
+      "index.html": `<!doctype html>
+        <html><head><title>Home</title></head>
+        <body id="top"><a href="#top">Top</a></body></html>`,
+    },
+    async (root) => {
+      assert.deepEqual(await checkBuiltLinks(root), [])
+    },
+  )
+})
+
+test("preserves an entity href after a boolean attribute", async () => {
+  await withSite(
+    {
+      "index.html": '<a download href="./missing&amp;page/">Missing page</a>',
+    },
+    async (root) => {
+      assert.deepEqual(await checkBuiltLinks(root), ["index.html -> ./missing&amp;page/"])
     },
   )
 })

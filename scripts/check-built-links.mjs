@@ -4,6 +4,28 @@ import { pathToFileURL } from "node:url"
 import { fromHtml } from "hast-util-from-html"
 
 const ignoredSchemes = /^(?:https?:|mailto:|tel:|javascript:|data:)/i
+const staticAssetExtensions = new Set([
+  ".avif",
+  ".css",
+  ".gif",
+  ".ico",
+  ".jpeg",
+  ".jpg",
+  ".js",
+  ".json",
+  ".map",
+  ".mjs",
+  ".mp3",
+  ".mp4",
+  ".pdf",
+  ".png",
+  ".svg",
+  ".txt",
+  ".webm",
+  ".webp",
+  ".woff",
+  ".woff2",
+])
 
 function decodeUrlPart(value) {
   try {
@@ -35,7 +57,7 @@ async function htmlFiles(root) {
 }
 
 function elementNodesFromHtml(html) {
-  const tree = fromHtml(html, { fragment: true })
+  const tree = fromHtml(html)
   const elements = []
 
   function visit(node) {
@@ -73,7 +95,6 @@ function rawAttributeValue(html, element, attributeName) {
     const name = tag.slice(nameStart, index)
     while (index < tag.length && /\s/.test(tag[index])) index += 1
     if (tag[index] !== "=") {
-      while (index < tag.length && !/\s|\/?>/.test(tag[index])) index += 1
       continue
     }
 
@@ -137,7 +158,7 @@ async function resolveTarget(root, source, pathPart) {
 function isStaticAsset(pathPart) {
   if (pathPart.endsWith("/")) return false
   const extension = extname(decodeUrlPart(pathPart)).toLowerCase()
-  return extension !== "" && extension !== ".html" && extension !== ".htm"
+  return staticAssetExtensions.has(extension)
 }
 
 function splitHref(href) {
