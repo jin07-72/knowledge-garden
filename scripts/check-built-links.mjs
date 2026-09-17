@@ -4,7 +4,11 @@ import { pathToFileURL } from "node:url"
 
 const ignoredSchemes = /^(?:https?:|mailto:|tel:|javascript:|data:)/i
 const hrefAttribute = /\shref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/gi
-const idAttribute = /\bid\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/gi
+const idAttribute = /\sid\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/gi
+
+function withoutHtmlComments(html) {
+  return html.replace(/<!--[\s\S]*?-->/g, "")
+}
 
 function decodeUrlPart(value) {
   try {
@@ -37,7 +41,7 @@ async function htmlFiles(root) {
 
 function hrefsFromHtml(html) {
   const hrefs = []
-  const anchorTags = html.match(/<a\b[^>]*>/gi) ?? []
+  const anchorTags = withoutHtmlComments(html).match(/<a(?=\s|\/?>)[^>]*>/gi) ?? []
 
   for (const anchorTag of anchorTags) {
     hrefAttribute.lastIndex = 0
@@ -50,10 +54,13 @@ function hrefsFromHtml(html) {
 
 function idsFromHtml(html) {
   const ids = new Set()
-  idAttribute.lastIndex = 0
+  const elementTags = withoutHtmlComments(html).match(/<[a-z][^>]*>/gi) ?? []
 
-  for (let match = idAttribute.exec(html); match; match = idAttribute.exec(html)) {
-    ids.add(match[1] ?? match[2] ?? match[3] ?? "")
+  for (const elementTag of elementTags) {
+    idAttribute.lastIndex = 0
+    for (let match = idAttribute.exec(elementTag); match; match = idAttribute.exec(elementTag)) {
+      ids.add(match[1] ?? match[2] ?? match[3] ?? "")
+    }
   }
 
   return ids

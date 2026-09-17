@@ -53,6 +53,35 @@ test("reports an existing page whose requested fragment is absent", async () => 
   )
 })
 
+test("does not treat data attributes or comments as fragment targets", async () => {
+  await withSite(
+    {
+      "index.html": '<a href="./reading/#ghost">Reading notes</a>',
+      "reading/index.html": `
+        <section data-id="ghost">Not an anchor</section>
+        <!-- <section id="ghost">Not an anchor</section> -->
+      `,
+    },
+    async (root) => {
+      assert.deepEqual(await checkBuiltLinks(root), ["index.html -> ./reading/#ghost"])
+    },
+  )
+})
+
+test("does not inspect data attributes or comments as links", async () => {
+  await withSite(
+    {
+      "index.html": `
+        <a data-href="./missing-data/">Data attribute</a>
+        <!-- <a href="./missing-comment/">Commented link</a> -->
+      `,
+    },
+    async (root) => {
+      assert.deepEqual(await checkBuiltLinks(root), [])
+    },
+  )
+})
+
 test("ignores external, contact, and static asset links", async () => {
   await withSite(
     {
