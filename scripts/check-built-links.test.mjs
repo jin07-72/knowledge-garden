@@ -35,6 +35,25 @@ test("accepts a clean URL with an existing anchor", async () => {
   )
 })
 
+test("maps project Pages base-path links onto the artifact root", async () => {
+  await withSite(
+    {
+      "404.html": `
+        <a href="/knowledge-garden">Home</a>
+        <a href="/knowledge-garden/guide/">Guide</a>
+      `,
+      "index.html": "Home",
+      "guide/index.html": "Guide",
+    },
+    async (root) => {
+      assert.deepEqual(
+        await checkBuiltLinks(root, { baseUrl: "jin07-72.github.io/knowledge-garden" }),
+        [],
+      )
+    },
+  )
+})
+
 test("reports a missing internal page with a portable source and href", async () => {
   await withSite({ "index.html": '<a href="./missing/">Missing</a>' }, async (root) => {
     assert.deepEqual(await checkBuiltLinks(root), ["index.html -> ./missing/"])

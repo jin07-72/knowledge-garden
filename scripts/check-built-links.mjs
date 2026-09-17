@@ -2,6 +2,7 @@ import { readdir, readFile, stat } from "node:fs/promises"
 import { extname, isAbsolute, relative, resolve, sep } from "node:path"
 import { pathToFileURL } from "node:url"
 import { fromHtml } from "hast-util-from-html"
+import { parse } from "yaml"
 
 const ignoredSchemes = /^(?:https?:|mailto:|tel:|javascript:|data:)/i
 const staticAssetExtensions = new Set([
@@ -172,11 +173,26 @@ function splitHref(href) {
   }
 }
 
+function basePathFromUrl(baseUrl) {
+  if (!baseUrl) return ""
+
+  const path = new URL(`https://${baseUrl}`).pathname.replace(/\/+$/, "")
+  return path === "/" ? "" : path
+}
+
+function removeBasePath(pathPart, basePath) {
+  if (basePath === "" || !pathPart.startsWith("/")) return pathPart
+  if (pathPart === basePath) return "/"
+  if (pathPart.startsWith(`${basePath}/`)) return pathPart.slice(basePath.length)
+  return pathPart
+}
+
 /**
  * Returns broken generated-page links as sorted, portable "source -> href" strings.
  */
-export async function checkBuiltLinks(root) {
+export async function checkBuiltLinks(root, { baseUrl } = {}) {
   const siteRoot = resolve(root)
+  const basePath = basePathFromUrl(baseUrl)
   const files = (await htmlFiles(siteRoot)).sort()
   const htmlByFile = new Map(
     await Promise.all(files.map(async (filePath) => [filePath, await readFile(filePath, "utf8")])),
@@ -195,7 +211,8 @@ export async function checkBuiltLinks(root) {
         continue
       }
 
-      const { pathPart, fragment } = splitHref(trimmedHref)
+      const { pathPart: configuredPath, fragment } = splitHref(trimmedHref)
+      const pathPart = removeBasePath(configuredPath, basePath)
       const target = pathPart === "" ? source : await resolveTarget(siteRoot, source, pathPart)
       if (!target && isStaticAsset(pathPart)) continue
       if (
@@ -211,7 +228,10 @@ export async function checkBuiltLinks(root) {
 }
 
 async function main() {
-  const failures = await checkBuiltLinks(resolve(process.cwd(), "public"))
+  const config = parse(await readFile(resolve(process.cwd(), "quartz.config.yaml"), "utf8"))
+  const failures = await checkBuiltLinks(resolve(process.cwd(), "public"), {
+    baseUrl: config.configuration?.baseUrl,
+  })
 
   if (failures.length > 0) {
     console.error(failures.join("\n"))
