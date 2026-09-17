@@ -1,14 +1,9 @@
 import { readdir, readFile, stat } from "node:fs/promises"
 import { extname, isAbsolute, relative, resolve, sep } from "node:path"
 import { pathToFileURL } from "node:url"
+import { fromHtml } from "hast-util-from-html"
 
 const ignoredSchemes = /^(?:https?:|mailto:|tel:|javascript:|data:)/i
-const hrefAttribute = /\shref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/gi
-const idAttribute = /\sid\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/gi
-
-function withoutHtmlComments(html) {
-  return html.replace(/<!--[\s\S]*?-->/g, "")
-}
 
 function decodeUrlPart(value) {
   try {
@@ -39,28 +34,77 @@ async function htmlFiles(root) {
   return files
 }
 
-function hrefsFromHtml(html) {
-  const hrefs = []
-  const anchorTags = withoutHtmlComments(html).match(/<a(?=\s|\/?>)[^>]*>/gi) ?? []
+function elementNodesFromHtml(html) {
+  const tree = fromHtml(html, { fragment: true })
+  const elements = []
 
-  for (const anchorTag of anchorTags) {
-    hrefAttribute.lastIndex = 0
-    const match = hrefAttribute.exec(anchorTag)
-    if (match) hrefs.push(match[1] ?? match[2] ?? match[3] ?? "")
+  function visit(node) {
+    if (node.type === "element") elements.push(node)
+    if (Array.isArray(node.children)) {
+      for (const child of node.children) visit(child)
+    }
   }
 
-  return hrefs
+  visit(tree)
+  return elements
+}
+
+function rawAttributeValue(html, element, attributeName) {
+  const start = element.position?.start?.offset
+  const end = element.position?.end?.offset
+  if (typeof start !== "number" || typeof end !== "number") return undefined
+
+  const tag = html.slice(start, end)
+  let index = 1
+  while (index < tag.length && !/\s|\/?>/.test(tag[index])) index += 1
+
+  while (index < tag.length) {
+    while (index < tag.length && /\s/.test(tag[index])) index += 1
+    if (
+      index >= tag.length ||
+      tag[index] === ">" ||
+      (tag[index] === "/" && tag[index + 1] === ">")
+    ) {
+      return undefined
+    }
+
+    const nameStart = index
+    while (index < tag.length && !/\s|=|\/?>/.test(tag[index])) index += 1
+    const name = tag.slice(nameStart, index)
+    while (index < tag.length && /\s/.test(tag[index])) index += 1
+    if (tag[index] !== "=") {
+      while (index < tag.length && !/\s|\/?>/.test(tag[index])) index += 1
+      continue
+    }
+
+    index += 1
+    while (index < tag.length && /\s/.test(tag[index])) index += 1
+    const quote = tag[index] === '"' || tag[index] === "'" ? tag[index++] : undefined
+    const valueStart = index
+    if (quote) {
+      while (index < tag.length && tag[index] !== quote) index += 1
+    } else {
+      while (index < tag.length && !/\s|>/.test(tag[index])) index += 1
+    }
+
+    if (name.toLowerCase() === attributeName) return tag.slice(valueStart, index)
+    if (quote && index < tag.length) index += 1
+  }
+}
+
+function hrefsFromHtml(html) {
+  return elementNodesFromHtml(html)
+    .filter((element) => element.tagName === "a" && typeof element.properties?.href === "string")
+    .map((element) => ({
+      href: element.properties.href,
+      originalHref: rawAttributeValue(html, element, "href") ?? element.properties.href,
+    }))
 }
 
 function idsFromHtml(html) {
   const ids = new Set()
-  const elementTags = withoutHtmlComments(html).match(/<[a-z][^>]*>/gi) ?? []
-
-  for (const elementTag of elementTags) {
-    idAttribute.lastIndex = 0
-    for (let match = idAttribute.exec(elementTag); match; match = idAttribute.exec(elementTag)) {
-      ids.add(match[1] ?? match[2] ?? match[3] ?? "")
-    }
+  for (const element of elementNodesFromHtml(html)) {
+    if (typeof element.properties?.id === "string") ids.add(element.properties.id)
   }
 
   return ids
@@ -91,6 +135,7 @@ async function resolveTarget(root, source, pathPart) {
 }
 
 function isStaticAsset(pathPart) {
+  if (pathPart.endsWith("/")) return false
   const extension = extname(decodeUrlPart(pathPart)).toLowerCase()
   return extension !== "" && extension !== ".html" && extension !== ".htm"
 }
@@ -123,21 +168,20 @@ export async function checkBuiltLinks(root) {
   for (const source of files) {
     const sourceName = relative(siteRoot, source).split(sep).join("/")
 
-    for (const href of hrefsFromHtml(htmlByFile.get(source))) {
+    for (const { href, originalHref } of hrefsFromHtml(htmlByFile.get(source))) {
       const trimmedHref = href.trim()
       if (trimmedHref === "" || ignoredSchemes.test(trimmedHref) || trimmedHref.startsWith("//")) {
         continue
       }
 
       const { pathPart, fragment } = splitHref(trimmedHref)
-      if (isStaticAsset(pathPart)) continue
-
       const target = pathPart === "" ? source : await resolveTarget(siteRoot, source, pathPart)
+      if (!target && isStaticAsset(pathPart)) continue
       if (
         !target ||
         (fragment !== undefined && fragment !== "" && !idsByFile.get(target)?.has(fragment))
       ) {
-        failures.add(`${sourceName} -> ${href}`)
+        failures.add(`${sourceName} -> ${originalHref}`)
       }
     }
   }

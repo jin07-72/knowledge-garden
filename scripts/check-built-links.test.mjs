@@ -82,6 +82,80 @@ test("does not inspect data attributes or comments as links", async () => {
   )
 })
 
+test("validates dotted page slugs while ignoring dotted static references", async () => {
+  await withSite(
+    {
+      "index.html": `
+        <a href="./release-1.2/">Missing release</a>
+        <a href="./Node.js/#missing">Node.js</a>
+        <a href="./Node.js#missing-no-slash">Node.js file-like slug</a>
+        <link rel="stylesheet" href="./styles.v1.css">
+        <script src="./script.v2.js"></script>
+      `,
+      "Node.js/index.html": '<section id="present">Node.js</section>',
+    },
+    async (root) => {
+      assert.deepEqual(await checkBuiltLinks(root), [
+        "index.html -> ./Node.js#missing-no-slash",
+        "index.html -> ./Node.js/#missing",
+        "index.html -> ./release-1.2/",
+      ])
+    },
+  )
+})
+
+test("decodes HTML character references in hrefs and ids", async () => {
+  await withSite(
+    {
+      "index.html": `
+        <a href="./a&amp;b">Ampersand page</a>
+        <a href="./reading/#a%26b">Ampersand anchor</a>
+        <a href="./missing&amp;page/">Missing page</a>
+      `,
+      "a&b.html": "Ampersand page",
+      "reading/index.html": '<section id="a&amp;b">Ampersand anchor</section>',
+    },
+    async (root) => {
+      assert.deepEqual(await checkBuiltLinks(root), ["index.html -> ./missing&amp;page/"])
+    },
+  )
+})
+
+test("parses hrefs when quoted attributes contain greater-than signs", async () => {
+  await withSite(
+    {
+      "index.html": '<a title="1 > 0" href="./missing-page/">Missing page</a>',
+    },
+    async (root) => {
+      assert.deepEqual(await checkBuiltLinks(root), ["index.html -> ./missing-page/"])
+    },
+  )
+})
+
+test("does not treat id text inside another attribute as an anchor", async () => {
+  await withSite(
+    {
+      "index.html": '<a href="./reading/#ghost">Reading notes</a>',
+      "reading/index.html": `<section aria-label="prefix id='ghost'">Not an anchor</section>`,
+    },
+    async (root) => {
+      assert.deepEqual(await checkBuiltLinks(root), ["index.html -> ./reading/#ghost"])
+    },
+  )
+})
+
+test("does not scan script raw text for anchors or ids", async () => {
+  await withSite(
+    {
+      "index.html": '<a href="./reading/#ghost">Reading notes</a>',
+      "reading/index.html": "<script>const markup = '<section id=\"ghost\">'</script>",
+    },
+    async (root) => {
+      assert.deepEqual(await checkBuiltLinks(root), ["index.html -> ./reading/#ghost"])
+    },
+  )
+})
+
 test("ignores external, contact, and static asset links", async () => {
   await withSite(
     {
