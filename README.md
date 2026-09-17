@@ -28,7 +28,7 @@ npx quartz build --serve
 Copy-Item templates/note-template.md content/technology/my-first-note.md
 ```
 
-上例把模板复制为 `content/technology/my-first-note.md`；`my-first-note.md` 是可按主题改名的全小写文件名，`technology` 也可以换成其他 `content/` 子文件夹。然后更新顶部 `---` 之间的 frontmatter（笔记的元数据）：`title`、`date`、`description`、`tags` 每一项都要填写；在正文中使用 `[[wiki links]]` 格式（例如 `[[笔记标题]]`）添加 wiki link，把相关笔记连接起来。先验证内容，再预览：
+上例把模板复制为 `content/technology/my-first-note.md`；`my-first-note.md` 是可按主题改名的全小写文件名，`technology` 也可以换成其他 `content/` 子文件夹。然后更新顶部 `---` 之间的 frontmatter（笔记的元数据）：`title`、`date`、`description`、`tags` 每一项都要填写；在正文中使用 `[[wiki links]]` 格式（例如 `[[css-grid|CSS Grid 的二维布局心智模型]]`）添加 wiki link。`|` 前是目标文件名（不含 `.md`），`|` 后是页面显示的标签；跨文件夹或主题域链接时，在 `|` 前写相应的文件夹路径。先验证内容，再预览：
 
 ```sh
 npm run validate:content
