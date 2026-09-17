@@ -54,6 +54,27 @@ test("maps project Pages base-path links onto the artifact root", async () => {
   )
 })
 
+test("rejects root-absolute links outside the configured Pages base path", async () => {
+  await withSite(
+    {
+      "index.html": `
+        <a href="./guide/">Relative guide</a>
+        <a href="/knowledge-garden/guide/">Deployed guide</a>
+        <a href="/guide/">Host-root guide</a>
+        <a href="/knowledge-garden-old/guide/">Near-prefix guide</a>
+      `,
+      "guide/index.html": "Guide",
+      "knowledge-garden-old/guide/index.html": "Unrelated host path",
+    },
+    async (root) => {
+      assert.deepEqual(
+        await checkBuiltLinks(root, { baseUrl: "jin07-72.github.io/knowledge-garden" }),
+        ["index.html -> /guide/", "index.html -> /knowledge-garden-old/guide/"],
+      )
+    },
+  )
+})
+
 test("reports a missing internal page with a portable source and href", async () => {
   await withSite({ "index.html": '<a href="./missing/">Missing</a>' }, async (root) => {
     assert.deepEqual(await checkBuiltLinks(root), ["index.html -> ./missing/"])

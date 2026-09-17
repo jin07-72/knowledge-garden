@@ -184,7 +184,7 @@ function removeBasePath(pathPart, basePath) {
   if (basePath === "" || !pathPart.startsWith("/")) return pathPart
   if (pathPart === basePath) return "/"
   if (pathPart.startsWith(`${basePath}/`)) return pathPart.slice(basePath.length)
-  return pathPart
+  return undefined
 }
 
 /**
@@ -213,6 +213,11 @@ export async function checkBuiltLinks(root, { baseUrl } = {}) {
 
       const { pathPart: configuredPath, fragment } = splitHref(trimmedHref)
       const pathPart = removeBasePath(configuredPath, basePath)
+      if (pathPart === undefined) {
+        failures.add(`${sourceName} -> ${originalHref}`)
+        continue
+      }
+
       const target = pathPart === "" ? source : await resolveTarget(siteRoot, source, pathPart)
       if (!target && isStaticAsset(pathPart)) continue
       if (
