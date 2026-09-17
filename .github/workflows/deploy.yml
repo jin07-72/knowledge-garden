@@ -28,16 +28,25 @@ jobs:
           node-version: 24
           cache: npm
 
-      - run: npm ci
-      - run: npx quartz plugin install
-      - run: node scripts/configure-pages-base-url.mjs
-      - run: npm run test:site
-      - run: npm run validate:content
-      - run: npm run check
-      - run: npx quartz build
-      - run: node scripts/check-built-links.mjs
+      - name: Install dependencies
+        run: npm ci
+      - name: Install Quartz plugins
+        run: npx quartz plugin install
+      - name: Configure Pages URL
+        run: node scripts/configure-pages-base-url.mjs
+      - name: Test site utilities
+        run: npm run test:site
+      - name: Validate Markdown content
+        run: npm run validate:content
+      - name: Check Quartz source
+        run: npm run check
+      - name: Build Quartz
+        run: npx quartz build
+      - name: Check generated links
+        run: node scripts/check-built-links.mjs
 
-      - uses: actions/upload-pages-artifact@v3
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
         with:
           path: public
 
@@ -48,5 +57,6 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - id: deployment
+      - name: Deploy to GitHub Pages
+        id: deployment
         uses: actions/deploy-pages@v4
