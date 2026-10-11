@@ -833,6 +833,9 @@ export function createImageLibraryService(options: {
     void operation.then(() => active.delete(operation), () => active.delete(operation))
     return operation
   }
+  // Start a read-only, bounded residue audit immediately; public operations
+  // repeat it so a residue appearing later also fails closed.
+  track(imports.inspect())
 
   const service: ImageLibraryService = {
     open(request: NotePathRequest): Promise<ImageLibraryView> {
