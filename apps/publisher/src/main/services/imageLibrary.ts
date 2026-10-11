@@ -16,6 +16,11 @@ import {
 import { MAX_MARKDOWN_UTF8_BYTES } from "../../shared/ipcSchemas"
 import { detectImageFormat, markdownForImage } from "./imageFormats"
 import {
+  captureImageLibraryPathIdentity,
+  completeImageLibraryOwnershipCapture,
+  syncImageLibraryMarker,
+} from "./imageLibraryFs"
+import {
   acquireInternalNotePathLease,
   type InternalNotePathLease,
 } from "./noteFiles"
@@ -28,7 +33,10 @@ export interface RenderedImage {
   readonly dataUrl: string
 }
 
-export type ImageLibraryPhase = "note-validated" | "image-read" | "thumbnail-rendered"
+export type ImageLibraryPhase =
+  | "note-validated"
+  | "image-read"
+  | "thumbnail-rendered"
 
 export interface ImageLibraryAdapter {
   chooseImages(): Promise<readonly string[] | undefined>
@@ -80,7 +88,7 @@ interface DirectoryIdentity {
 interface OwnedArtifact {
   readonly kind: "file" | "directory"
   readonly path: string
-  readonly identity: FileIdentity | DirectoryIdentity
+  readonly identity?: FileIdentity | DirectoryIdentity
   readonly parent: DirectorySnapshot
 }
 
@@ -352,9 +360,40 @@ async function createOrInspectDirectory(
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw failed("无法创建图片库目录。")
   }
+  if (created) {
+    let initialDetails: BigIntStats
+    try {
+      initialDetails = await captureImageLibraryPathIdentity(path)
+    } catch {
+      owned.push({ kind: "directory", path, parent })
+      throw failed("无法确认新建图片库目录的身份。")
+    }
+    if (initialDetails.isSymbolicLink() || !initialDetails.isDirectory()) {
+      owned.push({ kind: "directory", path, parent })
+      throw unsafe()
+    }
+    owned.push({
+      kind: "directory",
+      path,
+      identity: directoryIdentity(initialDetails),
+      parent,
+    })
+    try {
+      completeImageLibraryOwnershipCapture(path)
+    } catch {
+      throw failed("新建图片库目录验证未能完成。")
+    }
+  }
   const inspected = await inspectDirectory(path, parent.canonical)
   if (created) {
-    owned.push({ kind: "directory", path, identity: inspected.identity, parent })
+    const registered = owned.at(-1)
+    if (
+      registered?.path !== path ||
+      registered.identity === undefined ||
+      !sameDirectoryIdentity(registered.identity as DirectoryIdentity, inspected.identity)
+    ) {
+      throw changed("新建图片库目录在验证过程中发生变化。")
+    }
     try {
       await adapter.syncDirectory?.(parent.canonical)
     } catch {
@@ -558,6 +597,8 @@ async function createOrVerifyMarker(
 ): Promise<FileSnapshot> {
   let handle: Awaited<ReturnType<typeof open>> | undefined
   let created: FileSnapshot | undefined
+  let createdPath = false
+  let ownershipRegistered = false
   try {
     await verifyDirectory(library.canonical, library.canonical, library)
     // O_EXCL is the strongest portable final-component creation primitive;
@@ -567,21 +608,30 @@ async function createOrVerifyMarker(
         ? "wx"
         : constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW
     handle = await open(path, flags, 0o600)
-    await handle.sync()
+    createdPath = true
     const opened = await handle.stat({ bigint: true })
-    if (!opened.isFile() || opened.size !== 0n) throw changed()
+    if (!opened.isFile() || opened.size !== 0n) {
+      owned.push({ kind: "file", path, parent: library })
+      ownershipRegistered = true
+      throw changed()
+    }
+    owned.push({ kind: "file", path, identity: fileIdentity(opened), parent: library })
+    ownershipRegistered = true
+    await syncImageLibraryMarker(handle)
     await handle.close()
     handle = undefined
     created = await verifyMarker(path, library)
     if (!sameFileIdentity(created.identity, fileIdentity(opened))) throw changed()
-    owned.push({ kind: "file", path, identity: created.identity, parent: library })
     await adapter.syncDirectory?.(library.canonical)
   } catch (error) {
     await handle?.close().catch(() => undefined)
     handle = undefined
-    if (created !== undefined) {
+    if (createdPath) {
+      if (!ownershipRegistered) owned.push({ kind: "file", path, parent: library })
       if (isImageError(error)) throw error
-      throw failed("无法安全同步图片库占位文件。")
+      throw failed(
+        created === undefined ? "无法确认图片库占位文件的身份。" : "无法安全同步图片库占位文件。",
+      )
     }
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
       if (isImageError(error)) throw error
@@ -710,6 +760,10 @@ async function cleanupOwnedArtifacts(
 ): Promise<AppError> {
   const warnings: Array<{ readonly code: string; readonly message: string }> = []
   for (const artifact of [...artifacts].reverse()) {
+    if (artifact.identity === undefined) {
+      warnings.push({ code: "CLEANUP_UNCERTAIN", message: "新建项目身份无法确认，未执行路径删除。" })
+      continue
+    }
     try {
       await verifyDirectory(artifact.parent.canonical, artifact.parent.canonical, artifact.parent)
       const current = await lstat(artifact.path, { bigint: true }).catch((error) => {

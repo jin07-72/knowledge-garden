@@ -32,6 +32,40 @@ const leaseProbe = vi.hoisted(() => ({
   releaseError: undefined as unknown,
 }))
 
+const ownershipFault = vi.hoisted(() => ({
+  path: undefined as string | undefined,
+  afterCapturePath: undefined as string | undefined,
+  markerSync: false,
+}))
+
+vi.mock("../../src/main/services/imageLibraryFs", async (load) => {
+  const actual = await load<typeof import("../../src/main/services/imageLibraryFs")>()
+  return {
+    ...actual,
+    async captureImageLibraryPathIdentity(path: string) {
+      if (path === ownershipFault.path) {
+        ownershipFault.path = undefined
+        throw Object.assign(new Error("injected identity failure"), { code: "EIO" })
+      }
+      return actual.captureImageLibraryPathIdentity(path)
+    },
+    completeImageLibraryOwnershipCapture(path: string) {
+      if (path === ownershipFault.afterCapturePath) {
+        ownershipFault.afterCapturePath = undefined
+        throw new Error("injected post-identity inspection failure")
+      }
+      return actual.completeImageLibraryOwnershipCapture(path)
+    },
+    async syncImageLibraryMarker(handle: Parameters<typeof actual.syncImageLibraryMarker>[0]) {
+      if (ownershipFault.markerSync) {
+        ownershipFault.markerSync = false
+        throw Object.assign(new Error("injected marker sync failure"), { code: "EIO" })
+      }
+      return actual.syncImageLibraryMarker(handle)
+    },
+  }
+})
+
 vi.mock("../../src/main/services/noteFiles", async (load) => {
   const actual = await load<typeof import("../../src/main/services/noteFiles")>()
   return {
@@ -168,6 +202,9 @@ beforeEach(() => {
   leaseProbe.acquireError = undefined
   leaseProbe.assertError = undefined
   leaseProbe.releaseError = undefined
+  ownershipFault.path = undefined
+  ownershipFault.afterCapturePath = undefined
+  ownershipFault.markerSync = false
 })
 
 afterEach(async () => {
@@ -822,6 +859,63 @@ describe("note-scoped image library", () => {
     await expect(lstat(join(setup.root, "content", "_assets"))).rejects.toMatchObject({
       code: "ENOENT",
     })
+  })
+
+  it("removes an identity-known marker when sync fails in a pre-existing slug directory", async () => {
+    const setup = await fixture()
+    await mkdir(setup.libraryPath, { recursive: true })
+    ownershipFault.markerSync = true
+    const service = createImageLibraryService({ workspace: setup.root, adapter: adapter() })
+    await expectCode(service.open({ path: "content/life/daily.md" }), "IMAGE_LIBRARY_FAILED")
+    await expect(lstat(join(setup.libraryPath, ".gitkeep"))).rejects.toMatchObject({ code: "ENOENT" })
+    expect(await readdir(setup.libraryPath)).toEqual([])
+  })
+
+  it("retains a replaced marker and reports cleanup uncertainty after marker sync failure", async () => {
+    const setup = await fixture()
+    await mkdir(setup.libraryPath, { recursive: true })
+    const marker = join(setup.libraryPath, ".gitkeep")
+    const service = createImageLibraryService({
+      workspace: setup.root,
+      adapter: adapter({
+        syncDirectory: async (path) => {
+          if (path !== setup.libraryPath) return
+          await rm(marker)
+          await writeFile(marker, "external")
+          throw new Error("marker sync failed after replacement")
+        },
+      }),
+    })
+    const error = await service.open({ path: "content/life/daily.md" }).catch((caught) => caught)
+    expect(error).toMatchObject({
+      code: "IMAGE_LIBRARY_FAILED",
+      details: { cleanupWarnings: expect.any(Array) },
+    })
+    expect(await readFile(marker, "utf8")).toBe("external")
+    expect(JSON.stringify(error)).not.toContain(setup.root)
+  })
+
+  it("removes a created directory when later canonical inspection fails", async () => {
+    const setup = await fixture()
+    const assets = join(setup.root, "content", "_assets")
+    ownershipFault.afterCapturePath = assets
+    const service = createImageLibraryService({ workspace: setup.root, adapter: adapter() })
+    await expectCode(service.open({ path: "content/life/daily.md" }), "IMAGE_LIBRARY_FAILED")
+    await expect(lstat(assets)).rejects.toMatchObject({ code: "ENOENT" })
+  })
+
+  it("does not delete by unresolved path when immediate directory identity capture fails", async () => {
+    const setup = await fixture()
+    const assets = join(setup.root, "content", "_assets")
+    ownershipFault.path = assets
+    const service = createImageLibraryService({ workspace: setup.root, adapter: adapter() })
+    const error = await service.open({ path: "content/life/daily.md" }).catch((caught) => caught)
+    expect(error).toMatchObject({
+      code: "IMAGE_LIBRARY_FAILED",
+      details: { cleanupWarnings: expect.any(Array) },
+    })
+    expect((await lstat(assets)).isDirectory()).toBe(true)
+    expect(JSON.stringify(error)).not.toContain(setup.root)
   })
 
   it("retains external content and replacements while rolling back owned artifacts", async () => {
