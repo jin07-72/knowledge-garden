@@ -167,6 +167,8 @@ async function removeOwnedStage(path: string, proof: DirectoryProof, allowedName
         if (children.some((entry) => !entry.isFile() || entry.isSymbolicLink() || !allowedNames.has(key(entry.name)))) return false
       }
     }
+    const final = await lstat(path, { bigint: true })
+    if (!final.isDirectory() || final.isSymbolicLink() || final.dev !== proof.dev || final.ino !== proof.ino || final.birthtimeNs !== proof.birthtimeNs) return false
     await rm(path, { recursive: true })
     return true
   } catch { return false }
@@ -226,7 +228,13 @@ export function createImageImportManager(options: { workspace: string; adapter: 
     async inspect() {
       const root = join(options.workspace, ".garden-publisher", "image-import")
       let entries
-      try { entries = await readdir(root, { withFileTypes: true }) } catch (caught) {
+      try {
+        const details = await lstat(root, { bigint: true })
+        const canonical = await realpath(root)
+        const equal = process.platform === "win32" ? canonical.toLowerCase() === root.toLowerCase() : canonical === root
+        if (details.isSymbolicLink() || !details.isDirectory() || !equal) throw new Error("unsafe")
+        entries = await readdir(root, { withFileTypes: true })
+      } catch (caught) {
         if ((caught as NodeJS.ErrnoException).code === "ENOENT") return
         throw failed("无法检查图片导入恢复状态。", true)
       }
