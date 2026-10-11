@@ -24,7 +24,8 @@ const IMAGE_FORMATS: readonly FormatDefinition[] = Object.freeze([
   Object.freeze({ extension: ".avif", mime: "image/avif", signature: "avif" }),
 ])
 
-const AVIF_HEADER_LIMIT = 512
+// Product validation bound: compatible-brand parsing never scans more than one 64 KiB ftyp box.
+const AVIF_MAX_FTYP_BOX_BYTES = 64 * 1024
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f-\u009f]/
 const UNSAFE_WINDOWS_NAME_PATTERN = /[<>:"/\\|?*]/
 const WINDOWS_DEVICE_NAME_PATTERN =
@@ -57,18 +58,34 @@ function uint32(bytes: Uint8Array, offset: number): number {
   )
 }
 
+function uint64(bytes: Uint8Array, offset: number): number | undefined {
+  const high = uint32(bytes, offset)
+  if (high > 0x1f_ffff) return undefined
+  return high * 0x1_0000_0000 + uint32(bytes, offset + 4)
+}
+
 function isAvif(bytes: Uint8Array): boolean {
   if (bytes.length < 16 || !hasAscii(bytes, 4, "ftyp")) return false
-  const boxSize = uint32(bytes, 0)
+  const shortSize = uint32(bytes, 0)
+  const extended = shortSize === 1
+  if (extended && bytes.length < 24) return false
+  const boxSize = shortSize === 0 ? bytes.length : extended ? uint64(bytes, 8) : shortSize
+  if (boxSize === undefined) return false
+  const majorBrandOffset = extended ? 16 : 8
+  const compatibleBrandsOffset = extended ? 24 : 16
   if (
-    boxSize < 16 ||
-    boxSize > AVIF_HEADER_LIMIT ||
+    boxSize < compatibleBrandsOffset ||
+    boxSize > AVIF_MAX_FTYP_BOX_BYTES ||
     boxSize > bytes.length ||
-    (boxSize - 16) % 4 !== 0
+    (boxSize - compatibleBrandsOffset) % 4 !== 0
   )
     return false
-  if (hasAscii(bytes, 8, "avif") || hasAscii(bytes, 8, "avis")) return true
-  for (let offset = 16; offset < boxSize; offset += 4) {
+  if (
+    hasAscii(bytes, majorBrandOffset, "avif") ||
+    hasAscii(bytes, majorBrandOffset, "avis")
+  )
+    return true
+  for (let offset = compatibleBrandsOffset; offset < boxSize; offset += 4) {
     if (hasAscii(bytes, offset, "avif") || hasAscii(bytes, offset, "avis")) return true
   }
   return false
@@ -143,7 +160,8 @@ export function markdownForImage(slug: string, name: string): string {
   if (format === undefined) throw invalidImage()
   const stem = safeName.slice(0, -format.extension.length)
   const alt = stem.replace(/\\/g, "\\\\").replace(/\[/g, "\\[").replace(/\]/g, "\\]")
-  return `![${alt}](<../_assets/${slug}/${safeName}>)`
+  const destinationName = safeName.replace(/%/g, "%25").replace(/#/g, "%23")
+  return `![${alt}](<../_assets/${slug}/${destinationName}>)`
 }
 
 export function imageDataUrl(mime: ImageFormat["mime"], bytes: Uint8Array): string {

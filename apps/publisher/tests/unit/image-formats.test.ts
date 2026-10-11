@@ -15,6 +15,8 @@ const ascii = (value: string) => Uint8Array.from(Buffer.from(value, "ascii"))
 const bytes = (...values: number[]) => Uint8Array.from(values)
 const append = (...parts: readonly Uint8Array[]) =>
   Uint8Array.from(parts.flatMap((part) => [...part]))
+const uint32Bytes = (value: number) =>
+  bytes((value >>> 24) & 0xff, (value >>> 16) & 0xff, (value >>> 8) & 0xff, value & 0xff)
 
 function avifHeader(
   majorBrand: "avif" | "avis" | "mif1" = "avif",
@@ -24,6 +26,22 @@ function avifHeader(
   return append(
     bytes((size >>> 24) & 0xff, (size >>> 16) & 0xff, (size >>> 8) & 0xff, size & 0xff),
     ascii("ftyp"),
+    ascii(majorBrand),
+    bytes(0, 0, 0, 0),
+    ...compatibleBrands.map(ascii),
+  )
+}
+
+function extendedAvifHeader(
+  majorBrand: "avif" | "avis" | "mif1" = "avif",
+  compatibleBrands: readonly string[] = [],
+): Uint8Array {
+  const size = 24 + compatibleBrands.length * 4
+  return append(
+    uint32Bytes(1),
+    ascii("ftyp"),
+    uint32Bytes(Math.floor(size / 0x1_0000_0000)),
+    uint32Bytes(size),
     ascii(majorBrand),
     bytes(0, 0, 0, 0),
     ...compatibleBrands.map(ascii),
@@ -70,6 +88,14 @@ describe("image format detection", () => {
     })
   })
 
+  it("detects signatures in Uint8Array views with a nonzero byte offset", () => {
+    const backing = bytes(0xaa, 0xbb, 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xcc)
+    expect(detectImageFormat(backing.subarray(2, 10), "offset.png")).toEqual({
+      extension: ".png",
+      mime: "image/png",
+    })
+  })
+
   it("rejects truncated and near-match signatures", () => {
     for (const [name, header] of [
       ["photo.png", bytes(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a)],
@@ -90,7 +116,37 @@ describe("image format detection", () => {
     expectInvalid(() => detectImageFormat(png, "photo"))
   })
 
-  it("accepts AVIF brands only inside a valid bounded leading ftyp box", () => {
+  it("accepts normal, extended-size, and box-to-end AVIF ftyp layouts", () => {
+    const normalOver512 = avifHeader(
+      "mif1",
+      Array.from({ length: 126 }, (_, index) => (index === 125 ? "avif" : "miaf")),
+    )
+    const extended = extendedAvifHeader("mif1", ["miaf", "avis"])
+    const toEnd = avifHeader("mif1", ["avif"])
+    toEnd.set(uint32Bytes(0), 0)
+
+    expect(normalOver512).toHaveLength(520)
+    for (const header of [normalOver512, extended, toEnd])
+      expect(detectImageFormat(header, "photo.avif")).toEqual({
+        extension: ".avif",
+        mime: "image/avif",
+      })
+  })
+
+  it("finds a compatible AVIF brand near the 64 KiB validation bound", () => {
+    const compatibleBrands = Array.from({ length: 16_380 }, (_, index) =>
+      index === 16_379 ? "avif" : "miaf",
+    )
+    const header = avifHeader("mif1", compatibleBrands)
+
+    expect(header).toHaveLength(64 * 1024)
+    expect(detectImageFormat(header, "bounded.avif")).toEqual({
+      extension: ".avif",
+      mime: "image/avif",
+    })
+  })
+
+  it("rejects AVIF brands outside the declared leading ftyp box", () => {
     const strayBrand = append(
       bytes(0, 0, 0, 16),
       ascii("free"),
@@ -105,21 +161,41 @@ describe("image format detection", () => {
       bytes(0, 0, 0, 0),
       ascii("avif"),
     )
-    const oversizedBox = append(
-      bytes(0, 0, 2, 4),
+    for (const header of [strayBrand, outOfBoundsBrand])
+      expectInvalid(() => detectImageFormat(header, "photo.avif"))
+  })
+
+  it("rejects truncated, undersized, and unaligned AVIF ftyp boxes", () => {
+    const normalTruncated = avifHeader("mif1", ["avif"])
+    normalTruncated.set(uint32Bytes(normalTruncated.length + 4), 0)
+    const extendedTruncated = extendedAvifHeader("mif1", ["avif"])
+    extendedTruncated.set(uint32Bytes(extendedTruncated.length + 4), 12)
+    const undersized = append(uint32Bytes(12), ascii("ftyp"), ascii("avif"), bytes(0, 0, 0, 0))
+    const unaligned = append(
+      uint32Bytes(17),
       ascii("ftyp"),
       ascii("avif"),
-      bytes(0, 0, 0, 0),
-      new Uint8Array(500),
+      bytes(0, 0, 0, 0, 0),
     )
-    const invalidSize = append(
-      bytes(0, 0, 0, 12),
+
+    for (const header of [normalTruncated, extendedTruncated, undersized, unaligned])
+      expectInvalid(() => detectImageFormat(header, "photo.avif"))
+  })
+
+  it("rejects AVIF ftyp boxes beyond the product bound or safe integer range", () => {
+    const beyondBound = new Uint8Array(64 * 1024 + 4)
+    beyondBound.set(uint32Bytes(beyondBound.length), 0)
+    beyondBound.set(ascii("ftyp"), 4)
+    beyondBound.set(ascii("avif"), 8)
+    const unsafeExtendedSize = append(
+      uint32Bytes(1),
       ascii("ftyp"),
+      bytes(0x00, 0x20, 0x00, 0x00, 0, 0, 0, 0),
       ascii("avif"),
       bytes(0, 0, 0, 0),
     )
 
-    for (const header of [strayBrand, outOfBoundsBrand, oversizedBox, invalidSize])
+    for (const header of [beyondBound, unsafeExtendedSize])
       expectInvalid(() => detectImageFormat(header, "photo.avif"))
   })
 })
@@ -207,6 +283,18 @@ describe("image Markdown and data URLs", () => {
     expectInvalid(() => markdownForImage("garden-log", "draft \\[one].png"))
   })
 
+  it.each([
+    ["cover#draft.png", "![cover#draft](<../_assets/garden-log/cover%23draft.png>)"],
+    ["cover%20draft.png", "![cover%20draft](<../_assets/garden-log/cover%2520draft.png>)"],
+    ["%ZZ.png", "![%ZZ](<../_assets/garden-log/%25ZZ.png>)"],
+  ])("round-trips reserved destination characters in %s", (name, expected) => {
+    const markdown = markdownForImage("garden-log", name)
+    expect(markdown).toBe(expected)
+    const encodedName = /\/([^/]*)>\)$/.exec(markdown)?.[1]
+    expect(encodedName).toBeDefined()
+    expect(decodeURIComponent(encodedName!)).toBe(name)
+  })
+
   it("rejects invalid slugs and unsafe image names", () => {
     for (const slug of ["", "Garden-Log", "garden_log", "-garden", "garden--log", "../garden"])
       expectInvalid(() => markdownForImage(slug, "photo.png"))
@@ -219,6 +307,13 @@ describe("image Markdown and data URLs", () => {
     )
     expect(imageDataUrl("image/jpeg", bytes(0xff, 0xd8, 0xff))).toBe(
       "data:image/jpeg;base64,/9j/",
+    )
+  })
+
+  it("encodes only the selected bytes from a nonzero-offset Uint8Array view", () => {
+    const backing = bytes(0xaa, 0x00, 0xff, 0x10, 0x80, 0xbb)
+    expect(imageDataUrl("image/png", backing.subarray(1, 5))).toBe(
+      "data:image/png;base64,AP8QgA==",
     )
   })
 })
