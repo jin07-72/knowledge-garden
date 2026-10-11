@@ -42,6 +42,7 @@ export type ImageLibraryPhase =
   | "thumbnail-rendered"
   | "import-staged"
   | "import-backed-up"
+  | "import-before-publish"
   | "import-published"
   | "import-marker-removed"
 
