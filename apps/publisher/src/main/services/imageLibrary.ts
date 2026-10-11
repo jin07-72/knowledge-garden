@@ -10,11 +10,14 @@ import {
   MANAGED_NOTE_PATH_PATTERN,
   type AppError,
   type ImageLibraryItem,
+  type ImageLibraryCommitRequest,
+  type ImageLibrarySelection,
   type ImageLibraryView,
   type NotePathRequest,
 } from "../../shared/contracts"
 import { MAX_MARKDOWN_UTF8_BYTES } from "../../shared/ipcSchemas"
 import { detectImageFormat, markdownForImage } from "./imageFormats"
+import { createImageImportManager, isImageLibraryImportError } from "./imageLibraryImport"
 import {
   captureImageLibraryPathIdentity,
   completeImageLibraryOwnershipCapture,
@@ -37,6 +40,10 @@ export type ImageLibraryPhase =
   | "note-validated"
   | "image-read"
   | "thumbnail-rendered"
+  | "import-staged"
+  | "import-backed-up"
+  | "import-published"
+  | "import-marker-removed"
 
 export interface ImageLibraryAdapter {
   chooseImages(): Promise<readonly string[] | undefined>
@@ -50,6 +57,8 @@ export interface ImageLibraryAdapter {
 
 export interface ImageLibraryService {
   open(request: NotePathRequest): Promise<ImageLibraryView>
+  select(request: NotePathRequest): Promise<ImageLibrarySelection>
+  commit(request: ImageLibraryCommitRequest): Promise<ImageLibraryView>
   dispose(): Promise<void>
 }
 
@@ -815,11 +824,19 @@ export function createImageLibraryService(options: {
   adapter: ImageLibraryAdapter
 }): ImageLibraryService {
   let disposed = false
-  const active = new Set<Promise<ImageLibraryView>>()
+  let internalOpen = false
+  const active = new Set<Promise<unknown>>()
+  const imports = createImageImportManager(options)
 
-  return {
+  function track<T>(operation: Promise<T>): Promise<T> {
+    active.add(operation)
+    void operation.then(() => active.delete(operation), () => active.delete(operation))
+    return operation
+  }
+
+  const service: ImageLibraryService = {
     open(request: NotePathRequest): Promise<ImageLibraryView> {
-      if (disposed) return Promise.reject(failed("图片库服务已关闭。"))
+      if (disposed && !internalOpen) return Promise.reject(failed("图片库服务已关闭。"))
       const operation = (async (): Promise<ImageLibraryView> => {
         const parsed = parseNotePath(request.path)
         const workspace = await canonicalWorkspace(options.workspace)
@@ -896,17 +913,44 @@ export function createImageLibraryService(options: {
         await releaseLocks(leases, primaryError)
         return result!
       })()
-      active.add(operation)
-      void operation.then(
-        () => active.delete(operation),
-        () => active.delete(operation),
-      )
-      return operation
+      return track(operation)
+    },
+
+    select(request: NotePathRequest): Promise<ImageLibrarySelection> {
+      if (disposed) return Promise.reject(failed("图片库服务已关闭。"))
+      return track(imports.select(request, () => {
+        internalOpen = true
+        try { return service.open(request) } finally { internalOpen = false }
+      }))
+    },
+
+    commit(request: ImageLibraryCommitRequest): Promise<ImageLibraryView> {
+      if (disposed) return Promise.reject(failed("图片库服务已关闭。"))
+      return track((async () => {
+        const parsed = parseNotePath(request.path)
+        const workspace = await canonicalWorkspace(options.workspace)
+        const leases = await acquireLocks(workspace, [parsed.path, parsed.attachmentPath])
+        let primary: unknown
+        try {
+          await assertLocks(leases)
+          await imports.commit(request)
+          await assertLocks(leases)
+        } catch (caught) {
+          primary = isImageLibraryImportError(caught)
+            ? imageError(caught.code, caught.message, caught.details)
+            : caught
+        }
+        await releaseLocks(leases, primary)
+        internalOpen = true
+        try { return await service.open(request) } finally { internalOpen = false }
+      })())
     },
 
     async dispose(): Promise<void> {
       disposed = true
       await Promise.allSettled([...active])
+      imports.clear()
     },
   }
+  return service
 }
