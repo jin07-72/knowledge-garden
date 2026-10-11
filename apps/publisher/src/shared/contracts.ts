@@ -491,6 +491,16 @@ export interface NotePathRequest {
   readonly path: string
 }
 
+export const IMAGE_LIBRARY_MAX_NAME_LENGTH = 255
+export const IMAGE_LIBRARY_MAX_ITEMS = 500
+export const IMAGE_LIBRARY_MAX_SELECTION_ITEMS = 50
+export const IMAGE_LIBRARY_MAX_THUMBNAIL_DATA_URL_LENGTH = 512 * 1024
+export const IMAGE_LIBRARY_MAX_PREVIEW_DATA_URL_LENGTH = 36 * 1024 * 1024
+export const IMAGE_LIBRARY_MAX_THUMBNAIL_DECODED_BYTES = 512 * 1024
+export const IMAGE_LIBRARY_MAX_PREVIEW_DECODED_BYTES = 36 * 1024 * 1024
+export const IMAGE_LIBRARY_MAX_GALLERY_THUMBNAIL_TOTAL_LENGTH = 16 * 1024 * 1024
+export const IMAGE_LIBRARY_MAX_SELECTION_THUMBNAIL_TOTAL_LENGTH = 8 * 1024 * 1024
+
 export interface ImageLibraryItem {
   readonly name: string
   readonly sizeBytes: number
@@ -506,12 +516,21 @@ export interface ImageLibraryView {
   readonly images: readonly ImageLibraryItem[]
 }
 
-export interface ImageLibrarySelection {
-  readonly selectionId?: string
-  readonly images: readonly (ImageLibraryItem & { readonly conflict: boolean })[]
-  readonly conflicts: readonly string[]
-  readonly cancelled: boolean
-}
+type ImageLibrarySelectedItem = ImageLibraryItem & { readonly conflict: boolean }
+
+export type ImageLibrarySelection =
+  | {
+      readonly cancelled: true
+      readonly selectionId?: never
+      readonly images: readonly []
+      readonly conflicts: readonly []
+    }
+  | {
+      readonly cancelled: false
+      readonly selectionId: string
+      readonly images: readonly [ImageLibrarySelectedItem, ...ImageLibrarySelectedItem[]]
+      readonly conflicts: readonly string[]
+    }
 
 export interface ImageLibraryPreview extends Omit<ImageLibraryItem, "thumbnailDataUrl"> {
   readonly dataUrl: string

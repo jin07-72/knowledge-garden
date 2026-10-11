@@ -115,7 +115,9 @@ function gardenApi(): GardenApi {
     },
     images: {
       open: vi.fn(async ({ path }) => ok({ path, images: [] })),
-      select: vi.fn(async () => ok({ images: [], conflicts: [], cancelled: true as const })),
+      select: vi.fn(async () =>
+        ok({ images: [] as const, conflicts: [] as const, cancelled: true as const }),
+      ),
       commit: vi.fn(async ({ path }) => ok({ path, images: [] })),
       preview: vi.fn(),
       delete: vi.fn(async ({ path }) => ok({ path, images: [] })),

@@ -1,5 +1,16 @@
 import { describe, expect, it } from "vitest"
-import { IPC_CHANNELS } from "../../src/shared/contracts"
+import {
+  IMAGE_LIBRARY_MAX_GALLERY_THUMBNAIL_TOTAL_LENGTH,
+  IMAGE_LIBRARY_MAX_ITEMS,
+  IMAGE_LIBRARY_MAX_NAME_LENGTH,
+  IMAGE_LIBRARY_MAX_PREVIEW_DATA_URL_LENGTH,
+  IMAGE_LIBRARY_MAX_PREVIEW_DECODED_BYTES,
+  IMAGE_LIBRARY_MAX_SELECTION_ITEMS,
+  IMAGE_LIBRARY_MAX_SELECTION_THUMBNAIL_TOTAL_LENGTH,
+  IMAGE_LIBRARY_MAX_THUMBNAIL_DATA_URL_LENGTH,
+  IMAGE_LIBRARY_MAX_THUMBNAIL_DECODED_BYTES,
+  IPC_CHANNELS,
+} from "../../src/shared/contracts"
 import {
   IPC_SUCCESS_SCHEMAS,
   appErrorSchema,
@@ -110,6 +121,11 @@ const imageItem = {
   contentHash: "c".repeat(64),
   thumbnailDataUrl: "data:image/webp;base64,AAAA",
   markdown: "![garden](garden.webp)",
+}
+
+function imageDataUrlNearLimit(limit: number): string {
+  const prefix = "data:image/png;base64,"
+  return prefix + "A".repeat(Math.floor((limit - prefix.length) / 4) * 4)
 }
 
 const validByChannel: Record<string, unknown> = {
@@ -264,6 +280,18 @@ const validByChannel: Record<string, unknown> = {
 }
 
 describe("image library IPC schemas", () => {
+  it("exports shared image library count and payload limits", () => {
+    expect(IMAGE_LIBRARY_MAX_NAME_LENGTH).toBe(255)
+    expect(IMAGE_LIBRARY_MAX_ITEMS).toBe(500)
+    expect(IMAGE_LIBRARY_MAX_SELECTION_ITEMS).toBe(50)
+    expect(IMAGE_LIBRARY_MAX_THUMBNAIL_DATA_URL_LENGTH).toBe(512 * 1024)
+    expect(IMAGE_LIBRARY_MAX_PREVIEW_DATA_URL_LENGTH).toBe(36 * 1024 * 1024)
+    expect(IMAGE_LIBRARY_MAX_THUMBNAIL_DECODED_BYTES).toBe(512 * 1024)
+    expect(IMAGE_LIBRARY_MAX_PREVIEW_DECODED_BYTES).toBe(36 * 1024 * 1024)
+    expect(IMAGE_LIBRARY_MAX_GALLERY_THUMBNAIL_TOTAL_LENGTH).toBe(16 * 1024 * 1024)
+    expect(IMAGE_LIBRARY_MAX_SELECTION_THUMBNAIL_TOTAL_LENGTH).toBe(8 * 1024 * 1024)
+  })
+
   it("defines one allowlisted request channel for every image capability", () => {
     expect({
       open: IPC_CHANNELS.requests.imagesOpen,
@@ -339,6 +367,45 @@ describe("image library IPC schemas", () => {
     ).toBe(false)
   })
 
+  it("allows only supported image extensions and Windows-safe non-device names", () => {
+    const request = (name: string) =>
+      imageLibraryItemRequestSchema.safeParse({ path: "content/life/daily.md", name }).success
+
+    for (const name of [
+      "photo.png",
+      "photo.JPG",
+      "photo.JpEg",
+      "animation.gif",
+      "photo.webp",
+      "photo.AVIF",
+    ])
+      expect(request(name), name).toBe(true)
+
+    for (const name of [
+      "photo.svg",
+      "photo.png.exe",
+      "photo",
+      "bad<name.png",
+      "bad:name.png",
+      'bad"name.png',
+      "bad|name.png",
+      "bad?name.png",
+      "bad*name.png",
+      "trailing .png ",
+      "trailing..png.",
+      "CON.png",
+      "con.backup.png",
+      "PRN.JPG",
+      "aux.gif",
+      "NUL.webp",
+      "com1.avif",
+      "COM9.png",
+      "lpt1.jpeg",
+      "LPT9.gif",
+    ])
+      expect(request(name), name).toBe(false)
+  })
+
   it("requires an exact content hash for permanent deletion requests", () => {
     const request = {
       path: "content/life/daily.md",
@@ -401,6 +468,24 @@ describe("image library IPC schemas", () => {
     ).toBe(false)
   })
 
+  it("bounds aggregate encoded thumbnails in gallery responses", () => {
+    const schema = IPC_SUCCESS_SCHEMAS[IPC_CHANNELS.requests.imagesOpen]
+    const thumbnailDataUrl = imageDataUrlNearLimit(512 * 1024)
+    const makeImages = (count: number) =>
+      Array.from({ length: count }, (_, index) => ({
+        ...imageItem,
+        name: `${index}.png`,
+        thumbnailDataUrl,
+      }))
+
+    expect(
+      schema.safeParse({ path: "content/life/daily.md", images: makeImages(32) }).success,
+    ).toBe(true)
+    expect(
+      schema.safeParse({ path: "content/life/daily.md", images: makeImages(33) }).success,
+    ).toBe(false)
+  })
+
   it("enforces cancelled and active image selection invariants", () => {
     const schema = IPC_SUCCESS_SCHEMAS[IPC_CHANNELS.requests.imagesSelect]
 
@@ -429,12 +514,96 @@ describe("image library IPC schemas", () => {
     }
     expect(schema.safeParse(selected).success).toBe(true)
     expect(schema.safeParse({ ...selected, selectionId: undefined }).success).toBe(false)
+    expect(schema.safeParse({ ...selected, images: [] }).success).toBe(false)
+    expect(
+      schema.safeParse({ ...selected, images: [selected.images[0], selected.images[0]] }).success,
+    ).toBe(false)
+    expect(
+      schema.safeParse({
+        ...selected,
+        images: [{ ...selected.images[0], conflict: true }],
+        conflicts: [],
+      }).success,
+    ).toBe(false)
+    expect(schema.safeParse({ ...selected, conflicts: ["garden.webp"] }).success).toBe(false)
+
+    const conflictedImages = [
+      { ...imageItem, name: "first.png", conflict: true },
+      { ...imageItem, name: "middle.png", conflict: false },
+      { ...imageItem, name: "last.png", conflict: true },
+    ]
+    expect(
+      schema.safeParse({
+        ...selected,
+        images: conflictedImages,
+        conflicts: ["first.png", "last.png"],
+      }).success,
+    ).toBe(true)
+    expect(
+      schema.safeParse({
+        ...selected,
+        images: conflictedImages,
+        conflicts: ["last.png", "first.png"],
+      }).success,
+    ).toBe(false)
     expect(schema.safeParse({ ...selected, images: Array(51).fill(selected.images[0]) }).success).toBe(
       false,
     )
     expect(schema.safeParse({ ...selected, conflicts: Array(51).fill("hero.png") }).success).toBe(
       false,
     )
+  })
+
+  it("bounds aggregate encoded thumbnails in active selections", () => {
+    const schema = IPC_SUCCESS_SCHEMAS[IPC_CHANNELS.requests.imagesSelect]
+    const thumbnailDataUrl = imageDataUrlNearLimit(512 * 1024)
+    const makeImages = (count: number) =>
+      Array.from({ length: count }, (_, index) => ({
+        ...imageItem,
+        name: `${index}.png`,
+        thumbnailDataUrl,
+        conflict: false,
+      }))
+    const selection = {
+      cancelled: false as const,
+      selectionId: "11111111-1111-4111-8111-111111111111",
+      conflicts: [],
+    }
+
+    expect(schema.safeParse({ ...selection, images: makeImages(16) }).success).toBe(true)
+    expect(schema.safeParse({ ...selection, images: makeImages(17) }).success).toBe(false)
+  })
+
+  it("requires canonical padded Base64 in image data URLs", () => {
+    const gallery = IPC_SUCCESS_SCHEMAS[IPC_CHANNELS.requests.imagesOpen]
+    const previewSchema = IPC_SUCCESS_SCHEMAS[IPC_CHANNELS.requests.imagesPreview]
+    const { thumbnailDataUrl: _thumbnail, ...previewItem } = imageItem
+
+    for (const payload of ["A", "AAA", "AAAA=", "A===", "AA=A", "AB==", "AAB=", "AAAA\n"]) {
+      expect(
+        gallery.safeParse({
+          path: "content/life/daily.md",
+          images: [{ ...imageItem, thumbnailDataUrl: `data:image/png;base64,${payload}` }],
+        }).success,
+        payload,
+      ).toBe(false)
+      expect(
+        previewSchema.safeParse({
+          ...previewItem,
+          dataUrl: `data:image/png;base64,${payload}`,
+        }).success,
+        payload,
+      ).toBe(false)
+    }
+    for (const payload of ["AA==", "AAA=", "AAAA"]) {
+      expect(
+        gallery.safeParse({
+          path: "content/life/daily.md",
+          images: [{ ...imageItem, thumbnailDataUrl: `data:image/png;base64,${payload}` }],
+        }).success,
+        payload,
+      ).toBe(true)
+    }
   })
 
   it("accepts only bounded image preview data URLs and strips source paths", () => {

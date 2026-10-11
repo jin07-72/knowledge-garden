@@ -1,6 +1,15 @@
 import { z } from "zod"
 import {
   APP_ERROR_CODES,
+  IMAGE_LIBRARY_MAX_GALLERY_THUMBNAIL_TOTAL_LENGTH,
+  IMAGE_LIBRARY_MAX_ITEMS,
+  IMAGE_LIBRARY_MAX_NAME_LENGTH,
+  IMAGE_LIBRARY_MAX_PREVIEW_DATA_URL_LENGTH,
+  IMAGE_LIBRARY_MAX_PREVIEW_DECODED_BYTES,
+  IMAGE_LIBRARY_MAX_SELECTION_ITEMS,
+  IMAGE_LIBRARY_MAX_SELECTION_THUMBNAIL_TOTAL_LENGTH,
+  IMAGE_LIBRARY_MAX_THUMBNAIL_DATA_URL_LENGTH,
+  IMAGE_LIBRARY_MAX_THUMBNAIL_DECODED_BYTES,
   IPC_CHANNELS,
   KEBAB_SLUG_SOURCE,
   MANAGED_NOTE_PATH_PATTERN,
@@ -149,19 +158,63 @@ const hashSchema = z.string().regex(/^[a-f0-9]{64}$/)
 const imageNameSchema = z
   .string()
   .min(1)
-  .max(255)
+  .max(IMAGE_LIBRARY_MAX_NAME_LENGTH)
   .refine((value) => value !== "." && value !== "..")
-  .refine((value) => !/[\\/]/.test(value))
+  .refine((value) => !/[<>:"/\\|?*]/.test(value))
   .refine((value) => !controlCharacterPattern.test(value))
-  .refine((value) => !value.includes(">"))
-const imageDataUrlSchema = (maxLength: number) =>
-  z
-    .string()
-    .max(maxLength)
-    .regex(/^data:image\/(?:png|jpeg|gif|webp|avif);base64,[A-Za-z0-9+/]+={0,2}$/)
-const thumbnailDataUrlSchema = imageDataUrlSchema(512 * 1024)
-const previewDataUrlSchema = imageDataUrlSchema(36 * 1024 * 1024)
-const uniqueImageNames = (names: readonly string[]) => new Set(names).size === names.length
+  .refine((value) => !/[. ]$/.test(value))
+  .refine((value) => !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(value))
+  .regex(/\.(?:png|jpe?g|gif|webp|avif)$/i)
+const imageDataUrlHeaderPattern = /^data:image\/(?:png|jpeg|gif|webp|avif);base64,/
+const base64Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+function hasCanonicalBase64Padding(payload: string): boolean {
+  if (payload.endsWith("==")) return (base64Alphabet.indexOf(payload.at(-3)!) & 0x0f) === 0
+  if (payload.endsWith("=")) return (base64Alphabet.indexOf(payload.at(-2)!) & 0x03) === 0
+  return true
+}
+function canonicalBase64Payload(value: string): string | undefined {
+  const header = imageDataUrlHeaderPattern.exec(value)?.[0]
+  if (header === undefined) return undefined
+  const payload = value.slice(header.length)
+  if (payload.length === 0 || payload.length % 4 !== 0) return undefined
+  const padding = payload.endsWith("==") ? 2 : payload.endsWith("=") ? 1 : 0
+  const encodedLength = payload.length - padding
+  for (let index = 0; index < encodedLength; index += 1)
+    if (!base64Alphabet.includes(payload[index])) return undefined
+  for (let index = encodedLength; index < payload.length; index += 1)
+    if (payload[index] !== "=") return undefined
+  return hasCanonicalBase64Padding(payload) ? payload : undefined
+}
+function decodedBase64ByteLength(payload: string): number {
+  const padding = payload.endsWith("==") ? 2 : payload.endsWith("=") ? 1 : 0
+  return (payload.length / 4) * 3 - padding
+}
+const imageDataUrlSchema = (maxLength: number, maxDecodedBytes: number) =>
+  z.string().superRefine((value, context) => {
+    if (value.length > maxLength) {
+      context.addIssue({ code: "custom", message: "Image data URL exceeds the encoded limit." })
+      return
+    }
+    const payload = canonicalBase64Payload(value)
+    if (payload === undefined) {
+      context.addIssue({ code: "custom", message: "Image data URL is not canonical Base64." })
+      return
+    }
+    if (decodedBase64ByteLength(payload) > maxDecodedBytes)
+      context.addIssue({ code: "custom", message: "Image data exceeds the decoded byte limit." })
+  })
+const thumbnailDataUrlSchema = imageDataUrlSchema(
+  IMAGE_LIBRARY_MAX_THUMBNAIL_DATA_URL_LENGTH,
+  IMAGE_LIBRARY_MAX_THUMBNAIL_DECODED_BYTES,
+)
+const previewDataUrlSchema = imageDataUrlSchema(
+  IMAGE_LIBRARY_MAX_PREVIEW_DATA_URL_LENGTH,
+  IMAGE_LIBRARY_MAX_PREVIEW_DECODED_BYTES,
+)
+const uniqueImageNames = (names: readonly string[]) =>
+  new Set(names.map((name) => name.toLowerCase())).size === names.length
+const totalThumbnailLength = (images: readonly { readonly thumbnailDataUrl: string }[]) =>
+  images.reduce((total, image) => total + image.thumbnailDataUrl.length, 0)
 
 export const imageLibraryPathRequestSchema = z.object({ path: managedNotePathSchema }).strict()
 export const imageLibraryItemRequestSchema = z
@@ -178,7 +231,7 @@ export const imageLibraryCommitRequestSchema = z
   .object({
     path: managedNotePathSchema,
     selectionId: z.string().uuid(),
-    overwrite: z.array(imageNameSchema).max(50),
+    overwrite: z.array(imageNameSchema).max(IMAGE_LIBRARY_MAX_SELECTION_ITEMS),
   })
   .strict()
   .refine(({ overwrite }) => uniqueImageNames(overwrite), { path: ["overwrite"] })
@@ -197,9 +250,14 @@ const imageLibraryItemSchema = z
 const imageLibraryViewSchema = z
   .object({
     path: managedNotePathSchema,
-    images: z.array(imageLibraryItemSchema).max(500),
+    images: z.array(imageLibraryItemSchema).max(IMAGE_LIBRARY_MAX_ITEMS),
   })
   .strip()
+  .refine(
+    ({ images }) =>
+      totalThumbnailLength(images) <= IMAGE_LIBRARY_MAX_GALLERY_THUMBNAIL_TOTAL_LENGTH,
+    { path: ["images"] },
+  )
 const selectedImageLibraryItemSchema = imageLibraryItemSchema.extend({ conflict: z.boolean() })
 const imageLibrarySelectionSchema = z.discriminatedUnion("cancelled", [
   z
@@ -215,10 +273,31 @@ const imageLibrarySelectionSchema = z.discriminatedUnion("cancelled", [
     .object({
       cancelled: z.literal(false),
       selectionId: z.string().uuid(),
-      images: z.array(selectedImageLibraryItemSchema).max(50),
-      conflicts: z.array(imageNameSchema).max(50).refine(uniqueImageNames),
+      images: z.array(selectedImageLibraryItemSchema).min(1).max(IMAGE_LIBRARY_MAX_SELECTION_ITEMS),
+      conflicts: z
+        .array(imageNameSchema)
+        .max(IMAGE_LIBRARY_MAX_SELECTION_ITEMS)
+        .refine(uniqueImageNames),
     })
-    .strip(),
+    .strip()
+    .refine(({ images }) => uniqueImageNames(images.map(({ name }) => name)), {
+      path: ["images"],
+    })
+    .refine(
+      ({ images }) =>
+        totalThumbnailLength(images) <= IMAGE_LIBRARY_MAX_SELECTION_THUMBNAIL_TOTAL_LENGTH,
+      { path: ["images"] },
+    )
+    .refine(
+      ({ images, conflicts }) => {
+        const expected = images.filter(({ conflict }) => conflict).map(({ name }) => name)
+        return (
+          expected.length === conflicts.length &&
+          expected.every((name, index) => conflicts[index] === name)
+        )
+      },
+      { path: ["conflicts"] },
+    ),
 ])
 const imageLibraryPreviewSchema = z
   .object({
