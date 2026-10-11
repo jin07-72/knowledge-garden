@@ -402,6 +402,12 @@ describe("image library IPC schemas", () => {
       "COM9.png",
       "lpt1.jpeg",
       "LPT9.gif",
+      "COM¹.png",
+      "com².JPG",
+      "CoM³.gif",
+      "LPT¹.webp",
+      "lpt².AVIF",
+      "LpT³.jpeg",
     ])
       expect(request(name), name).toBe(false)
   })
@@ -572,6 +578,71 @@ describe("image library IPC schemas", () => {
 
     expect(schema.safeParse({ ...selection, images: makeImages(16) }).success).toBe(true)
     expect(schema.safeParse({ ...selection, images: makeImages(17) }).success).toBe(false)
+  })
+
+  it("rejects oversized raw thumbnail arrays before detailed item access", () => {
+    const thumbnailDataUrl = imageDataUrlNearLimit(512 * 1024)
+    let detailedReads = 0
+    const makeImages = (count: number, selection: boolean) =>
+      Array.from({ length: count }, (_, index) => {
+        const item: Record<string, unknown> = {
+          ...imageItem,
+          name: `${index}.png`,
+          thumbnailDataUrl,
+          ...(selection ? { conflict: false } : {}),
+        }
+        if (index === 0)
+          Object.defineProperty(item, "name", {
+            enumerable: true,
+            get: () => {
+              detailedReads += 1
+              throw new Error("detailed item schema ran")
+            },
+          })
+        return item
+      })
+
+    const gallery = IPC_SUCCESS_SCHEMAS[IPC_CHANNELS.requests.imagesOpen]
+    let galleryResult: ReturnType<typeof gallery.safeParse> | undefined
+    expect(() => {
+      galleryResult = gallery.safeParse({
+        path: "content/life/daily.md",
+        images: makeImages(33, false),
+      })
+    }).not.toThrow()
+    expect(galleryResult?.success).toBe(false)
+    expect(detailedReads).toBe(0)
+
+    const selection = IPC_SUCCESS_SCHEMAS[IPC_CHANNELS.requests.imagesSelect]
+    let selectionResult: ReturnType<typeof selection.safeParse> | undefined
+    expect(() => {
+      selectionResult = selection.safeParse({
+        cancelled: false,
+        selectionId: "11111111-1111-4111-8111-111111111111",
+        images: makeImages(17, true),
+        conflicts: [],
+      })
+    }).not.toThrow()
+    expect(selectionResult?.success).toBe(false)
+    expect(detailedReads).toBe(0)
+
+    const accessorItem = { ...imageItem }
+    Object.defineProperty(accessorItem, "thumbnailDataUrl", {
+      enumerable: true,
+      get: () => {
+        detailedReads += 1
+        throw new Error("thumbnail getter ran")
+      },
+    })
+    let accessorResult: ReturnType<typeof gallery.safeParse> | undefined
+    expect(() => {
+      accessorResult = gallery.safeParse({
+        path: "content/life/daily.md",
+        images: [accessorItem],
+      })
+    }).not.toThrow()
+    expect(accessorResult?.success).toBe(false)
+    expect(detailedReads).toBe(0)
   })
 
   it("requires canonical padded Base64 in image data URLs", () => {

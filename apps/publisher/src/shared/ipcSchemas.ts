@@ -163,9 +163,13 @@ const imageNameSchema = z
   .refine((value) => !/[<>:"/\\|?*]/.test(value))
   .refine((value) => !controlCharacterPattern.test(value))
   .refine((value) => !/[. ]$/.test(value))
-  .refine((value) => !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(value))
+  .refine(
+    (value) =>
+      !/^(?:con|prn|aux|nul|com(?:[1-9]|[¹²³])|lpt(?:[1-9]|[¹²³]))(?:\.|$)/i.test(value),
+  )
   .regex(/\.(?:png|jpe?g|gif|webp|avif)$/i)
 const imageDataUrlHeaderPattern = /^data:image\/(?:png|jpeg|gif|webp|avif);base64,/
+const base64PayloadPattern = /^[A-Za-z0-9+/]*={0,2}$/
 const base64Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 function hasCanonicalBase64Padding(payload: string): boolean {
   if (payload.endsWith("==")) return (base64Alphabet.indexOf(payload.at(-3)!) & 0x0f) === 0
@@ -176,13 +180,12 @@ function canonicalBase64Payload(value: string): string | undefined {
   const header = imageDataUrlHeaderPattern.exec(value)?.[0]
   if (header === undefined) return undefined
   const payload = value.slice(header.length)
-  if (payload.length === 0 || payload.length % 4 !== 0) return undefined
-  const padding = payload.endsWith("==") ? 2 : payload.endsWith("=") ? 1 : 0
-  const encodedLength = payload.length - padding
-  for (let index = 0; index < encodedLength; index += 1)
-    if (!base64Alphabet.includes(payload[index])) return undefined
-  for (let index = encodedLength; index < payload.length; index += 1)
-    if (payload[index] !== "=") return undefined
+  if (
+    payload.length === 0 ||
+    payload.length % 4 !== 0 ||
+    !base64PayloadPattern.test(payload)
+  )
+    return undefined
   return hasCanonicalBase64Padding(payload) ? payload : undefined
 }
 function decodedBase64ByteLength(payload: string): number {
@@ -215,6 +218,33 @@ const uniqueImageNames = (names: readonly string[]) =>
   new Set(names.map((name) => name.toLowerCase())).size === names.length
 const totalThumbnailLength = (images: readonly { readonly thumbnailDataUrl: string }[]) =>
   images.reduce((total, image) => total + image.thumbnailDataUrl.length, 0)
+const missingDataProperty = Symbol("missing-data-property")
+function ownDataProperty(value: object, key: PropertyKey): unknown | typeof missingDataProperty {
+  const descriptor = Object.getOwnPropertyDescriptor(value, key)
+  return descriptor !== undefined && "value" in descriptor ? descriptor.value : missingDataProperty
+}
+function hasRawThumbnailBudget(value: unknown, maxCount: number, maxTotalLength: number): boolean {
+  try {
+    if (typeof value !== "object" || value === null) return false
+    const images = ownDataProperty(value, "images")
+    if (!Array.isArray(images)) return false
+    const length = ownDataProperty(images, "length")
+    if (typeof length !== "number" || !Number.isSafeInteger(length) || length > maxCount)
+      return false
+    let totalLength = 0
+    for (let index = 0; index < length; index += 1) {
+      const item = ownDataProperty(images, index)
+      if (typeof item !== "object" || item === null) return false
+      const thumbnail = ownDataProperty(item, "thumbnailDataUrl")
+      if (typeof thumbnail !== "string") return false
+      totalLength += thumbnail.length
+      if (totalLength > maxTotalLength) return false
+    }
+    return true
+  } catch {
+    return false
+  }
+}
 
 export const imageLibraryPathRequestSchema = z.object({ path: managedNotePathSchema }).strict()
 export const imageLibraryItemRequestSchema = z
@@ -247,7 +277,7 @@ const imageLibraryItemSchema = z
     markdown: z.string().min(1).max(2_048),
   })
   .strip()
-const imageLibraryViewSchema = z
+const imageLibraryViewDetailedSchema = z
   .object({
     path: managedNotePathSchema,
     images: z.array(imageLibraryItemSchema).max(IMAGE_LIBRARY_MAX_ITEMS),
@@ -258,47 +288,75 @@ const imageLibraryViewSchema = z
       totalThumbnailLength(images) <= IMAGE_LIBRARY_MAX_GALLERY_THUMBNAIL_TOTAL_LENGTH,
     { path: ["images"] },
   )
+const imageLibraryViewSchema = z
+  .unknown()
+  .refine(
+    (value) =>
+      hasRawThumbnailBudget(
+        value,
+        IMAGE_LIBRARY_MAX_ITEMS,
+        IMAGE_LIBRARY_MAX_GALLERY_THUMBNAIL_TOTAL_LENGTH,
+      ),
+    { path: ["images"] },
+  )
+  .pipe(imageLibraryViewDetailedSchema)
 const selectedImageLibraryItemSchema = imageLibraryItemSchema.extend({ conflict: z.boolean() })
-const imageLibrarySelectionSchema = z.discriminatedUnion("cancelled", [
-  z
-    .object({
-      cancelled: z.literal(true),
-      selectionId: z.undefined().optional(),
-      images: z.array(selectedImageLibraryItemSchema).max(0),
-      conflicts: z.array(imageNameSchema).max(0),
-    })
-    .strip()
-    .refine((selection) => !Object.prototype.hasOwnProperty.call(selection, "selectionId")),
-  z
-    .object({
-      cancelled: z.literal(false),
-      selectionId: z.string().uuid(),
-      images: z.array(selectedImageLibraryItemSchema).min(1).max(IMAGE_LIBRARY_MAX_SELECTION_ITEMS),
-      conflicts: z
-        .array(imageNameSchema)
-        .max(IMAGE_LIBRARY_MAX_SELECTION_ITEMS)
-        .refine(uniqueImageNames),
-    })
-    .strip()
-    .refine(({ images }) => uniqueImageNames(images.map(({ name }) => name)), {
-      path: ["images"],
-    })
-    .refine(
-      ({ images }) =>
-        totalThumbnailLength(images) <= IMAGE_LIBRARY_MAX_SELECTION_THUMBNAIL_TOTAL_LENGTH,
-      { path: ["images"] },
-    )
-    .refine(
-      ({ images, conflicts }) => {
-        const expected = images.filter(({ conflict }) => conflict).map(({ name }) => name)
-        return (
-          expected.length === conflicts.length &&
-          expected.every((name, index) => conflicts[index] === name)
+const imageLibrarySelectionSchema = z
+  .unknown()
+  .refine(
+    (value) =>
+      hasRawThumbnailBudget(
+        value,
+        IMAGE_LIBRARY_MAX_SELECTION_ITEMS,
+        IMAGE_LIBRARY_MAX_SELECTION_THUMBNAIL_TOTAL_LENGTH,
+      ),
+    { path: ["images"] },
+  )
+  .pipe(
+    z.discriminatedUnion("cancelled", [
+      z
+        .object({
+          cancelled: z.literal(true),
+          selectionId: z.undefined().optional(),
+          images: z.array(selectedImageLibraryItemSchema).max(0),
+          conflicts: z.array(imageNameSchema).max(0),
+        })
+        .strip()
+        .refine((selection) => !Object.prototype.hasOwnProperty.call(selection, "selectionId")),
+      z
+        .object({
+          cancelled: z.literal(false),
+          selectionId: z.string().uuid(),
+          images: z
+            .array(selectedImageLibraryItemSchema)
+            .min(1)
+            .max(IMAGE_LIBRARY_MAX_SELECTION_ITEMS),
+          conflicts: z
+            .array(imageNameSchema)
+            .max(IMAGE_LIBRARY_MAX_SELECTION_ITEMS)
+            .refine(uniqueImageNames),
+        })
+        .strip()
+        .refine(({ images }) => uniqueImageNames(images.map(({ name }) => name)), {
+          path: ["images"],
+        })
+        .refine(
+          ({ images }) =>
+            totalThumbnailLength(images) <= IMAGE_LIBRARY_MAX_SELECTION_THUMBNAIL_TOTAL_LENGTH,
+          { path: ["images"] },
         )
-      },
-      { path: ["conflicts"] },
-    ),
-])
+        .refine(
+          ({ images, conflicts }) => {
+            const expected = images.filter(({ conflict }) => conflict).map(({ name }) => name)
+            return (
+              expected.length === conflicts.length &&
+              expected.every((name, index) => conflicts[index] === name)
+            )
+          },
+          { path: ["conflicts"] },
+        ),
+    ]),
+  )
 const imageLibraryPreviewSchema = z
   .object({
     name: imageNameSchema,
