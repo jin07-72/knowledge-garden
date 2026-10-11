@@ -838,6 +838,7 @@ export function createImageLibraryService(options: {
     open(request: NotePathRequest): Promise<ImageLibraryView> {
       if (disposed && !internalOpen) return Promise.reject(failed("图片库服务已关闭。"))
       const operation = (async (): Promise<ImageLibraryView> => {
+        await imports.inspect()
         const parsed = parseNotePath(request.path)
         const workspace = await canonicalWorkspace(options.workspace)
         const initialNote = await noteSnapshot(workspace, parsed)
