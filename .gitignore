@@ -1,5 +1,6 @@
 .worktrees/
 .superpowers/
+.garden-publisher/
 .DS_Store
 .gitignore
 node_modules
