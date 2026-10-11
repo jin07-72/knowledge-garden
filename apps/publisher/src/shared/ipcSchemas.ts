@@ -209,7 +209,8 @@ const imageLibrarySelectionSchema = z.discriminatedUnion("cancelled", [
       images: z.array(selectedImageLibraryItemSchema).max(0),
       conflicts: z.array(imageNameSchema).max(0),
     })
-    .strip(),
+    .strip()
+    .refine((selection) => !Object.prototype.hasOwnProperty.call(selection, "selectionId")),
   z
     .object({
       cancelled: z.literal(false),

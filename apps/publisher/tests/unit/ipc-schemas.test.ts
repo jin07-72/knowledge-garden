@@ -408,6 +408,14 @@ describe("image library IPC schemas", () => {
     expect(
       schema.safeParse({
         cancelled: true,
+        selectionId: undefined,
+        images: [],
+        conflicts: [],
+      }).success,
+    ).toBe(false)
+    expect(
+      schema.safeParse({
+        cancelled: true,
         selectionId: "11111111-1111-4111-8111-111111111111",
         images: [],
         conflicts: [],
