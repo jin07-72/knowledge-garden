@@ -208,6 +208,16 @@ describe("image import transactions", () => {
     expect(selected).toMatchObject({ cancelled: false, conflicts: ["photo.png"], images: [{ conflict: true }] })
   })
 
+  it("rejects a late unsupported direct child during leased conflict preflight", async () => {
+    const fixture = await setup(); const source = join(fixture.root, "photo.png"); await writeFile(source, PNG)
+    const configured = adapter([source]); configured.renderThumbnail = async () => {
+      await mkdir(fixture.library, { recursive: true }); await writeFile(join(fixture.library, "intruder.txt"), "bad")
+      return { width: 2, height: 3, dataUrl: THUMBNAIL }
+    }
+    const service = createImageLibraryService({ workspace: fixture.root, adapter: configured })
+    await expect(service.select({ path: "content/life/daily.md" })).rejects.toMatchObject({ code: expect.stringMatching(/^IMAGE_LIBRARY_/) })
+  })
+
   it("expires tokens at exactly five minutes and evicts the deterministic oldest of nine", async () => {
     const fixture = await setup(); const source = join(fixture.root, "photo.png"); await writeFile(source, PNG)
     let clock = 0
