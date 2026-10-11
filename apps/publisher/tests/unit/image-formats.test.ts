@@ -7,6 +7,10 @@ import {
   type ImageFormat,
 } from "../../src/main/services/imageFormats"
 
+// @ts-expect-error Image extensions and MIME types must remain exact pairs.
+const mismatchedImageFormat: ImageFormat = { extension: ".png", mime: "image/jpeg" }
+void mismatchedImageFormat
+
 const ascii = (value: string) => Uint8Array.from(Buffer.from(value, "ascii"))
 const bytes = (...values: number[]) => Uint8Array.from(values)
 const append = (...parts: readonly Uint8Array[]) =>

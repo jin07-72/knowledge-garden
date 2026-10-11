@@ -4,10 +4,13 @@ import {
   type AppError,
 } from "../../shared/contracts"
 
-export interface ImageFormat {
-  readonly extension: ".png" | ".jpg" | ".jpeg" | ".gif" | ".webp" | ".avif"
-  readonly mime: "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/avif"
-}
+export type ImageFormat =
+  | { readonly extension: ".png"; readonly mime: "image/png" }
+  | { readonly extension: ".jpg"; readonly mime: "image/jpeg" }
+  | { readonly extension: ".jpeg"; readonly mime: "image/jpeg" }
+  | { readonly extension: ".gif"; readonly mime: "image/gif" }
+  | { readonly extension: ".webp"; readonly mime: "image/webp" }
+  | { readonly extension: ".avif"; readonly mime: "image/avif" }
 
 type Signature = "png" | "jpeg" | "gif" | "webp" | "avif"
 type FormatDefinition = ImageFormat & { readonly signature: Signature }
@@ -91,6 +94,23 @@ function formatForName(name: string): FormatDefinition | undefined {
   return IMAGE_FORMATS.find(({ extension }) => lowerName.endsWith(extension))
 }
 
+function imageFormat(format: FormatDefinition): ImageFormat {
+  switch (format.extension) {
+    case ".png":
+      return { extension: format.extension, mime: format.mime }
+    case ".jpg":
+      return { extension: format.extension, mime: format.mime }
+    case ".jpeg":
+      return { extension: format.extension, mime: format.mime }
+    case ".gif":
+      return { extension: format.extension, mime: format.mime }
+    case ".webp":
+      return { extension: format.extension, mime: format.mime }
+    case ".avif":
+      return { extension: format.extension, mime: format.mime }
+  }
+}
+
 export function normalizeImageName(name: string): string {
   const format = formatForName(name)
   if (
@@ -113,7 +133,7 @@ export function detectImageFormat(bytes: Uint8Array, name: string): ImageFormat 
   const safeName = normalizeImageName(name)
   const format = formatForName(safeName)
   if (format === undefined || !matchesSignature(bytes, format.signature)) throw invalidImage()
-  return { extension: format.extension, mime: format.mime }
+  return imageFormat(format)
 }
 
 export function markdownForImage(slug: string, name: string): string {
