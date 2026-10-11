@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto"
 import { constants, type BigIntStats, type Dirent } from "node:fs"
 import { basename, isAbsolute, join, relative, resolve } from "node:path"
-import { link, lstat, mkdir, open, opendir, readdir, realpath, rename, rmdir, rm, unlink } from "node:fs/promises"
+import { link, lstat, mkdir, open, opendir, readdir, realpath, rmdir, rm, unlink } from "node:fs/promises"
 import {
   IMAGE_LIBRARY_MAX_SELECTION_ITEMS,
   IMAGE_LIBRARY_MAX_SELECTION_THUMBNAIL_TOTAL_LENGTH,
@@ -36,7 +36,8 @@ interface Source { path: string; identity: Identity; hash: string; item: ImageLi
 interface FileProof { identity: Identity; hash: string }
 interface LibraryEntry extends FileProof { name: string; type: "file" }
 type LibraryManifest = readonly LibraryEntry[]
-interface Session { id: string; path: string; created: number; sources: readonly Source[]; conflicts: readonly string[]; note: { identity: Identity; hash: string }; library: LibraryManifest }
+interface LibraryDirectoryProof { canonical: string; identity: DirectoryProof }
+interface Session { id: string; path: string; created: number; sources: readonly Source[]; conflicts: readonly string[]; note: { identity: Identity; hash: string }; library: LibraryManifest; libraryDirectory: LibraryDirectoryProof }
 
 function error(code: AppError["code"], message: string, cleanup = false): AppError {
   const result = (cleanup
@@ -111,8 +112,28 @@ async function verifyProof(path: string, expected: FileProof): Promise<Uint8Arra
   return current.bytes
 }
 
-async function readLibraryManifest(path: string): Promise<LibraryManifest> {
+async function inspectLibraryDirectory(path: string): Promise<LibraryDirectoryProof> {
   try {
+    const before = await lstat(path, { bigint: true })
+    if (before.isSymbolicLink() || !before.isDirectory()) throw changed("图片库目录已发生变化。")
+    const canonical = await realpath(path)
+    const after = await lstat(path, { bigint: true })
+    const proof = { dev: before.dev, ino: before.ino, birthtimeNs: before.birthtimeNs }
+    if (!pathsEqual(canonical, path) || after.isSymbolicLink() || !after.isDirectory() || after.dev !== proof.dev || after.ino !== proof.ino || after.birthtimeNs !== proof.birthtimeNs) throw changed("图片库目录已发生变化。")
+    return { canonical, identity: proof }
+  } catch (caught) {
+    if ((caught as AppError).code === "IMAGE_LIBRARY_CHANGED") throw caught
+    throw changed("图片库目录已发生变化。")
+  }
+}
+
+const sameLibraryDirectory = (left: LibraryDirectoryProof, right: LibraryDirectoryProof): boolean =>
+  pathsEqual(left.canonical, right.canonical) && left.identity.dev === right.identity.dev && left.identity.ino === right.identity.ino && left.identity.birthtimeNs === right.identity.birthtimeNs
+
+async function readLibraryManifest(path: string, expectedDirectory?: LibraryDirectoryProof): Promise<LibraryManifest> {
+  try {
+    const directoryBefore = await inspectLibraryDirectory(path)
+    if (expectedDirectory !== undefined && !sameLibraryDirectory(directoryBefore, expectedDirectory)) throw changed("图片库目录已发生变化。")
     const entries = await readdir(path, { withFileTypes: true })
     const manifest: Array<{ name: string; identity: Identity }> = []
     const result: LibraryEntry[] = []; const insensitive = new Set<string>()
@@ -137,9 +158,10 @@ async function readLibraryManifest(path: string): Promise<LibraryManifest> {
       const details = await lstat(join(path, entry.name), { bigint: true })
       if (!sameIdentity(identity(details), expected.identity)) throw changed()
     }
+    const directoryAfter = await inspectLibraryDirectory(path)
+    if (!sameLibraryDirectory(directoryBefore, directoryAfter) || (expectedDirectory !== undefined && !sameLibraryDirectory(directoryAfter, expectedDirectory))) throw changed("图片库目录已发生变化。")
     return result
   } catch (caught) {
-    if ((caught as NodeJS.ErrnoException).code === "ENOENT") return []
     if ((caught as AppError).code === "IMAGE_LIBRARY_CHANGED") throw caught
     throw changed()
   }
@@ -182,6 +204,41 @@ interface StageLedger {
   readonly root: { path: string; proof: DirectoryProof }
   readonly directories: Array<{ path: string; proof: DirectoryProof }>
   readonly files: Map<string, FileProof>
+}
+
+interface QuarantinedFile {
+  readonly backup: string
+  readonly target: string
+  readonly expected: FileProof
+  proof?: FileProof
+}
+
+async function restoreQuarantinedFile(item: QuarantinedFile, ledger: StageLedger | undefined): Promise<boolean> {
+  try {
+    const backup = await sourceSnapshot(item.backup)
+    const owned = item.proof === undefined
+      ? sameRenamedFile(backup.identity, item.expected.identity) && backup.hash === item.expected.hash
+      : sameIdentity(backup.identity, item.proof.identity) && backup.hash === item.proof.hash
+    if (!owned) return false
+    let targetExists = true
+    try { await lstat(item.target, { bigint: true }) } catch (caught) {
+      if ((caught as NodeJS.ErrnoException).code !== "ENOENT") return false
+      targetExists = false
+    }
+    if (targetExists) {
+      const target = await sourceSnapshot(item.target)
+      if (!sameIdentity(target.identity, backup.identity) || target.hash !== backup.hash || !sameRenamedFile(target.identity, item.expected.identity)) return false
+    } else {
+      try { await link(item.backup, item.target) } catch { return false }
+      const target = await sourceSnapshot(item.target)
+      const linkedBackup = await sourceSnapshot(item.backup)
+      if (!sameIdentity(target.identity, linkedBackup.identity) || target.hash !== item.expected.hash || !sameRenamedFile(target.identity, item.expected.identity)) return false
+    }
+    await unlink(item.backup)
+    ledger?.files.delete(item.backup)
+    const restored = await sourceSnapshot(item.target)
+    return sameRenamedFile(restored.identity, item.expected.identity) && restored.hash === item.expected.hash
+  } catch { return false }
 }
 
 async function cleanupOwnedStage(ledger: StageLedger): Promise<boolean> {
@@ -358,6 +415,7 @@ export function createImageImportManager(options: { workspace: string; adapter: 
       return withSelectionLeases(options.workspace, request.path, async () => {
       const notePath = join(options.workspace, ...request.path.split("/"))
       const noteSnapshot = await sourceSnapshot(notePath)
+      const libraryDirectory = await inspectLibraryDirectory(libraryPath(request.path))
       const seenSources = new Set<string>(), seenIdentities = new Set<string>(), seenNames = new Set<string>()
       const sources: Source[] = []; let thumbnails = 0
       for (const sourcePath of chosen) {
@@ -381,12 +439,12 @@ export function createImageImportManager(options: { workspace: string; adapter: 
         const item: ImageLibraryItem = { name, sizeBytes: snapshot.bytes.length, width: rendered.width, height: rendered.height, contentHash: snapshot.hash, thumbnailDataUrl: rendered.dataUrl, markdown: markdownForImage(request.path.split("/")[2]!.slice(0, -3), name) }
         sources.push({ path: sourcePath, identity: snapshot.identity, hash: snapshot.hash, item })
       }
-      const library = await readLibraryManifest(libraryPath(request.path))
+      const library = await readLibraryManifest(libraryPath(request.path), libraryDirectory)
       const existing = new Set(library.filter(({ name }) => name !== ".gitkeep").map(({ name }) => key(name)))
       const conflicts = sources.filter(({ item }) => existing.has(key(item.name))).map(({ item }) => item.name)
       expire()
       while (sessions.size >= MAX_SESSIONS) sessions.delete(sessions.keys().next().value!)
-      const id = randomUUID(); sessions.set(id, { id, path: request.path, created: now(), sources, conflicts, note: { identity: noteSnapshot.identity, hash: noteSnapshot.hash }, library })
+      const id = randomUUID(); sessions.set(id, { id, path: request.path, created: now(), sources, conflicts, note: { identity: noteSnapshot.identity, hash: noteSnapshot.hash }, library, libraryDirectory })
       return { cancelled: false, selectionId: id, images: sources.map(({ item }) => ({ ...item, conflict: existing.has(key(item.name)) })) as [ImageLibraryItem & { conflict: boolean }, ...(ImageLibraryItem & { conflict: boolean })[]], conflicts }
       })
     },
@@ -405,7 +463,7 @@ export function createImageImportManager(options: { workspace: string; adapter: 
       const currentNote = await sourceSnapshot(notePath)
       if (!sameIdentity(currentNote.identity, session.note.identity) || currentNote.hash !== session.note.hash) throw changed("笔记已发生变化，请重新选择图片。")
       const targetRoot = libraryPath(request.path)
-      const commitManifest = await readLibraryManifest(targetRoot)
+      const commitManifest = await readLibraryManifest(targetRoot, session.libraryDirectory)
       if (!sameLibraryManifest(commitManifest, session.library)) throw changed("图片库自选择后已发生变化。")
       const currentNames = commitManifest.filter(({ name }) => name !== ".gitkeep").map(({ name }) => name)
       const current = new Map(currentNames.map((name) => [key(name), name]))
@@ -423,9 +481,9 @@ export function createImageImportManager(options: { workspace: string; adapter: 
 
       const stageRoot = join(options.workspace, ".garden-publisher", "image-import", session.id)
       const staged = join(stageRoot, "new"), backups = join(stageRoot, "backup")
-      const published: Array<{ path: string; proof?: FileProof }> = []; const movedBackups: Array<{ backup: string; target: string; proof?: FileProof }> = []
+      const published: Array<{ path: string; proof?: FileProof }> = []; const movedBackups: QuarantinedFile[] = []
       let markerRemoved = false
-      let markerMove: { backup: string; target: string; proof?: FileProof } | undefined
+      let markerMove: QuarantinedFile | undefined
       let stageProof: DirectoryProof | undefined
       let manifestWriter: ManifestWriter | undefined
       let stageLedger: StageLedger | undefined
@@ -465,7 +523,7 @@ export function createImageImportManager(options: { workspace: string; adapter: 
         await options.adapter.syncDirectory?.(staged)
         manifest.phase = "staged"; await rewriteManifest(manifestWriter, manifest); stageLedger.files.set(manifestPath, manifestWriter.proof)
         await options.adapter.afterPhase?.("import-staged")
-        if (!sameLibraryManifest(await readLibraryManifest(targetRoot), session.library)) throw changed("图片库在暂存期间发生变化。")
+        if (!sameLibraryManifest(await readLibraryManifest(targetRoot, session.libraryDirectory), session.library)) throw changed("图片库在暂存期间发生变化。")
         let expectedWorking = [...session.library]
         for (const source of session.sources) {
           await exactFile(source.path, source)
@@ -475,20 +533,37 @@ export function createImageImportManager(options: { workspace: string; adapter: 
             const expected = targetProofs.get(key(source.item.name))!
             const before = await sourceSnapshot(existingTarget)
             if (!sameIdentity(before.identity, expected.identity) || before.hash !== expected.hash) throw changed("覆盖目标已发生变化，请重试。")
-            await rename(existingTarget, backup)
-            const moved = { backup, target: existingTarget, proof: undefined as FileProof | undefined }
+            await options.adapter.afterPhase?.("import-before-backup")
+            await verifyProof(existingTarget, expected)
+            try { await link(existingTarget, backup) } catch (caught) {
+              if ((caught as NodeJS.ErrnoException).code === "EEXIST") throw changed("覆盖目标备份位置已被占用。")
+              throw failed("无法安全备份覆盖目标。")
+            }
+            const moved: QuarantinedFile = { backup, target: existingTarget, expected }
             movedBackups.push(moved)
-            await captureImportPathIdentity(backup)
+            const captured = await captureImportPathIdentity(backup)
+            moved.proof = { identity: identity(captured), hash: expected.hash }
+            stageLedger.files.set(backup, moved.proof)
             const after = await sourceSnapshot(backup)
-            if (!sameRenamedFile(after.identity, expected.identity) || after.hash !== expected.hash) throw changed("覆盖目标在备份时发生变化。")
+            const linkedSource = await sourceSnapshot(existingTarget)
+            if (!sameRenamedFile(after.identity, expected.identity) || after.hash !== expected.hash || !sameIdentity(after.identity, linkedSource.identity)) throw changed("覆盖目标在备份时发生变化。")
             moved.proof = { identity: after.identity, hash: after.hash }; stageLedger.files.set(backup, moved.proof)
+            await options.adapter.syncDirectory?.(backups)
+            const durableBackup = await sourceSnapshot(backup)
+            const sourceBeforeUnlink = await sourceSnapshot(existingTarget)
+            if (!sameIdentity(durableBackup.identity, sourceBeforeUnlink.identity) || durableBackup.hash !== expected.hash || !sameRenamedFile(sourceBeforeUnlink.identity, expected.identity)) throw changed("覆盖目标在隔离前发生变化。")
+            moved.proof = { identity: durableBackup.identity, hash: durableBackup.hash }; stageLedger.files.set(backup, moved.proof)
+            await unlink(existingTarget)
+            const quarantined = await sourceSnapshot(backup)
+            if (!sameRenamedFile(quarantined.identity, expected.identity) || quarantined.hash !== expected.hash) throw changed("覆盖目标在隔离时发生变化。")
+            moved.proof = { identity: quarantined.identity, hash: quarantined.hash }; stageLedger.files.set(backup, moved.proof)
             expectedWorking = expectedWorking.filter((entry) => key(entry.name) !== key(source.item.name))
             await options.adapter.syncDirectory?.(backups); await options.adapter.syncDirectory?.(targetRoot)
             manifest.phase = "backed-up"; await rewriteManifest(manifestWriter, manifest); stageLedger.files.set(manifestPath, manifestWriter.proof)
             await options.adapter.afterPhase?.("import-backed-up")
           }
           await exactFile(source.path, source)
-          if (!sameLibraryManifest(await readLibraryManifest(targetRoot), sortLibraryManifest(expectedWorking))) throw changed("图片库在发布边界发生变化。")
+          if (!sameLibraryManifest(await readLibraryManifest(targetRoot, session.libraryDirectory), sortLibraryManifest(expectedWorking))) throw changed("图片库在发布边界发生变化。")
           await options.adapter.afterPhase?.("import-before-publish")
           const stagedPath = join(staged, source.item.name)
           const stagedProof = stageLedger.files.get(stagedPath)
@@ -521,23 +596,40 @@ export function createImageImportManager(options: { workspace: string; adapter: 
           if (!sameIdentity(finalTarget.identity, item.proof.identity) || finalTarget.hash !== item.proof.hash) throw changed("已发布图片发生变化。")
         }
         const expectedBeforeMarker = sortLibraryManifest(expectedWorking)
-        if (!sameLibraryManifest(await readLibraryManifest(targetRoot), expectedBeforeMarker)) throw changed("图片库发布结果与预期不一致。")
+        if (!sameLibraryManifest(await readLibraryManifest(targetRoot, session.libraryDirectory), expectedBeforeMarker)) throw changed("图片库发布结果与预期不一致。")
         const finalNote = await sourceSnapshot(notePath)
         if (!sameIdentity(finalNote.identity, session.note.identity) || finalNote.hash !== session.note.hash) throw changed("笔记已发生变化，请重新选择图片。")
         if (markerProof !== null) {
           await verifyProof(markerPath, markerProof)
           const backup = join(backups, ".gitkeep")
-          try { await rename(markerPath, backup) } catch { throw changed("图片库占位文件在移除前发生变化。") }
-          markerMove = { backup, target: markerPath, proof: undefined }; markerRemoved = true
-          await captureImportPathIdentity(backup)
+          await options.adapter.afterPhase?.("import-before-marker-backup")
+          await verifyProof(markerPath, markerProof)
+          try { await link(markerPath, backup) } catch (caught) {
+            if ((caught as NodeJS.ErrnoException).code === "EEXIST") throw changed("图片库占位文件备份位置已被占用。")
+            throw failed("无法安全备份图片库占位文件。")
+          }
+          markerMove = { backup, target: markerPath, expected: markerProof }; markerRemoved = true
+          const captured = await captureImportPathIdentity(backup)
+          markerMove.proof = { identity: identity(captured), hash: markerProof.hash }
+          stageLedger.files.set(backup, markerMove.proof)
           const movedMarker = await sourceSnapshot(backup)
-          if (!sameRenamedFile(movedMarker.identity, markerProof.identity) || movedMarker.hash !== markerProof.hash) throw changed("图片库占位文件备份身份无效。")
+          const linkedMarker = await sourceSnapshot(markerPath)
+          if (!sameRenamedFile(movedMarker.identity, markerProof.identity) || movedMarker.hash !== markerProof.hash || !sameIdentity(movedMarker.identity, linkedMarker.identity)) throw changed("图片库占位文件备份身份无效。")
           markerMove.proof = { identity: movedMarker.identity, hash: movedMarker.hash }; stageLedger.files.set(backup, markerMove.proof)
+          await options.adapter.syncDirectory?.(backups)
+          const durableMarkerBackup = await sourceSnapshot(backup)
+          const markerBeforeUnlink = await sourceSnapshot(markerPath)
+          if (!sameIdentity(durableMarkerBackup.identity, markerBeforeUnlink.identity) || durableMarkerBackup.hash !== markerProof.hash || !sameRenamedFile(markerBeforeUnlink.identity, markerProof.identity)) throw changed("图片库占位文件在隔离前发生变化。")
+          markerMove.proof = { identity: durableMarkerBackup.identity, hash: durableMarkerBackup.hash }; stageLedger.files.set(backup, markerMove.proof)
+          await unlink(markerPath)
+          const quarantinedMarker = await sourceSnapshot(backup)
+          if (!sameRenamedFile(quarantinedMarker.identity, markerProof.identity) || quarantinedMarker.hash !== markerProof.hash) throw changed("图片库占位文件在隔离时发生变化。")
+          markerMove.proof = { identity: quarantinedMarker.identity, hash: quarantinedMarker.hash }; stageLedger.files.set(backup, markerMove.proof)
         }
         manifest.phase = "marker-removed"; await rewriteManifest(manifestWriter, manifest); stageLedger.files.set(manifestPath, manifestWriter.proof)
         if (markerRemoved) await options.adapter.afterPhase?.("import-marker-removed")
         const expectedFinal = expectedBeforeMarker.filter(({ name }) => name !== ".gitkeep")
-        if (!sameLibraryManifest(await readLibraryManifest(targetRoot), expectedFinal)) throw changed("图片库最终状态与预期不一致。")
+        if (!sameLibraryManifest(await readLibraryManifest(targetRoot, session.libraryDirectory), expectedFinal)) throw changed("图片库最终状态与预期不一致。")
         await options.adapter.syncDirectory?.(targetRoot)
         await manifestWriter.handle.close(); manifestWriter = undefined
         if (!(await cleanupOwnedStage(stageLedger))) throw failed("无法确认图片导入暂存目录清理。", true)
@@ -557,39 +649,10 @@ export function createImageImportManager(options: { workspace: string; adapter: 
           } catch (failure) { if ((failure as NodeJS.ErrnoException).code !== "ENOENT") uncertain = true }
         }
         for (const item of [...movedBackups].reverse()) {
-          if (item.proof === undefined) { uncertain = true; continue }
-          try {
-            const backup = await sourceSnapshot(item.backup)
-            if (!sameIdentity(backup.identity, item.proof.identity) || backup.hash !== item.proof.hash) { uncertain = true; continue }
-          } catch { uncertain = true; continue }
-          try { await lstat(item.target); uncertain = true } catch (caught) {
-            if ((caught as NodeJS.ErrnoException).code === "ENOENT") {
-              try {
-                await rename(item.backup, item.target)
-                const restored = await sourceSnapshot(item.target)
-                if (!sameRenamedFile(restored.identity, item.proof.identity) || restored.hash !== item.proof.hash) uncertain = true
-                else stageLedger?.files.delete(item.backup)
-              } catch { uncertain = true }
-            } else uncertain = true
-          }
+          if (!(await restoreQuarantinedFile(item, stageLedger))) uncertain = true
         }
         if (markerMove !== undefined) {
-          if (markerMove.proof === undefined) uncertain = true
-          else {
-            try {
-              const backup = await sourceSnapshot(markerMove.backup)
-              if (!sameIdentity(backup.identity, markerMove.proof.identity) || backup.hash !== markerMove.proof.hash) uncertain = true
-              else {
-                await lstat(markerMove.target).then(() => { uncertain = true }, async (missing) => {
-                  if ((missing as NodeJS.ErrnoException).code !== "ENOENT") { uncertain = true; return }
-                  await rename(markerMove!.backup, markerMove!.target)
-                  const restored = await sourceSnapshot(markerMove!.target)
-                  if (!sameRenamedFile(restored.identity, markerMove!.proof!.identity) || restored.hash !== markerMove!.proof!.hash) uncertain = true
-                  else stageLedger?.files.delete(markerMove!.backup)
-                })
-              }
-            } catch { uncertain = true }
-          }
+          if (!(await restoreQuarantinedFile(markerMove, stageLedger))) uncertain = true
         }
         if (!uncertain && stageLedger !== undefined) uncertain = !(await cleanupOwnedStage(stageLedger))
         try { await options.adapter.syncDirectory?.(targetRoot); await options.adapter.syncDirectory?.(join(options.workspace, ".garden-publisher", "image-import")) } catch { uncertain = true }

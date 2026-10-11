@@ -41,9 +41,11 @@ export type ImageLibraryPhase =
   | "image-read"
   | "thumbnail-rendered"
   | "import-staged"
+  | "import-before-backup"
   | "import-backed-up"
   | "import-before-publish"
   | "import-published"
+  | "import-before-marker-backup"
   | "import-marker-removed"
 
 export interface ImageLibraryAdapter {
