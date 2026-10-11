@@ -86,6 +86,12 @@ export const APP_ERROR_CODES = [
   "RECOVERY_INVALID",
   "RECOVERY_CONFLICT",
   "RECOVERY_DISCARD_FAILED",
+  "IMAGE_LIBRARY_INVALID",
+  "IMAGE_LIBRARY_UNSAFE",
+  "IMAGE_LIBRARY_TOO_LARGE",
+  "IMAGE_LIBRARY_CONFLICT",
+  "IMAGE_LIBRARY_CHANGED",
+  "IMAGE_LIBRARY_FAILED",
   "TRANSACTION_PLAN_BLOCKED",
   "TRANSACTION_PLAN_INVALID",
   "TRANSACTION_PLAN_TOO_LARGE",
@@ -437,6 +443,12 @@ export const IPC_CHANNELS = {
     notesRecoveryGet: "garden:notes:recovery:get",
     notesRecoveryWrite: "garden:notes:recovery:write",
     notesRecoveryDiscard: "garden:notes:recovery:discard",
+    imagesOpen: "garden:images:open",
+    imagesSelect: "garden:images:select",
+    imagesCommit: "garden:images:commit",
+    imagesPreview: "garden:images:preview",
+    imagesDelete: "garden:images:delete",
+    imagesCopyMarkdown: "garden:images:copy-markdown",
     previewStart: "garden:preview:start",
     previewStop: "garden:preview:stop",
     previewStatus: "garden:preview:status",
@@ -477,6 +489,42 @@ export type IpcResult<T> =
 
 export interface NotePathRequest {
   readonly path: string
+}
+
+export interface ImageLibraryItem {
+  readonly name: string
+  readonly sizeBytes: number
+  readonly width: number
+  readonly height: number
+  readonly contentHash: string
+  readonly thumbnailDataUrl: string
+  readonly markdown: string
+}
+
+export interface ImageLibraryView {
+  readonly path: string
+  readonly images: readonly ImageLibraryItem[]
+}
+
+export interface ImageLibrarySelection {
+  readonly selectionId?: string
+  readonly images: readonly (ImageLibraryItem & { readonly conflict: boolean })[]
+  readonly conflicts: readonly string[]
+  readonly cancelled: boolean
+}
+
+export interface ImageLibraryPreview extends Omit<ImageLibraryItem, "thumbnailDataUrl"> {
+  readonly dataUrl: string
+}
+
+export interface ImageLibraryCommitRequest extends NotePathRequest {
+  readonly selectionId: string
+  readonly overwrite: readonly string[]
+}
+
+export interface ImageLibraryItemRequest extends NotePathRequest {
+  readonly name: string
+  readonly expectedContentHash?: string
 }
 
 export interface NoteDocument extends NotePathRequest {
@@ -642,6 +690,14 @@ export interface GardenApi {
       write(request: NoteRecoveryWriteRequest): Promise<IpcResult<NoteRecoveryReceipt>>
       discard(request: NoteRecoveryDiscardRequest): Promise<IpcResult<void>>
     }
+  }
+  readonly images: {
+    open(request: NotePathRequest): Promise<IpcResult<ImageLibraryView>>
+    select(request: NotePathRequest): Promise<IpcResult<ImageLibrarySelection>>
+    commit(request: ImageLibraryCommitRequest): Promise<IpcResult<ImageLibraryView>>
+    preview(request: ImageLibraryItemRequest): Promise<IpcResult<ImageLibraryPreview>>
+    delete(request: Required<ImageLibraryItemRequest>): Promise<IpcResult<ImageLibraryView>>
+    copyMarkdown(request: ImageLibraryItemRequest): Promise<IpcResult<void>>
   }
   readonly preview: {
     start(request?: PreviewStartRequest): Promise<IpcResult<PreviewStatus>>

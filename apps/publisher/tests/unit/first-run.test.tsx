@@ -337,6 +337,14 @@ describe("first-run diagnostics", () => {
         blogs: { list: listBlogs },
         workspace: { inspectSafety: inspect, inspect: vi.fn(), repair: vi.fn() },
         notes: { list },
+        images: {
+          open: vi.fn(),
+          select: vi.fn(),
+          commit: vi.fn(),
+          preview: vi.fn(),
+          delete: vi.fn(),
+          copyMarkdown: vi.fn(),
+        },
       } as unknown as GardenApi,
     })
 

@@ -26,6 +26,11 @@ import {
   type HistoryCancelRequest,
   type HistoryRequest,
   type HistoryLinkRequest,
+  type ImageLibraryCommitRequest,
+  type ImageLibraryItemRequest,
+  type ImageLibraryPreview,
+  type ImageLibrarySelection,
+  type ImageLibraryView,
   type IpcResult,
   type NoteCreateRequest,
   type NoteDocument,
@@ -209,6 +214,20 @@ export function createGardenApi(ipc: IpcRendererPort): GardenApi {
         invoke<void>(ipc, IPC_CHANNELS.requests.notesRecoveryDiscard, request),
     }),
   })
+  const images = Object.freeze({
+    open: (request: NotePathRequest) =>
+      invoke<ImageLibraryView>(ipc, IPC_CHANNELS.requests.imagesOpen, request),
+    select: (request: NotePathRequest) =>
+      invoke<ImageLibrarySelection>(ipc, IPC_CHANNELS.requests.imagesSelect, request),
+    commit: (request: ImageLibraryCommitRequest) =>
+      invoke<ImageLibraryView>(ipc, IPC_CHANNELS.requests.imagesCommit, request),
+    preview: (request: ImageLibraryItemRequest) =>
+      invoke<ImageLibraryPreview>(ipc, IPC_CHANNELS.requests.imagesPreview, request),
+    delete: (request: Required<ImageLibraryItemRequest>) =>
+      invoke<ImageLibraryView>(ipc, IPC_CHANNELS.requests.imagesDelete, request),
+    copyMarkdown: (request: ImageLibraryItemRequest) =>
+      invoke<void>(ipc, IPC_CHANNELS.requests.imagesCopyMarkdown, request),
+  })
   const preview = Object.freeze({
     start: (request?: PreviewStartRequest) =>
       invoke<PreviewStatus>(ipc, IPC_CHANNELS.requests.previewStart, request),
@@ -245,6 +264,7 @@ export function createGardenApi(ipc: IpcRendererPort): GardenApi {
     workspace,
     domains,
     notes,
+    images,
     preview,
     changes,
     publish,

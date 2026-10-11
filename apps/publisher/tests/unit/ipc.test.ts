@@ -661,8 +661,18 @@ describe("secure publisher IPC", () => {
   })
   it("registers only the explicit request allowlist", () => {
     const { ipc, dispose } = setup()
+    const reservedImageChannels = new Set<string>([
+      IPC_CHANNELS.requests.imagesOpen,
+      IPC_CHANNELS.requests.imagesSelect,
+      IPC_CHANNELS.requests.imagesCommit,
+      IPC_CHANNELS.requests.imagesPreview,
+      IPC_CHANNELS.requests.imagesDelete,
+      IPC_CHANNELS.requests.imagesCopyMarkdown,
+    ])
     expect([...ipc.handlers.keys()].sort()).toEqual(
-      [...Object.values(IPC_CHANNELS.requests)].sort(),
+      [...Object.values(IPC_CHANNELS.requests)]
+        .filter((channel) => !reservedImageChannels.has(channel))
+        .sort(),
     )
     expect(ipc.handlers.has("shell.exec")).toBe(false)
     expect(ipc.handlers.has("fs.readFile")).toBe(false)
@@ -1311,6 +1321,7 @@ describe("preload garden API", () => {
         "blogs",
         "changes",
         "history",
+        "images",
         "lifecycle",
         "domains",
         "notes",
@@ -1319,6 +1330,44 @@ describe("preload garden API", () => {
         "workspace",
       ].sort(),
     )
+  })
+
+  it("maps every image method to its exact allowlisted channel and request", async () => {
+    const ipc = new FakeIpcRenderer()
+    const api = createGardenApi(ipc)
+
+    const requests = {
+      open: { path: "content/life/a.md" },
+      select: { path: "content/life/a.md" },
+      commit: {
+        path: "content/life/a.md",
+        selectionId: "11111111-1111-4111-8111-111111111111",
+        overwrite: ["hero.png"],
+      },
+      preview: { path: "content/life/a.md", name: "hero.png" },
+      delete: {
+        path: "content/life/a.md",
+        name: "hero.png",
+        expectedContentHash: "a".repeat(64),
+      },
+      copyMarkdown: { path: "content/life/a.md", name: "hero.png" },
+    }
+
+    await api.images.open(requests.open)
+    await api.images.select(requests.select)
+    await api.images.commit(requests.commit)
+    await api.images.preview(requests.preview)
+    await api.images.delete(requests.delete)
+    await api.images.copyMarkdown(requests.copyMarkdown)
+
+    expect(ipc.invokes).toEqual([
+      [IPC_CHANNELS.requests.imagesOpen, requests.open],
+      [IPC_CHANNELS.requests.imagesSelect, requests.select],
+      [IPC_CHANNELS.requests.imagesCommit, requests.commit],
+      [IPC_CHANNELS.requests.imagesPreview, requests.preview],
+      [IPC_CHANNELS.requests.imagesDelete, requests.delete],
+      [IPC_CHANNELS.requests.imagesCopyMarkdown, requests.copyMarkdown],
+    ])
   })
 
   it("maps each method to its one allowlisted channel", async () => {
@@ -1381,6 +1430,20 @@ describe("preload garden API", () => {
       path: "content/life/a.md",
       contentHash: "b".repeat(64),
     })
+    await api.images.open({ path: "content/life/a.md" })
+    await api.images.select({ path: "content/life/a.md" })
+    await api.images.commit({
+      path: "content/life/a.md",
+      selectionId: "11111111-1111-4111-8111-111111111111",
+      overwrite: ["hero.png"],
+    })
+    await api.images.preview({ path: "content/life/a.md", name: "hero.png" })
+    await api.images.delete({
+      path: "content/life/a.md",
+      name: "hero.png",
+      expectedContentHash: "a".repeat(64),
+    })
+    await api.images.copyMarkdown({ path: "content/life/a.md", name: "hero.png" })
     await api.preview.start({ preferredPort: 4173 })
     await api.preview.stop()
     await api.preview.status()

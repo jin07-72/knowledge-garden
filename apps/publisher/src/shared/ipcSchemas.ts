@@ -146,6 +146,90 @@ export const noteSlugSchema = z
   .max(128)
   .regex(new RegExp(`^${KEBAB_SLUG_SOURCE}$`))
 const hashSchema = z.string().regex(/^[a-f0-9]{64}$/)
+const imageNameSchema = z
+  .string()
+  .min(1)
+  .max(255)
+  .refine((value) => value !== "." && value !== "..")
+  .refine((value) => !/[\\/]/.test(value))
+  .refine((value) => !controlCharacterPattern.test(value))
+  .refine((value) => !value.includes(">"))
+const imageDataUrlSchema = (maxLength: number) =>
+  z
+    .string()
+    .max(maxLength)
+    .regex(/^data:image\/(?:png|jpeg|gif|webp|avif);base64,[A-Za-z0-9+/]+={0,2}$/)
+const thumbnailDataUrlSchema = imageDataUrlSchema(512 * 1024)
+const previewDataUrlSchema = imageDataUrlSchema(36 * 1024 * 1024)
+const uniqueImageNames = (names: readonly string[]) => new Set(names).size === names.length
+
+export const imageLibraryPathRequestSchema = z.object({ path: managedNotePathSchema }).strict()
+export const imageLibraryItemRequestSchema = z
+  .object({
+    path: managedNotePathSchema,
+    name: imageNameSchema,
+    expectedContentHash: hashSchema.optional(),
+  })
+  .strict()
+export const imageLibraryDeleteRequestSchema = imageLibraryItemRequestSchema.extend({
+  expectedContentHash: hashSchema,
+})
+export const imageLibraryCommitRequestSchema = z
+  .object({
+    path: managedNotePathSchema,
+    selectionId: z.string().uuid(),
+    overwrite: z.array(imageNameSchema).max(50),
+  })
+  .strict()
+  .refine(({ overwrite }) => uniqueImageNames(overwrite), { path: ["overwrite"] })
+
+const imageLibraryItemSchema = z
+  .object({
+    name: imageNameSchema,
+    sizeBytes: z.number().int().nonnegative(),
+    width: z.number().int().positive(),
+    height: z.number().int().positive(),
+    contentHash: hashSchema,
+    thumbnailDataUrl: thumbnailDataUrlSchema,
+    markdown: z.string().min(1).max(2_048),
+  })
+  .strip()
+const imageLibraryViewSchema = z
+  .object({
+    path: managedNotePathSchema,
+    images: z.array(imageLibraryItemSchema).max(500),
+  })
+  .strip()
+const selectedImageLibraryItemSchema = imageLibraryItemSchema.extend({ conflict: z.boolean() })
+const imageLibrarySelectionSchema = z.discriminatedUnion("cancelled", [
+  z
+    .object({
+      cancelled: z.literal(true),
+      selectionId: z.undefined().optional(),
+      images: z.array(selectedImageLibraryItemSchema).max(0),
+      conflicts: z.array(imageNameSchema).max(0),
+    })
+    .strip(),
+  z
+    .object({
+      cancelled: z.literal(false),
+      selectionId: z.string().uuid(),
+      images: z.array(selectedImageLibraryItemSchema).max(50),
+      conflicts: z.array(imageNameSchema).max(50).refine(uniqueImageNames),
+    })
+    .strip(),
+])
+const imageLibraryPreviewSchema = z
+  .object({
+    name: imageNameSchema,
+    sizeBytes: z.number().int().nonnegative(),
+    width: z.number().int().positive(),
+    height: z.number().int().positive(),
+    contentHash: hashSchema,
+    markdown: z.string().min(1).max(2_048),
+    dataUrl: previewDataUrlSchema,
+  })
+  .strip()
 const warningSchema = z
   .object({ code: z.string().min(1).max(128), message: z.string().min(1).max(1_000) })
   .strip()
@@ -443,6 +527,12 @@ export const IPC_SUCCESS_SCHEMAS = {
   [IPC_CHANNELS.requests.notesRecoveryGet]: noteRecoverySchema.optional(),
   [IPC_CHANNELS.requests.notesRecoveryWrite]: z.object({ contentHash: hashSchema }).strip(),
   [IPC_CHANNELS.requests.notesRecoveryDiscard]: z.undefined(),
+  [IPC_CHANNELS.requests.imagesOpen]: imageLibraryViewSchema,
+  [IPC_CHANNELS.requests.imagesSelect]: imageLibrarySelectionSchema,
+  [IPC_CHANNELS.requests.imagesCommit]: imageLibraryViewSchema,
+  [IPC_CHANNELS.requests.imagesPreview]: imageLibraryPreviewSchema,
+  [IPC_CHANNELS.requests.imagesDelete]: imageLibraryViewSchema,
+  [IPC_CHANNELS.requests.imagesCopyMarkdown]: z.undefined(),
   [IPC_CHANNELS.requests.previewStart]: previewStatusSchema,
   [IPC_CHANNELS.requests.previewStop]: previewStatusSchema,
   [IPC_CHANNELS.requests.previewStatus]: previewStatusSchema,

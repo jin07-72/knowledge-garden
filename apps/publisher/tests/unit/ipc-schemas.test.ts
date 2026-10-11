@@ -14,6 +14,10 @@ import {
   domainCreateSchema,
   domainRemoveSchema,
   domainRenameSchema,
+  imageLibraryCommitRequestSchema,
+  imageLibraryDeleteRequestSchema,
+  imageLibraryItemRequestSchema,
+  imageLibraryPathRequestSchema,
   noteCreateSchema,
   noteRenameSchema,
   utf8ByteLength,
@@ -98,6 +102,16 @@ const customDomain = {
   privateNotes: 1,
 }
 
+const imageItem = {
+  name: "garden.webp",
+  sizeBytes: 12_345,
+  width: 800,
+  height: 600,
+  contentHash: "c".repeat(64),
+  thumbnailDataUrl: "data:image/webp;base64,AAAA",
+  markdown: "![garden](garden.webp)",
+}
+
 const validByChannel: Record<string, unknown> = {
   [IPC_CHANNELS.requests.workspaceInspectSafety]: {
     ok: true,
@@ -151,6 +165,31 @@ const validByChannel: Record<string, unknown> = {
   },
   [IPC_CHANNELS.requests.notesRecoveryWrite]: { contentHash: "b".repeat(64), ...privateField },
   [IPC_CHANNELS.requests.notesRecoveryDiscard]: undefined,
+  [IPC_CHANNELS.requests.imagesOpen]: {
+    path: "content/life/daily.md",
+    images: [imageItem],
+    ...privateField,
+  },
+  [IPC_CHANNELS.requests.imagesSelect]: {
+    cancelled: false,
+    selectionId: "11111111-1111-4111-8111-111111111111",
+    images: [{ ...imageItem, conflict: false }],
+    conflicts: [],
+    ...privateField,
+  },
+  [IPC_CHANNELS.requests.imagesCommit]: { path: "content/life/daily.md", images: [imageItem] },
+  [IPC_CHANNELS.requests.imagesPreview]: {
+    name: imageItem.name,
+    sizeBytes: imageItem.sizeBytes,
+    width: imageItem.width,
+    height: imageItem.height,
+    contentHash: imageItem.contentHash,
+    markdown: imageItem.markdown,
+    dataUrl: "data:image/webp;base64,AAAA",
+    ...privateField,
+  },
+  [IPC_CHANNELS.requests.imagesDelete]: { path: "content/life/daily.md", images: [] },
+  [IPC_CHANNELS.requests.imagesCopyMarkdown]: undefined,
   [IPC_CHANNELS.requests.previewStart]: preview,
   [IPC_CHANNELS.requests.previewStop]: preview,
   [IPC_CHANNELS.requests.previewStatus]: preview,
@@ -223,6 +262,197 @@ const validByChannel: Record<string, unknown> = {
   [IPC_CHANNELS.requests.blogsOpenFolder]: undefined,
   [IPC_CHANNELS.requests.blogsSwitch]: undefined,
 }
+
+describe("image library IPC schemas", () => {
+  it("defines one allowlisted request channel for every image capability", () => {
+    expect({
+      open: IPC_CHANNELS.requests.imagesOpen,
+      select: IPC_CHANNELS.requests.imagesSelect,
+      commit: IPC_CHANNELS.requests.imagesCommit,
+      preview: IPC_CHANNELS.requests.imagesPreview,
+      delete: IPC_CHANNELS.requests.imagesDelete,
+      copyMarkdown: IPC_CHANNELS.requests.imagesCopyMarkdown,
+    }).toEqual({
+      open: "garden:images:open",
+      select: "garden:images:select",
+      commit: "garden:images:commit",
+      preview: "garden:images:preview",
+      delete: "garden:images:delete",
+      copyMarkdown: "garden:images:copy-markdown",
+    })
+  })
+
+  it("accepts only exact managed note paths in image requests", () => {
+    const pathRequest = imageLibraryPathRequestSchema
+
+    expect(pathRequest.safeParse({ path: "content/life/daily.md" }).success).toBe(true)
+    expect(pathRequest.safeParse({ path: "private/life/daily.md" }).success).toBe(true)
+    for (const path of [
+      "content/life/daily.txt",
+      "content/life/../daily.md",
+      "content//daily.md",
+      "C:/garden/content/life/daily.md",
+      "content\\life\\daily.md",
+      "content/life/daily.md/extra",
+    ]) {
+      expect(pathRequest.safeParse({ path }).success, path).toBe(false)
+    }
+    expect(pathRequest.safeParse({ path: "content/life/daily.md", extra: true }).success).toBe(
+      false,
+    )
+  })
+
+  it("accepts safe base image names and rejects traversal, separators, controls, and markup", () => {
+    const itemRequest = imageLibraryItemRequestSchema
+
+    expect(
+      itemRequest.safeParse({
+        path: "content/life/daily.md",
+        name: "hero image-01.webp",
+        expectedContentHash: "a".repeat(64),
+      }).success,
+    ).toBe(true)
+    for (const name of [
+      "",
+      ".",
+      "..",
+      "../hero.png",
+      "folder/hero.png",
+      "folder\\hero.png",
+      "hero\n.png",
+      "hero\r.png",
+      "hero\0.png",
+      "hero>.png",
+      "a".repeat(256),
+    ]) {
+      expect(
+        itemRequest.safeParse({ path: "content/life/daily.md", name }).success,
+        JSON.stringify(name),
+      ).toBe(false)
+    }
+    expect(
+      itemRequest.safeParse({
+        path: "content/life/daily.md",
+        name: "hero.png",
+        expectedContentHash: "A".repeat(64),
+      }).success,
+    ).toBe(false)
+  })
+
+  it("requires an exact content hash for permanent deletion requests", () => {
+    const request = {
+      path: "content/life/daily.md",
+      name: "hero.png",
+      expectedContentHash: "a".repeat(64),
+    }
+    expect(imageLibraryDeleteRequestSchema.safeParse(request).success).toBe(true)
+    expect(
+      imageLibraryDeleteRequestSchema.safeParse({ path: request.path, name: request.name }).success,
+    ).toBe(false)
+    expect(imageLibraryDeleteRequestSchema.safeParse({ ...request, extra: true }).success).toBe(
+      false,
+    )
+  })
+
+  it("requires UUID selections and a bounded, duplicate-free overwrite list", () => {
+    const commit = imageLibraryCommitRequestSchema
+
+    const valid = {
+      path: "content/life/daily.md",
+      selectionId: "11111111-1111-4111-8111-111111111111",
+      overwrite: ["hero.png", "diagram.avif"],
+    }
+    expect(commit.safeParse(valid).success).toBe(true)
+    expect(commit.safeParse({ ...valid, selectionId: "selection-1" }).success).toBe(false)
+    expect(commit.safeParse({ ...valid, overwrite: ["hero.png", "hero.png"] }).success).toBe(
+      false,
+    )
+    expect(
+      commit.safeParse({ ...valid, overwrite: Array.from({ length: 51 }, (_, i) => `${i}.png`) })
+        .success,
+    ).toBe(false)
+    expect(commit.safeParse({ ...valid, overwrite: ["../hero.png"] }).success).toBe(false)
+    expect(commit.safeParse({ ...valid, extra: true }).success).toBe(false)
+  })
+
+  it("validates bounded library responses and strips private response fields", () => {
+    const schema = IPC_SUCCESS_SCHEMAS[IPC_CHANNELS.requests.imagesOpen]
+
+    const value = {
+      path: "content/life/daily.md",
+      images: [{ ...imageItem, privateSourcePath: "C:/garden/content/life/images/garden.webp" }],
+      privateSourcePath: "C:/garden/content/life/images",
+    }
+    expect(schema.safeParse(value)).toEqual({
+      success: true,
+      data: { path: value.path, images: [imageItem] },
+    })
+    expect(schema.safeParse({ ...value, path: "content/life/daily.txt" }).success).toBe(false)
+    expect(schema.safeParse({ ...value, images: Array(501).fill(imageItem) }).success).toBe(false)
+    expect(
+      schema.safeParse({ ...value, images: [{ ...imageItem, contentHash: "c".repeat(63) }] })
+        .success,
+    ).toBe(false)
+    expect(
+      schema.safeParse({
+        ...value,
+        images: [{ ...imageItem, thumbnailDataUrl: `data:image/png;base64,${"A".repeat(512 * 1024)}` }],
+      }).success,
+    ).toBe(false)
+  })
+
+  it("enforces cancelled and active image selection invariants", () => {
+    const schema = IPC_SUCCESS_SCHEMAS[IPC_CHANNELS.requests.imagesSelect]
+
+    expect(schema.safeParse({ cancelled: true, images: [], conflicts: [] }).success).toBe(true)
+    expect(
+      schema.safeParse({
+        cancelled: true,
+        selectionId: "11111111-1111-4111-8111-111111111111",
+        images: [],
+        conflicts: [],
+      }).success,
+    ).toBe(false)
+    const selected = {
+      cancelled: false,
+      selectionId: "11111111-1111-4111-8111-111111111111",
+      images: [{ ...imageItem, conflict: false }],
+      conflicts: [],
+    }
+    expect(schema.safeParse(selected).success).toBe(true)
+    expect(schema.safeParse({ ...selected, selectionId: undefined }).success).toBe(false)
+    expect(schema.safeParse({ ...selected, images: Array(51).fill(selected.images[0]) }).success).toBe(
+      false,
+    )
+    expect(schema.safeParse({ ...selected, conflicts: Array(51).fill("hero.png") }).success).toBe(
+      false,
+    )
+  })
+
+  it("accepts only bounded image preview data URLs and strips source paths", () => {
+    const schema = IPC_SUCCESS_SCHEMAS[IPC_CHANNELS.requests.imagesPreview]
+
+    const { thumbnailDataUrl: _thumbnail, ...previewItem } = imageItem
+    const previewValue = {
+      ...previewItem,
+      dataUrl: "data:image/jpeg;base64,AAAA",
+      sourcePath: "C:/garden/content/life/images/garden.webp",
+    }
+    expect(schema.safeParse(previewValue)).toEqual({
+      success: true,
+      data: { ...previewItem, dataUrl: previewValue.dataUrl },
+    })
+    expect(schema.safeParse({ ...previewValue, dataUrl: "data:image/svg+xml;base64,AAAA" }).success).toBe(
+      false,
+    )
+    expect(
+      schema.safeParse({
+        ...previewValue,
+        dataUrl: `data:image/png;base64,${"A".repeat(36 * 1024 * 1024)}`,
+      }).success,
+    ).toBe(false)
+  })
+})
 
 describe("IPC success schemas", () => {
   it("validates dynamic domain contracts and rejects unsafe requests", () => {

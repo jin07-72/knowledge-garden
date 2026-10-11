@@ -113,6 +113,14 @@ function gardenApi(): GardenApi {
         discard: vi.fn(async () => ok(undefined)),
       },
     },
+    images: {
+      open: vi.fn(async ({ path }) => ok({ path, images: [] })),
+      select: vi.fn(async () => ok({ images: [], conflicts: [], cancelled: true as const })),
+      commit: vi.fn(async ({ path }) => ok({ path, images: [] })),
+      preview: vi.fn(),
+      delete: vi.fn(async ({ path }) => ok({ path, images: [] })),
+      copyMarkdown: vi.fn(async () => ok(undefined)),
+    },
     preview: {
       start: vi.fn(async () => ok(ready)),
       stop: vi.fn(),
