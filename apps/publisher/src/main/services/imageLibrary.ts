@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { constants, type BigIntStats, type Dirent } from "node:fs"
-import { lstat, mkdir, open, readdir, realpath, stat } from "node:fs/promises"
+import { lstat, mkdir, open, readdir, realpath, rmdir, stat, unlink } from "node:fs/promises"
 import { isAbsolute, relative, resolve } from "node:path"
 import {
   IMAGE_LIBRARY_MAX_GALLERY_THUMBNAIL_TOTAL_LENGTH,
@@ -13,6 +13,7 @@ import {
   type ImageLibraryView,
   type NotePathRequest,
 } from "../../shared/contracts"
+import { MAX_MARKDOWN_UTF8_BYTES } from "../../shared/ipcSchemas"
 import { detectImageFormat, markdownForImage } from "./imageFormats"
 import {
   acquireInternalNotePathLease,
@@ -76,6 +77,13 @@ interface DirectoryIdentity {
   readonly birthtimeNs: bigint
 }
 
+interface OwnedArtifact {
+  readonly kind: "file" | "directory"
+  readonly path: string
+  readonly identity: FileIdentity | DirectoryIdentity
+  readonly parent: DirectorySnapshot
+}
+
 interface DirectChildSnapshot {
   readonly name: string
   readonly directoryType: string
@@ -88,6 +96,7 @@ type DirectChildManifest = readonly DirectChildSnapshot[]
 const DATA_URL_PATTERN = /^data:image\/(png|jpeg|gif|webp|avif);base64,([A-Za-z0-9+/]*={0,2})$/
 const BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 const trustedErrors = new WeakSet<object>()
+const naturalCollator = new Intl.Collator("en", { numeric: true, sensitivity: "base" })
 
 function imageError(code: AppError["code"], message: string, details?: AppError["details"]): AppError {
   const error = details === undefined
@@ -330,7 +339,12 @@ async function createOrInspectDirectory(
   path: string,
   parent: DirectorySnapshot,
   adapter: ImageLibraryAdapter,
+  owned: OwnedArtifact[],
 ): Promise<DirectorySnapshot> {
+  // Node exposes no openat-style relative mkdir on Windows. Revalidate the
+  // owned parent immediately before mutation, then verify both components
+  // again after every injected await; this closes deterministic seam swaps.
+  await verifyDirectory(parent.canonical, parent.canonical, parent)
   let created = false
   try {
     await mkdir(path, { mode: 0o700 })
@@ -339,13 +353,15 @@ async function createOrInspectDirectory(
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw failed("无法创建图片库目录。")
   }
   const inspected = await inspectDirectory(path, parent.canonical)
-  await verifyDirectory(parent.canonical, parent.canonical, parent)
   if (created) {
+    owned.push({ kind: "directory", path, identity: inspected.identity, parent })
     try {
       await adapter.syncDirectory?.(parent.canonical)
     } catch {
       throw failed("无法安全同步图片库目录。")
     }
+    await verifyDirectory(parent.canonical, parent.canonical, parent)
+    await verifyDirectory(path, parent.canonical, inspected)
   }
   return inspected
 }
@@ -403,6 +419,70 @@ async function verifyFileSnapshot(
   }
 }
 
+async function boundedHashSnapshot(
+  path: string,
+  root: string,
+  maxBytes: number,
+  missingCode: "invalid" | "changed" = "invalid",
+): Promise<FileSnapshot> {
+  let handle: Awaited<ReturnType<typeof open>> | undefined
+  try {
+    const before = await lstat(path, { bigint: true })
+    if (before.isSymbolicLink()) throw unsafe()
+    if (!before.isFile()) throw invalid("文件不是普通文件。")
+    if (before.size > BigInt(maxBytes)) throw tooLarge("笔记超过允许的大小限制。")
+    const canonical = await realpath(path)
+    if (!isInside(root, canonical) || !pathsEqual(canonical, path)) throw unsafe()
+    const flags = process.platform === "win32" ? "r" : constants.O_RDONLY | constants.O_NOFOLLOW
+    handle = await open(path, flags)
+    const opened = await handle.stat({ bigint: true })
+    if (!opened.isFile() || !sameFileIdentity(fileIdentity(before), fileIdentity(opened))) {
+      throw changed()
+    }
+    const hash = createHash("sha256")
+    const buffer = Buffer.allocUnsafe(64 * 1024)
+    let position = 0
+    while (position < Number(opened.size)) {
+      const length = Math.min(buffer.length, Number(opened.size) - position)
+      const { bytesRead } = await handle.read(buffer, 0, length, position)
+      if (bytesRead <= 0) throw changed()
+      hash.update(buffer.subarray(0, bytesRead))
+      position += bytesRead
+    }
+    const afterHandle = await handle.stat({ bigint: true })
+    const afterPath = await lstat(path, { bigint: true })
+    if (
+      !sameFileIdentity(fileIdentity(opened), fileIdentity(afterHandle)) ||
+      !sameFileIdentity(fileIdentity(opened), fileIdentity(afterPath))
+    ) {
+      throw changed()
+    }
+    return { identity: fileIdentity(opened), hash: hash.digest("hex") }
+  } catch (error) {
+    if (isImageError(error)) throw error
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw missingCode === "changed" ? changed() : invalid("文件不存在。")
+    }
+    throw failed("无法安全读取文件。")
+  } finally {
+    await handle?.close().catch(() => undefined)
+  }
+}
+
+async function verifyNoteSnapshot(
+  path: string,
+  root: string,
+  expected: FileSnapshot,
+): Promise<void> {
+  const current = await boundedHashSnapshot(path, root, MAX_MARKDOWN_UTF8_BYTES, "changed")
+  if (
+    !sameFileIdentity(current.identity, expected.identity) ||
+    current.hash !== expected.hash
+  ) {
+    throw changed()
+  }
+}
+
 async function noteSnapshot(
   workspace: string,
   parsed: ParsedNotePath,
@@ -412,13 +492,12 @@ async function noteSnapshot(
   const domainPath = resolve(visibilityPath, parsed.domain)
   await inspectDirectory(domainPath, visibility.canonical, true)
   const path = resolve(domainPath, `${parsed.slug}.md`)
-  const note = await safeFileSnapshot(path, domainPath, undefined)
-  return { path, snapshot: note.snapshot }
+  const snapshot = await boundedHashSnapshot(path, domainPath, MAX_MARKDOWN_UTF8_BYTES)
+  return { path, snapshot }
 }
 
 function naturalCompare(left: string, right: string): number {
-  const collator = new Intl.Collator("en", { numeric: true, sensitivity: "base" })
-  const compared = collator.compare(left, right)
+  const compared = naturalCollator.compare(left, right)
   if (compared !== 0) return compared
   return left < right ? -1 : left > right ? 1 : 0
 }
@@ -440,8 +519,10 @@ function validateThumbnail(rendered: RenderedImage): void {
     throw invalid("缩略图数据无效。")
   }
   const match = DATA_URL_PATTERN.exec(rendered.dataUrl)
+  const mime = match?.[1]
   const payload = match?.[2]
   if (
+    mime === undefined ||
     payload === undefined ||
     payload.length === 0 ||
     payload.length % 4 !== 0 ||
@@ -453,6 +534,13 @@ function validateThumbnail(rendered: RenderedImage): void {
   const decodedBytes = (payload.length / 4) * 3 - padding
   if (decodedBytes > IMAGE_LIBRARY_MAX_THUMBNAIL_DECODED_BYTES) {
     throw invalid("缩略图数据超过允许的大小。")
+  }
+  const bytes = Uint8Array.from(Buffer.from(payload, "base64"))
+  const extension = mime === "jpeg" ? "jpg" : mime
+  try {
+    detectImageFormat(bytes, `thumbnail.${extension}`)
+  } catch {
+    throw invalid("缩略图格式与内容不匹配。")
   }
 }
 
@@ -466,19 +554,35 @@ async function createOrVerifyMarker(
   path: string,
   library: DirectorySnapshot,
   adapter: ImageLibraryAdapter,
+  owned: OwnedArtifact[],
 ): Promise<FileSnapshot> {
   let handle: Awaited<ReturnType<typeof open>> | undefined
   let created: FileSnapshot | undefined
   try {
-    handle = await open(path, "wx", 0o600)
+    await verifyDirectory(library.canonical, library.canonical, library)
+    // O_EXCL is the strongest portable final-component creation primitive;
+    // POSIX additionally gets O_NOFOLLOW. Node has no Windows openat equivalent.
+    const flags =
+      process.platform === "win32"
+        ? "wx"
+        : constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW
+    handle = await open(path, flags, 0o600)
     await handle.sync()
+    const opened = await handle.stat({ bigint: true })
+    if (!opened.isFile() || opened.size !== 0n) throw changed()
     await handle.close()
     handle = undefined
     created = await verifyMarker(path, library)
+    if (!sameFileIdentity(created.identity, fileIdentity(opened))) throw changed()
+    owned.push({ kind: "file", path, identity: created.identity, parent: library })
     await adapter.syncDirectory?.(library.canonical)
   } catch (error) {
     await handle?.close().catch(() => undefined)
     handle = undefined
+    if (created !== undefined) {
+      if (isImageError(error)) throw error
+      throw failed("无法安全同步图片库占位文件。")
+    }
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
       if (isImageError(error)) throw error
       throw failed("无法创建图片库占位文件。")
@@ -487,6 +591,7 @@ async function createOrVerifyMarker(
     await handle?.close().catch(() => undefined)
   }
   if (created !== undefined) {
+    await verifyDirectory(library.canonical, library.canonical, library)
     await verifyFileSnapshot(path, library.canonical, created)
     return created
   }
@@ -598,81 +703,156 @@ async function releaseLocks(
   if (releaseFailed) throw failed("图片库已读取，但操作锁未能安全释放。")
 }
 
+async function cleanupOwnedArtifacts(
+  artifacts: readonly OwnedArtifact[],
+  adapter: ImageLibraryAdapter,
+  primary: unknown,
+): Promise<AppError> {
+  const warnings: Array<{ readonly code: string; readonly message: string }> = []
+  for (const artifact of [...artifacts].reverse()) {
+    try {
+      await verifyDirectory(artifact.parent.canonical, artifact.parent.canonical, artifact.parent)
+      const current = await lstat(artifact.path, { bigint: true }).catch((error) => {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined
+        throw error
+      })
+      if (current === undefined) continue
+      const matches =
+        artifact.kind === "file"
+          ? current.isFile() &&
+            !current.isSymbolicLink() &&
+            sameFileIdentity(fileIdentity(current), artifact.identity as FileIdentity)
+          : current.isDirectory() &&
+            !current.isSymbolicLink() &&
+            sameDirectoryIdentity(directoryIdentity(current), artifact.identity as DirectoryIdentity)
+      if (!matches) {
+        warnings.push({ code: "CLEANUP_UNCERTAIN", message: "未删除身份已变化的图片库项目。" })
+        continue
+      }
+      if (artifact.kind === "file") await unlink(artifact.path)
+      else await rmdir(artifact.path)
+      try {
+        await adapter.syncDirectory?.(artifact.parent.canonical)
+      } catch {
+        warnings.push({ code: "CLEANUP_SYNC_FAILED", message: "图片库清理后的目录同步失败。" })
+      }
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      warnings.push({
+        code: code === "ENOTEMPTY" || code === "EEXIST" ? "CLEANUP_RETAINED" : "CLEANUP_FAILED",
+        message:
+          code === "ENOTEMPTY" || code === "EEXIST"
+            ? "图片库目录含有外部内容，已安全保留。"
+            : "部分图片库项目未能安全清理。",
+      })
+    }
+  }
+  const safePrimary = isImageError(primary) ? primary : failed()
+  return warnings.length === 0
+    ? safePrimary
+    : imageError(safePrimary.code, safePrimary.message, {
+        ...safePrimary.details,
+        cleanupWarnings: warnings,
+      })
+}
+
 export function createImageLibraryService(options: {
   workspace: string
   adapter: ImageLibraryAdapter
 }): ImageLibraryService {
   let disposed = false
+  const active = new Set<Promise<ImageLibraryView>>()
 
   return {
-    async open(request: NotePathRequest): Promise<ImageLibraryView> {
-      if (disposed) throw failed("图片库服务已关闭。")
-      const parsed = parseNotePath(request.path)
-      const workspace = await canonicalWorkspace(options.workspace)
-      const initialNote = await noteSnapshot(workspace, parsed)
-      try {
-        await options.adapter.afterPhase?.("note-validated")
-      } catch {
-        throw failed("图片库验证未能完成。")
-      }
-      const leases = await acquireLocks(workspace, [parsed.path, parsed.attachmentPath])
-      let result: ImageLibraryView | undefined
-      let primaryError: unknown
-      try {
-        await assertLocks(leases)
-        await verifyFileSnapshot(initialNote.path, workspace, initialNote.snapshot)
-
-        const visibilityPath = resolve(workspace, parsed.visibility)
-        const visibility = await inspectDirectory(visibilityPath, workspace, true)
-        const assetsPath = resolve(visibility.canonical, "_assets")
-        const assets = await createOrInspectDirectory(assetsPath, visibility, options.adapter)
-        const libraryPath = resolve(assets.canonical, parsed.slug)
-        const library = await createOrInspectDirectory(libraryPath, assets, options.adapter)
-
-        const entries = await readdir(library.canonical, { withFileTypes: true }).catch(() => {
-          throw failed("无法读取图片库。")
-        })
-        let expectedManifest = await directChildManifest(library, entries)
-        const markerEntry = entries.find(({ name }) => name === ".gitkeep")
-        if (markerEntry !== undefined) validateEntryType(markerEntry)
-        const imageEntries = entries.filter(({ name }) => name !== ".gitkeep")
-        if (imageEntries.length > IMAGE_LIBRARY_MAX_ITEMS) throw tooLarge()
-
-        const markerPath = resolve(library.canonical, ".gitkeep")
-        let marker: FileSnapshot | undefined
-        if (imageEntries.length === 0) {
-          marker = await createOrVerifyMarker(markerPath, library, options.adapter)
-          if (markerEntry === undefined) expectedManifest = withCreatedMarker(expectedManifest, marker)
+    open(request: NotePathRequest): Promise<ImageLibraryView> {
+      if (disposed) return Promise.reject(failed("图片库服务已关闭。"))
+      const operation = (async (): Promise<ImageLibraryView> => {
+        const parsed = parseNotePath(request.path)
+        const workspace = await canonicalWorkspace(options.workspace)
+        const initialNote = await noteSnapshot(workspace, parsed)
+        try {
+          await options.adapter.afterPhase?.("note-validated")
+        } catch {
+          throw failed("图片库验证未能完成。")
         }
-        else if (markerEntry !== undefined) marker = await verifyMarker(markerPath, library)
+        const leases = await acquireLocks(workspace, [parsed.path, parsed.attachmentPath])
+        const owned: OwnedArtifact[] = []
+        let result: ImageLibraryView | undefined
+        let primaryError: unknown
+        try {
+          await assertLocks(leases)
+          await verifyNoteSnapshot(initialNote.path, workspace, initialNote.snapshot)
 
-        const images: ImageLibraryItem[] = []
-        let thumbnailLength = 0
-        for (const entry of imageEntries.sort((left, right) => naturalCompare(left.name, right.name))) {
-          const image = await readImage(entry, library, parsed.slug, options.adapter)
-          thumbnailLength += image.thumbnailDataUrl.length
-          if (thumbnailLength > IMAGE_LIBRARY_MAX_GALLERY_THUMBNAIL_TOTAL_LENGTH) throw tooLarge()
-          images.push(image)
-        }
+          const visibilityPath = resolve(workspace, parsed.visibility)
+          const visibility = await inspectDirectory(visibilityPath, workspace, true)
+          const assetsPath = resolve(visibility.canonical, "_assets")
+          const assets = await createOrInspectDirectory(
+            assetsPath,
+            visibility,
+            options.adapter,
+            owned,
+          )
+          const libraryPath = resolve(assets.canonical, parsed.slug)
+          const library = await createOrInspectDirectory(
+            libraryPath,
+            assets,
+            options.adapter,
+            owned,
+          )
 
-        await assertLocks(leases)
-        await verifyFileSnapshot(initialNote.path, workspace, initialNote.snapshot)
-        await verifyDirectory(library.canonical, assets.canonical, library)
-        if (marker !== undefined) await verifyFileSnapshot(markerPath, library.canonical, marker, 0)
-        const finalManifest = await directChildManifest(library)
-        if (!sameManifest(expectedManifest, finalManifest)) {
-          throw changed("图片库内容在读取过程中发生变化，请重试。")
+          const entries = await readdir(library.canonical, { withFileTypes: true }).catch(() => {
+            throw failed("无法读取图片库。")
+          })
+          let expectedManifest = await directChildManifest(library, entries)
+          const markerEntry = entries.find(({ name }) => name === ".gitkeep")
+          if (markerEntry !== undefined) validateEntryType(markerEntry)
+          const imageEntries = entries.filter(({ name }) => name !== ".gitkeep")
+          if (imageEntries.length > IMAGE_LIBRARY_MAX_ITEMS) throw tooLarge()
+
+          const markerPath = resolve(library.canonical, ".gitkeep")
+          let marker: FileSnapshot | undefined
+          if (imageEntries.length === 0) {
+            marker = await createOrVerifyMarker(markerPath, library, options.adapter, owned)
+            if (markerEntry === undefined) {
+              expectedManifest = withCreatedMarker(expectedManifest, marker)
+            }
+          } else if (markerEntry !== undefined) marker = await verifyMarker(markerPath, library)
+
+          const images: ImageLibraryItem[] = []
+          let thumbnailLength = 0
+          for (const entry of imageEntries.sort((left, right) => naturalCompare(left.name, right.name))) {
+            const image = await readImage(entry, library, parsed.slug, options.adapter)
+            thumbnailLength += image.thumbnailDataUrl.length
+            if (thumbnailLength > IMAGE_LIBRARY_MAX_GALLERY_THUMBNAIL_TOTAL_LENGTH) throw tooLarge()
+            images.push(image)
+          }
+
+          await assertLocks(leases)
+          await verifyNoteSnapshot(initialNote.path, workspace, initialNote.snapshot)
+          await verifyDirectory(library.canonical, assets.canonical, library)
+          if (marker !== undefined) await verifyFileSnapshot(markerPath, library.canonical, marker, 0)
+          const finalManifest = await directChildManifest(library)
+          if (!sameManifest(expectedManifest, finalManifest)) {
+            throw changed("图片库内容在读取过程中发生变化，请重试。")
+          }
+          result = { path: parsed.path, images }
+        } catch (error) {
+          primaryError = await cleanupOwnedArtifacts(owned, options.adapter, error)
         }
-        result = { path: parsed.path, images }
-      } catch (error) {
-        primaryError = error
-      }
-      await releaseLocks(leases, primaryError)
-      return result!
+        await releaseLocks(leases, primaryError)
+        return result!
+      })()
+      active.add(operation)
+      void operation.then(
+        () => active.delete(operation),
+        () => active.delete(operation),
+      )
+      return operation
     },
 
     async dispose(): Promise<void> {
       disposed = true
+      await Promise.allSettled([...active])
     },
   }
 }

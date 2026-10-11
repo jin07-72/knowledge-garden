@@ -20,6 +20,7 @@ import {
   IMAGE_LIBRARY_MAX_THUMBNAIL_DECODED_BYTES,
   type AppError,
 } from "../../src/shared/contracts"
+import { MAX_MARKDOWN_UTF8_BYTES } from "../../src/shared/ipcSchemas"
 
 const leaseProbe = vi.hoisted(() => ({
   acquired: [] as string[],
@@ -74,7 +75,7 @@ const WEBP = Uint8Array.from(Buffer.from("RIFF1234WEBP!", "ascii"))
 const AVIF = Uint8Array.from([
   0, 0, 0, 16, 0x66, 0x74, 0x79, 0x70, 0x61, 0x76, 0x69, 0x66, 0, 0, 0, 0,
 ])
-const THUMBNAIL = `data:image/png;base64,${Buffer.from("thumb").toString("base64")}`
+const THUMBNAIL = `data:image/png;base64,${Buffer.from(PNG).toString("base64")}`
 
 interface Fixture {
   readonly root: string
@@ -152,7 +153,11 @@ async function expectSanitizedFailure(
   const error = await run.catch((caught) => caught)
   expect(error).toMatchObject({ code: expected, message: expect.stringMatching(/[\u3400-\u9fff]/) })
   expect(JSON.stringify(error)).not.toContain(secret)
-  expect((error as AppError).details).toBeUndefined()
+  const details = (error as AppError).details
+  if (details !== undefined) {
+    expect(Object.keys(details)).toEqual(["cleanupWarnings"])
+    expect(details.cleanupWarnings).toEqual(expect.any(Array))
+  }
 }
 
 beforeEach(() => {
@@ -330,6 +335,49 @@ describe("note-scoped image library", () => {
     })
   }
 
+  for (const swapped of ["_assets", "daily"] as const) {
+    it(`does not write outside when the newly created ${swapped} directory is swapped at sync`, async ({
+      skip,
+    }) => {
+      const setup = await fixture()
+      const outside = await mkdtemp(join(tmpdir(), "publisher-image-swap-outside-"))
+      cleanups.push(outside)
+      let swappedOnce = false
+      const service = createImageLibraryService({
+        workspace: setup.root,
+        adapter: adapter({
+          syncDirectory: async (path) => {
+            if (swappedOnce) return
+            const expectedParent =
+              swapped === "_assets" ? join(setup.root, "content") : join(setup.root, "content", "_assets")
+            if (path !== expectedParent) return
+            const target =
+              swapped === "_assets"
+                ? join(setup.root, "content", "_assets")
+                : join(setup.root, "content", "_assets", "daily")
+            const displaced = `${target}.displaced`
+            await import("node:fs/promises").then(({ rename }) => rename(target, displaced))
+            if (
+              !(await createLinkOrSkip(
+                skip,
+                outside,
+                target,
+                process.platform === "win32" ? "junction" : "dir",
+              ))
+            )
+              return
+            swappedOnce = true
+          },
+        }),
+      })
+
+      const error = await service.open({ path: "content/life/daily.md" }).catch((caught) => caught)
+      expect(["IMAGE_LIBRARY_CHANGED", "IMAGE_LIBRARY_UNSAFE"]).toContain(code(error))
+      expect((error as AppError).message).toMatch(/[\u3400-\u9fff]/)
+      expect(await readdir(outside)).toEqual([])
+    })
+  }
+
   it("rejects unknown, nested, corrupt, and unsafe entries", async () => {
     const cases: Array<() => Promise<void>> = [
       async () => writeFile(join(current!.libraryPath, "notes.txt"), "not an image"),
@@ -413,6 +461,36 @@ describe("note-scoped image library", () => {
     )
   })
 
+  it("streams note hashes up to the shared Markdown limit and rejects larger notes", async () => {
+    const boundary = await fixture()
+    const boundaryHandle = await import("node:fs/promises").then(({ open }) =>
+      open(boundary.notePath, "w"),
+    )
+    await boundaryHandle.truncate(MAX_MARKDOWN_UTF8_BYTES)
+    await boundaryHandle.close()
+    const boundaryService = createImageLibraryService({ workspace: boundary.root, adapter: adapter() })
+    await expect(boundaryService.open({ path: "content/life/daily.md" })).resolves.toMatchObject({
+      images: [],
+    })
+
+    const oversized = await fixture()
+    const oversizedHandle = await import("node:fs/promises").then(({ open }) =>
+      open(oversized.notePath, "w"),
+    )
+    await oversizedHandle.truncate(MAX_MARKDOWN_UTF8_BYTES + 1)
+    await oversizedHandle.close()
+    const renderThumbnail = vi.fn(adapter().renderThumbnail)
+    const oversizedService = createImageLibraryService({
+      workspace: oversized.root,
+      adapter: adapter({ renderThumbnail }),
+    })
+    await expectCode(
+      oversizedService.open({ path: "content/life/daily.md" }),
+      "IMAGE_LIBRARY_TOO_LARGE",
+    )
+    expect(renderThumbnail).not.toHaveBeenCalled()
+  })
+
   it("validates dimensions and exact canonical thumbnail data URL bounds", async () => {
     const invalidRenders = [
       { width: 0, height: 1, dataUrl: THUMBNAIL },
@@ -442,6 +520,20 @@ describe("note-scoped image library", () => {
     }
   })
 
+  it.each([
+    "data:image/jpeg;base64,iVBORw0KGgoBAQ==",
+    "data:image/png;base64,AAAAAA==",
+  ])("rejects corrupt or MIME-mismatched thumbnail bytes", async (dataUrl) => {
+    const setup = await fixture()
+    await mkdir(setup.libraryPath, { recursive: true })
+    await writeFile(join(setup.libraryPath, "photo.png"), PNG)
+    const service = createImageLibraryService({
+      workspace: setup.root,
+      adapter: adapter({ renderThumbnail: async () => ({ width: 1, height: 1, dataUrl }) }),
+    })
+    await expectCode(service.open({ path: "content/life/daily.md" }), "IMAGE_LIBRARY_INVALID")
+  })
+
   it("enforces the shared aggregate gallery thumbnail budget", async () => {
     const setup = await fixture()
     await mkdir(setup.libraryPath, { recursive: true })
@@ -452,7 +544,9 @@ describe("note-scoped image library", () => {
       ),
     )
     const payloadBytes = 380 * 1024
-    const largeThumbnail = `data:image/png;base64,${Buffer.alloc(payloadBytes).toString("base64")}`
+    const largeThumbnailBytes = Buffer.alloc(payloadBytes)
+    largeThumbnailBytes.set(PNG)
+    const largeThumbnail = `data:image/png;base64,${largeThumbnailBytes.toString("base64")}`
     expect(largeThumbnail.length).toBeLessThanOrEqual(IMAGE_LIBRARY_MAX_THUMBNAIL_DATA_URL_LENGTH)
     expect(largeThumbnail.length * count).toBeGreaterThan(
       IMAGE_LIBRARY_MAX_GALLERY_THUMBNAIL_TOTAL_LENGTH,
@@ -676,6 +770,123 @@ describe("note-scoped image library", () => {
       mtimeNs: before.mtimeNs,
       ctimeNs: before.ctimeNs,
     })
+  })
+
+  it("dispose waits for active opens and prevents all later work", async () => {
+    const setup = await fixture()
+    await mkdir(setup.libraryPath, { recursive: true })
+    await writeFile(join(setup.libraryPath, "photo.png"), PNG)
+    let releaseThumbnail!: () => void
+    const thumbnailGate = new Promise<void>((resolve) => {
+      releaseThumbnail = resolve
+    })
+    let thumbnailStarted!: () => void
+    const started = new Promise<void>((resolve) => {
+      thumbnailStarted = resolve
+    })
+    const renderThumbnail = vi.fn(async () => {
+      thumbnailStarted()
+      await thumbnailGate
+      return { width: 1, height: 1, dataUrl: THUMBNAIL }
+    })
+    const service = createImageLibraryService({
+      workspace: setup.root,
+      adapter: adapter({ renderThumbnail }),
+    })
+
+    const opening = service.open({ path: "content/life/daily.md" })
+    await started
+    let disposed = false
+    const disposing = service.dispose().then(() => {
+      disposed = true
+    })
+    await Promise.resolve()
+    expect(disposed).toBe(false)
+    await expectCode(service.open({ path: "content/life/daily.md" }), "IMAGE_LIBRARY_FAILED")
+    releaseThumbnail()
+    await opening
+    await disposing
+    expect(disposed).toBe(true)
+    expect(renderThumbnail).toHaveBeenCalledTimes(1)
+    await expectCode(service.open({ path: "content/life/daily.md" }), "IMAGE_LIBRARY_FAILED")
+    expect(renderThumbnail).toHaveBeenCalledTimes(1)
+  })
+
+  it("rolls back only owned empty artifacts after a failed open", async () => {
+    const setup = await fixture()
+    const service = createImageLibraryService({
+      workspace: setup.root,
+      adapter: adapter({ syncDirectory: async () => Promise.reject(new Error("sync failed")) }),
+    })
+    await expectCode(service.open({ path: "content/life/daily.md" }), "IMAGE_LIBRARY_FAILED")
+    await expect(lstat(join(setup.root, "content", "_assets"))).rejects.toMatchObject({
+      code: "ENOENT",
+    })
+  })
+
+  it("retains external content and replacements while rolling back owned artifacts", async () => {
+    const externalChild = await fixture()
+    let inserted = false
+    const externalService = createImageLibraryService({
+      workspace: externalChild.root,
+      adapter: adapter({
+        syncDirectory: async (path) => {
+          if (!inserted && path === externalChild.libraryPath) {
+            inserted = true
+            await writeFile(join(path, "foreign.txt"), "foreign")
+          }
+        },
+      }),
+    })
+    await expectCode(
+      externalService.open({ path: "content/life/daily.md" }),
+      "IMAGE_LIBRARY_CHANGED",
+    )
+    expect(await readFile(join(externalChild.libraryPath, "foreign.txt"), "utf8")).toBe("foreign")
+
+    const replacement = await fixture()
+    let replaced = false
+    const replacementService = createImageLibraryService({
+      workspace: replacement.root,
+      adapter: adapter({
+        syncDirectory: async (path) => {
+          if (!replaced && path === replacement.libraryPath) {
+            replaced = true
+            const marker = join(path, ".gitkeep")
+            await rm(marker)
+            await writeFile(marker, "external replacement")
+          }
+        },
+      }),
+    })
+    await expectCode(
+      replacementService.open({ path: "content/life/daily.md" }),
+      "IMAGE_LIBRARY_CHANGED",
+    )
+    expect(await readFile(join(replacement.libraryPath, ".gitkeep"), "utf8")).toBe(
+      "external replacement",
+    )
+  })
+
+  it("reports safe cleanup uncertainty when rollback sync fails", async () => {
+    const setup = await fixture()
+    let calls = 0
+    const service = createImageLibraryService({
+      workspace: setup.root,
+      adapter: adapter({
+        syncDirectory: async (path) => {
+          calls += 1
+          if (path === setup.libraryPath) await writeFile(join(path, "foreign.txt"), "foreign")
+          if (calls >= 4) throw new Error(`cleanup leak ${setup.root}`)
+        },
+      }),
+    })
+    const error = await service.open({ path: "content/life/daily.md" }).catch((caught) => caught)
+    expect(error).toMatchObject({
+      code: "IMAGE_LIBRARY_CHANGED",
+      details: { cleanupWarnings: expect.any(Array) },
+    })
+    expect(JSON.stringify(error)).not.toContain(setup.root)
   })
 
   it("acquires canonical paths in sorted order, asserts ownership, and releases in reverse", async () => {
