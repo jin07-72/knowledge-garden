@@ -76,13 +76,25 @@ interface DirectoryIdentity {
   readonly birthtimeNs: bigint
 }
 
+interface DirectChildSnapshot {
+  readonly name: string
+  readonly directoryType: string
+  readonly statType: string
+  readonly identity: FileIdentity
+}
+
+type DirectChildManifest = readonly DirectChildSnapshot[]
+
 const DATA_URL_PATTERN = /^data:image\/(png|jpeg|gif|webp|avif);base64,([A-Za-z0-9+/]*={0,2})$/
 const BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+const trustedErrors = new WeakSet<object>()
 
 function imageError(code: AppError["code"], message: string, details?: AppError["details"]): AppError {
-  return details === undefined
+  const error = details === undefined
     ? ({ code, message } as AppError)
     : ({ code, message, details } as AppError)
+  trustedErrors.add(error)
+  return error
 }
 
 function invalid(message = "图片库包含无效的文件或数据。"): AppError {
@@ -109,9 +121,91 @@ function isImageError(error: unknown): error is AppError {
   return (
     typeof error === "object" &&
     error !== null &&
+    trustedErrors.has(error) &&
     typeof (error as { code?: unknown }).code === "string" &&
     (error as { code: string }).code.startsWith("IMAGE_LIBRARY_")
   )
+}
+
+function statType(details: BigIntStats): string {
+  if (details.isSymbolicLink()) return "link"
+  if (details.isFile()) return "file"
+  if (details.isDirectory()) return "directory"
+  if (details.isBlockDevice()) return "block-device"
+  if (details.isCharacterDevice()) return "character-device"
+  if (details.isFIFO()) return "fifo"
+  if (details.isSocket()) return "socket"
+  return "unknown"
+}
+
+function directoryEntryType(entry: Dirent): string {
+  if (entry.isSymbolicLink()) return "link"
+  if (entry.isFile()) return "file"
+  if (entry.isDirectory()) return "directory"
+  if (entry.isBlockDevice()) return "block-device"
+  if (entry.isCharacterDevice()) return "character-device"
+  if (entry.isFIFO()) return "fifo"
+  if (entry.isSocket()) return "socket"
+  return "unknown"
+}
+
+function compareNames(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0
+}
+
+async function directChildManifest(
+  library: DirectorySnapshot,
+  entries?: readonly Dirent[],
+): Promise<DirectChildManifest> {
+  try {
+    const children =
+      entries ?? (await readdir(library.canonical, { withFileTypes: true }))
+    const manifest: DirectChildSnapshot[] = []
+    for (const entry of [...children].sort((left, right) => compareNames(left.name, right.name))) {
+      const details = await lstat(resolve(library.canonical, entry.name), { bigint: true })
+      manifest.push({
+        name: entry.name,
+        directoryType: directoryEntryType(entry),
+        statType: statType(details),
+        identity: fileIdentity(details),
+      })
+    }
+    return manifest
+  } catch (error) {
+    if (isImageError(error)) throw error
+    throw changed("图片库内容在读取过程中发生变化，请重试。")
+  }
+}
+
+function sameManifest(left: DirectChildManifest, right: DirectChildManifest): boolean {
+  return (
+    left.length === right.length &&
+    left.every((entry, index) => {
+      const other = right[index]
+      return (
+        other !== undefined &&
+        entry.name === other.name &&
+        entry.directoryType === other.directoryType &&
+        entry.statType === other.statType &&
+        sameFileIdentity(entry.identity, other.identity)
+      )
+    })
+  )
+}
+
+function withCreatedMarker(
+  manifest: DirectChildManifest,
+  marker: FileSnapshot,
+): DirectChildManifest {
+  return [
+    ...manifest,
+    {
+      name: ".gitkeep",
+      directoryType: "file",
+      statType: "file",
+      identity: marker.identity,
+    },
+  ].sort((left, right) => compareNames(left.name, right.name))
 }
 
 function pathsEqual(left: string, right: string): boolean {
@@ -374,11 +468,13 @@ async function createOrVerifyMarker(
   adapter: ImageLibraryAdapter,
 ): Promise<FileSnapshot> {
   let handle: Awaited<ReturnType<typeof open>> | undefined
+  let created: FileSnapshot | undefined
   try {
     handle = await open(path, "wx", 0o600)
     await handle.sync()
     await handle.close()
     handle = undefined
+    created = await verifyMarker(path, library)
     await adapter.syncDirectory?.(library.canonical)
   } catch (error) {
     await handle?.close().catch(() => undefined)
@@ -389,6 +485,10 @@ async function createOrVerifyMarker(
     }
   } finally {
     await handle?.close().catch(() => undefined)
+  }
+  if (created !== undefined) {
+    await verifyFileSnapshot(path, library.canonical, created)
+    return created
   }
   return verifyMarker(path, library)
 }
@@ -532,6 +632,7 @@ export function createImageLibraryService(options: {
         const entries = await readdir(library.canonical, { withFileTypes: true }).catch(() => {
           throw failed("无法读取图片库。")
         })
+        let expectedManifest = await directChildManifest(library, entries)
         const markerEntry = entries.find(({ name }) => name === ".gitkeep")
         if (markerEntry !== undefined) validateEntryType(markerEntry)
         const imageEntries = entries.filter(({ name }) => name !== ".gitkeep")
@@ -539,7 +640,10 @@ export function createImageLibraryService(options: {
 
         const markerPath = resolve(library.canonical, ".gitkeep")
         let marker: FileSnapshot | undefined
-        if (imageEntries.length === 0) marker = await createOrVerifyMarker(markerPath, library, options.adapter)
+        if (imageEntries.length === 0) {
+          marker = await createOrVerifyMarker(markerPath, library, options.adapter)
+          if (markerEntry === undefined) expectedManifest = withCreatedMarker(expectedManifest, marker)
+        }
         else if (markerEntry !== undefined) marker = await verifyMarker(markerPath, library)
 
         const images: ImageLibraryItem[] = []
@@ -555,6 +659,10 @@ export function createImageLibraryService(options: {
         await verifyFileSnapshot(initialNote.path, workspace, initialNote.snapshot)
         await verifyDirectory(library.canonical, assets.canonical, library)
         if (marker !== undefined) await verifyFileSnapshot(markerPath, library.canonical, marker, 0)
+        const finalManifest = await directChildManifest(library)
+        if (!sameManifest(expectedManifest, finalManifest)) {
+          throw changed("图片库内容在读取过程中发生变化，请重试。")
+        }
         result = { path: parsed.path, images }
       } catch (error) {
         primaryError = error

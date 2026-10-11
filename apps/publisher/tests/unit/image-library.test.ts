@@ -26,6 +26,9 @@ const leaseProbe = vi.hoisted(() => ({
   asserted: [] as string[],
   released: [] as string[],
   failRelease: false,
+  acquireError: undefined as unknown,
+  assertError: undefined as unknown,
+  releaseError: undefined as unknown,
 }))
 
 vi.mock("../../src/main/services/noteFiles", async (load) => {
@@ -37,16 +40,19 @@ vi.mock("../../src/main/services/noteFiles", async (load) => {
     ) {
       const path = args[1]
       leaseProbe.acquired.push(path)
+      if (leaseProbe.acquireError !== undefined) throw leaseProbe.acquireError
       const lease = await actual.acquireInternalNotePathLease(...args)
       return {
         lockId: lease.lockId,
         async assertOwned() {
           leaseProbe.asserted.push(path)
+          if (leaseProbe.assertError !== undefined) throw leaseProbe.assertError
           await lease.assertOwned()
         },
         async release() {
           leaseProbe.released.push(path)
           await lease.release()
+          if (leaseProbe.releaseError !== undefined) throw leaseProbe.releaseError
           if (leaseProbe.failRelease) throw new Error("injected release failure")
         },
       }
@@ -119,11 +125,44 @@ async function expectCode(run: Promise<unknown>, expected: AppError["code"]): Pr
   })
 }
 
+async function createLinkOrSkip(
+  skip: () => never,
+  target: string,
+  path: string,
+  type: "file" | "dir" | "junction",
+): Promise<boolean> {
+  try {
+    await symlink(target, path, type)
+    return true
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (process.platform === "win32" && (code === "EPERM" || code === "EACCES")) {
+      skip()
+      return false
+    }
+    throw error
+  }
+}
+
+async function expectSanitizedFailure(
+  run: Promise<unknown>,
+  expected: AppError["code"],
+  secret: string,
+): Promise<void> {
+  const error = await run.catch((caught) => caught)
+  expect(error).toMatchObject({ code: expected, message: expect.stringMatching(/[\u3400-\u9fff]/) })
+  expect(JSON.stringify(error)).not.toContain(secret)
+  expect((error as AppError).details).toBeUndefined()
+}
+
 beforeEach(() => {
   leaseProbe.acquired.length = 0
   leaseProbe.asserted.length = 0
   leaseProbe.released.length = 0
   leaseProbe.failRelease = false
+  leaseProbe.acquireError = undefined
+  leaseProbe.assertError = undefined
+  leaseProbe.releaseError = undefined
 })
 
 afterEach(async () => {
@@ -225,45 +264,47 @@ describe("note-scoped image library", () => {
     await expectCode(service.open({ path }), "IMAGE_LIBRARY_INVALID")
   })
 
-  it("rejects a missing, directory, or symlink note", async ({ skip }) => {
+  it("rejects a missing or directory note", async () => {
     const setup = await fixture()
     const service = createImageLibraryService({ workspace: setup.root, adapter: adapter() })
     await expectCode(service.open({ path: "content/life/missing.md" }), "IMAGE_LIBRARY_INVALID")
 
     await mkdir(join(setup.root, "content", "life", "folder.md"))
     await expectCode(service.open({ path: "content/life/folder.md" }), "IMAGE_LIBRARY_INVALID")
+  })
 
+  it("rejects a symlink note", async ({ skip }) => {
+    const setup = await fixture()
+    const service = createImageLibraryService({ workspace: setup.root, adapter: adapter() })
     const target = join(setup.root, "content", "life", "target.md")
     const linked = join(setup.root, "content", "life", "linked.md")
     await writeFile(target, "# target")
-    try {
-      await symlink(target, linked, "file")
-    } catch {
-      skip()
-      return
-    }
+    if (!(await createLinkOrSkip(skip, target, linked, "file"))) return
     await expectCode(service.open({ path: "content/life/linked.md" }), "IMAGE_LIBRARY_UNSAFE")
   })
 
-  it("requires an absolute canonical workspace directory", async () => {
+  it("requires an absolute canonical workspace directory", async ({ skip }) => {
     const setup = await fixture()
     const relativeService = createImageLibraryService({ workspace: ".", adapter: adapter() })
     await expectCode(relativeService.open({ path: "content/life/daily.md" }), "IMAGE_LIBRARY_INVALID")
 
     const alias = `${setup.root}-alias`
     cleanups.push(alias)
-    try {
-      await symlink(setup.root, alias, process.platform === "win32" ? "junction" : "dir")
-    } catch {
+    if (
+      !(await createLinkOrSkip(
+        skip,
+        setup.root,
+        alias,
+        process.platform === "win32" ? "junction" : "dir",
+      ))
+    )
       return
-    }
     const aliasService = createImageLibraryService({ workspace: alias, adapter: adapter() })
     await expectCode(aliasService.open({ path: "content/life/daily.md" }), "IMAGE_LIBRARY_UNSAFE")
   })
 
-  it.each(["content", "content/_assets", "content/_assets/daily"])(
-    "rejects a linked %s ancestor",
-    async (relative) => {
+  for (const relative of ["content", "content/_assets", "content/_assets/daily"] as const) {
+    it(`rejects a linked ${relative} ancestor`, async ({ skip }) => {
       const setup = await fixture()
       const outside = await mkdtemp(join(tmpdir(), "publisher-image-outside-"))
       cleanups.push(outside)
@@ -275,50 +316,52 @@ describe("note-scoped image library", () => {
       } else {
         await mkdir(join(target, ".."), { recursive: true })
       }
-      try {
-        await symlink(outside, target, process.platform === "win32" ? "junction" : "dir")
-      } catch {
+      if (
+        !(await createLinkOrSkip(
+          skip,
+          outside,
+          target,
+          process.platform === "win32" ? "junction" : "dir",
+        ))
+      )
         return
-      }
       const service = createImageLibraryService({ workspace: setup.root, adapter: adapter() })
       await expectCode(service.open({ path: "content/life/daily.md" }), "IMAGE_LIBRARY_UNSAFE")
-    },
-  )
+    })
+  }
 
-  it("rejects unknown, nested, symlinked, corrupt, and unsafe entries", async ({ skip }) => {
+  it("rejects unknown, nested, corrupt, and unsafe entries", async () => {
     const cases: Array<() => Promise<void>> = [
       async () => writeFile(join(current!.libraryPath, "notes.txt"), "not an image"),
       async () => mkdir(join(current!.libraryPath, "nested")),
       async () => writeFile(join(current!.libraryPath, "bad.png"), "corrupt"),
       async () => writeFile(join(current!.libraryPath, ".png"), PNG),
-      async () => {
-        const outside = join(current!.root, "outside.png")
-        await writeFile(outside, PNG)
-        await symlink(outside, join(current!.libraryPath, "linked.png"), "file")
-      },
     ]
     let current: Fixture | undefined
     for (let index = 0; index < cases.length; index += 1) {
       current = await fixture()
       await mkdir(current.libraryPath, { recursive: true })
-      try {
-        await cases[index]!()
-      } catch {
-        if (index === cases.length - 1) {
-          skip()
-          return
-        }
-        throw new Error("fixture setup failed")
-      }
+      await cases[index]!()
       const service = createImageLibraryService({ workspace: current.root, adapter: adapter() })
       await expectCode(
         service.open({ path: "content/life/daily.md" }),
-        index === 4 ? "IMAGE_LIBRARY_UNSAFE" : "IMAGE_LIBRARY_INVALID",
+        "IMAGE_LIBRARY_INVALID",
       )
     }
   })
 
-  it("rejects a nonempty or linked marker instead of replacing it", async ({ skip }) => {
+  it("rejects a symlink image entry", async ({ skip }) => {
+    const setup = await fixture()
+    await mkdir(setup.libraryPath, { recursive: true })
+    const outside = join(setup.root, "outside.png")
+    await writeFile(outside, PNG)
+    if (!(await createLinkOrSkip(skip, outside, join(setup.libraryPath, "linked.png"), "file")))
+      return
+    const service = createImageLibraryService({ workspace: setup.root, adapter: adapter() })
+    await expectCode(service.open({ path: "content/life/daily.md" }), "IMAGE_LIBRARY_UNSAFE")
+  })
+
+  it("rejects a nonempty marker instead of replacing it", async () => {
     const setup = await fixture()
     await mkdir(setup.libraryPath, { recursive: true })
     const marker = join(setup.libraryPath, ".gitkeep")
@@ -326,16 +369,16 @@ describe("note-scoped image library", () => {
     const service = createImageLibraryService({ workspace: setup.root, adapter: adapter() })
     await expectCode(service.open({ path: "content/life/daily.md" }), "IMAGE_LIBRARY_INVALID")
     expect(await readFile(marker, "utf8")).toBe("foreign")
+  })
 
-    await rm(marker)
+  it("rejects a symlink marker instead of replacing it", async ({ skip }) => {
+    const setup = await fixture()
+    await mkdir(setup.libraryPath, { recursive: true })
+    const marker = join(setup.libraryPath, ".gitkeep")
     const outside = join(setup.root, "outside-marker")
     await writeFile(outside, "")
-    try {
-      await symlink(outside, marker, "file")
-    } catch {
-      skip()
-      return
-    }
+    if (!(await createLinkOrSkip(skip, outside, marker, "file"))) return
+    const service = createImageLibraryService({ workspace: setup.root, adapter: adapter() })
     await expectCode(service.open({ path: "content/life/daily.md" }), "IMAGE_LIBRARY_UNSAFE")
   })
 
@@ -468,6 +511,171 @@ describe("note-scoped image library", () => {
       })
       await expectCode(service.open({ path: "content/life/daily.md" }), "IMAGE_LIBRARY_CHANGED")
     }
+  })
+
+  it.each(["add", "remove", "replace"] as const)(
+    "rejects a direct-child manifest %s race after thumbnailing",
+    async (mutation) => {
+      const setup = await fixture()
+      await mkdir(setup.libraryPath, { recursive: true })
+      const image = join(setup.libraryPath, "photo.png")
+      await writeFile(image, PNG)
+      const service = createImageLibraryService({
+        workspace: setup.root,
+        adapter: adapter({
+          afterPhase: async (phase) => {
+            if (phase !== "thumbnail-rendered") return
+            if (mutation === "add") await writeFile(join(setup.libraryPath, "intruder.txt"), "x")
+            if (mutation === "remove") await rm(image)
+            if (mutation === "replace") {
+              await rm(image)
+              await writeFile(image, PNG)
+            }
+          },
+        }),
+      })
+      await expectCode(service.open({ path: "content/life/daily.md" }), "IMAGE_LIBRARY_CHANGED")
+    },
+  )
+
+  it("rejects a child inserted from the marker directory-sync seam", async () => {
+    const setup = await fixture()
+    const service = createImageLibraryService({
+      workspace: setup.root,
+      adapter: adapter({
+        syncDirectory: async (path) => {
+          if (path === setup.libraryPath) await writeFile(join(path, "intruder.txt"), "x")
+        },
+      }),
+    })
+    await expectCode(service.open({ path: "content/life/daily.md" }), "IMAGE_LIBRARY_CHANGED")
+  })
+
+  it("sanitizes malicious AppError-shaped adapter failures at every reachable seam", async () => {
+    const secret = "C:\\secret\\adapter-token"
+    const malicious = {
+      code: "IMAGE_LIBRARY_INVALID",
+      message: `leak ${secret}`,
+      details: { path: secret },
+    }
+
+    const noteSetup = await fixture()
+    const noteService = createImageLibraryService({
+      workspace: noteSetup.root,
+      adapter: adapter({ afterPhase: () => Promise.reject(malicious) }),
+    })
+    await expectSanitizedFailure(
+      noteService.open({ path: "content/life/daily.md" }),
+      "IMAGE_LIBRARY_FAILED",
+      secret,
+    )
+
+    const syncSetup = await fixture()
+    const syncService = createImageLibraryService({
+      workspace: syncSetup.root,
+      adapter: adapter({ syncDirectory: () => Promise.reject(malicious) }),
+    })
+    await expectSanitizedFailure(
+      syncService.open({ path: "content/life/daily.md" }),
+      "IMAGE_LIBRARY_FAILED",
+      secret,
+    )
+
+    for (const seam of ["image-read", "thumbnail-rendered"] as const) {
+      const setup = await fixture()
+      await mkdir(setup.libraryPath, { recursive: true })
+      await writeFile(join(setup.libraryPath, "photo.png"), PNG)
+      const service = createImageLibraryService({
+        workspace: setup.root,
+        adapter: adapter({
+          afterPhase: (phase) => (phase === seam ? Promise.reject(malicious) : undefined),
+        }),
+      })
+      await expectSanitizedFailure(
+        service.open({ path: "content/life/daily.md" }),
+        "IMAGE_LIBRARY_FAILED",
+        secret,
+      )
+    }
+
+    const renderSetup = await fixture()
+    await mkdir(renderSetup.libraryPath, { recursive: true })
+    await writeFile(join(renderSetup.libraryPath, "photo.png"), PNG)
+    const renderService = createImageLibraryService({
+      workspace: renderSetup.root,
+      adapter: adapter({ renderThumbnail: () => Promise.reject(malicious) }),
+    })
+    await expectSanitizedFailure(
+      renderService.open({ path: "content/life/daily.md" }),
+      "IMAGE_LIBRARY_FAILED",
+      secret,
+    )
+
+    const releaseSetup = await fixture()
+    leaseProbe.releaseError = malicious
+    const releaseService = createImageLibraryService({
+      workspace: releaseSetup.root,
+      adapter: adapter(),
+    })
+    await expectSanitizedFailure(
+      releaseService.open({ path: "content/life/daily.md" }),
+      "IMAGE_LIBRARY_FAILED",
+      secret,
+    )
+    leaseProbe.releaseError = undefined
+
+    const acquireSetup = await fixture()
+    leaseProbe.acquireError = malicious
+    const acquireService = createImageLibraryService({
+      workspace: acquireSetup.root,
+      adapter: adapter(),
+    })
+    await expectSanitizedFailure(
+      acquireService.open({ path: "content/life/daily.md" }),
+      "IMAGE_LIBRARY_FAILED",
+      secret,
+    )
+    leaseProbe.acquireError = undefined
+
+    const assertSetup = await fixture()
+    leaseProbe.assertError = malicious
+    const assertService = createImageLibraryService({
+      workspace: assertSetup.root,
+      adapter: adapter(),
+    })
+    await expectSanitizedFailure(
+      assertService.open({ path: "content/life/daily.md" }),
+      "IMAGE_LIBRARY_CHANGED",
+      secret,
+    )
+  })
+
+  it("never changes Markdown note bytes while creating or listing a library", async () => {
+    const setup = await fixture()
+    const beforeBytes = await readFile(setup.notePath)
+    const before = await lstat(setup.notePath, { bigint: true })
+    const service = createImageLibraryService({ workspace: setup.root, adapter: adapter() })
+
+    await service.open({ path: "content/life/daily.md" })
+    await writeFile(join(setup.libraryPath, "photo.png"), PNG)
+    await service.open({ path: "content/life/daily.md" })
+
+    const afterBytes = await readFile(setup.notePath)
+    const after = await lstat(setup.notePath, { bigint: true })
+    expect(afterBytes).toEqual(beforeBytes)
+    expect({
+      dev: after.dev,
+      ino: after.ino,
+      size: after.size,
+      mtimeNs: after.mtimeNs,
+      ctimeNs: after.ctimeNs,
+    }).toEqual({
+      dev: before.dev,
+      ino: before.ino,
+      size: before.size,
+      mtimeNs: before.mtimeNs,
+      ctimeNs: before.ctimeNs,
+    })
   })
 
   it("acquires canonical paths in sorted order, asserts ownership, and releases in reverse", async () => {
