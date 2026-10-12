@@ -54,6 +54,10 @@ export type ImageLibraryPhase =
   | "import-before-marker-backup"
   | "import-marker-removed"
   | "delete-before-quarantine"
+  | "delete-before-rename"
+  | "delete-renamed"
+  | "delete-before-commit"
+  | "delete-committed"
   | "delete-quarantine-linked"
   | "delete-quarantined"
   | "delete-target-removed"
@@ -851,7 +855,7 @@ export function createImageLibraryService(options: {
   }
 
   async function runImageOperation<T>(operation: () => Promise<T>): Promise<T> {
-    await imports.inspect()
+    await Promise.all([imports.inspect(), operations.inspect()])
     try {
       return await operation()
     } catch (error) {
@@ -863,11 +867,11 @@ export function createImageLibraryService(options: {
   }
   // Start a read-only, bounded residue audit immediately; public operations
   // repeat it so a residue appearing later also fails closed.
-  track(imports.inspect())
+  track(Promise.all([imports.inspect(), operations.inspect()]))
 
   function openCore(request: NotePathRequest): Promise<ImageLibraryView> {
       const operation = (async (): Promise<ImageLibraryView> => {
-        await imports.inspect()
+        await Promise.all([imports.inspect(), operations.inspect()])
         const parsed = parseNotePath(request.path)
         const workspace = await canonicalWorkspace(options.workspace)
         const initialNote = await noteSnapshot(workspace, parsed)
@@ -960,6 +964,7 @@ export function createImageLibraryService(options: {
     commit(request: ImageLibraryCommitRequest): Promise<ImageLibraryView> {
       if (disposed) return Promise.reject(failed("图片库服务已关闭。"))
       return track((async () => {
+        await operations.inspect()
         const parsed = parseNotePath(request.path)
         const workspace = await canonicalWorkspace(options.workspace)
         const leases = await acquireLocks(workspace, [parsed.path, parsed.attachmentPath])

@@ -7,6 +7,7 @@ import {
   readFile,
   readdir,
   realpath,
+  rename,
   rm,
   symlink,
   writeFile,
@@ -31,6 +32,7 @@ const leaseProbe = vi.hoisted(() => ({
   acquireError: undefined as unknown,
   assertError: undefined as unknown,
   releaseError: undefined as unknown,
+  immediate: false,
 }))
 
 const ownershipFault = vi.hoisted(() => ({
@@ -77,6 +79,20 @@ vi.mock("../../src/main/services/noteFiles", async (load) => {
       const path = args[1]
       leaseProbe.acquired.push(path)
       if (leaseProbe.acquireError !== undefined) throw leaseProbe.acquireError
+      if (leaseProbe.immediate) {
+        return {
+          lockId: `immediate:${path}`,
+          async assertOwned() {
+            leaseProbe.asserted.push(path)
+            if (leaseProbe.assertError !== undefined) throw leaseProbe.assertError
+          },
+          async release() {
+            leaseProbe.released.push(path)
+            if (leaseProbe.releaseError !== undefined) throw leaseProbe.releaseError
+            if (leaseProbe.failRelease) throw new Error("injected release failure")
+          },
+        }
+      }
       const lease = await actual.acquireInternalNotePathLease(...args)
       return {
         lockId: lease.lockId,
@@ -207,6 +223,7 @@ beforeEach(() => {
   leaseProbe.acquireError = undefined
   leaseProbe.assertError = undefined
   leaseProbe.releaseError = undefined
+  leaseProbe.immediate = false
   ownershipFault.path = undefined
   ownershipFault.afterCapturePath = undefined
   ownershipFault.markerSync = false
@@ -1030,6 +1047,109 @@ describe("note-scoped image library", () => {
     expect(await readFile(target)).toEqual(Buffer.from(replacement))
   })
 
+  it("atomically quarantines and restores a replacement installed immediately before rename", async () => {
+    const setup = await fixture()
+    await mkdir(setup.libraryPath, { recursive: true })
+    const target = join(setup.libraryPath, "photo.png")
+    await writeFile(target, PNG)
+    const replacement = Uint8Array.from([...PNG, 77])
+    const service = createImageLibraryService({
+      workspace: setup.root,
+      adapter: adapter({
+        afterPhase: async (phase) => {
+          if ((phase as string) !== "delete-before-rename") return
+          await rm(target)
+          await writeFile(target, replacement)
+        },
+      }),
+    })
+
+    await expectCode(
+      service.delete({
+        path: "content/life/daily.md",
+        name: "photo.png",
+        expectedContentHash: contentHash(PNG),
+      }),
+      "IMAGE_LIBRARY_CHANGED",
+    )
+    expect(await readFile(target)).toEqual(Buffer.from(replacement))
+    expect((await readdir(setup.libraryPath)).filter((name) => name.startsWith(".garden-delete-"))).toEqual([])
+  })
+
+  it("preserves a late external quarantine destination collision", async () => {
+    const setup = await fixture()
+    await mkdir(setup.libraryPath, { recursive: true })
+    const target = join(setup.libraryPath, "photo.png")
+    await writeFile(target, PNG)
+    const external = Buffer.from("external quarantine")
+    let collision = ""
+    const service = createImageLibraryService({
+      workspace: setup.root,
+      adapter: adapter({
+        afterPhase: async (phase) => {
+          if ((phase as string) !== "delete-before-rename") return
+          const directory = (await readdir(setup.libraryPath)).find((name) =>
+            name.startsWith(".garden-delete-"),
+          )!
+          collision = join(setup.libraryPath, directory, "image")
+          await writeFile(collision, external)
+        },
+      }),
+    })
+
+    const error = await service
+      .delete({
+        path: "content/life/daily.md",
+        name: "photo.png",
+        expectedContentHash: contentHash(PNG),
+      })
+      .catch((caught) => caught)
+    expect(error).toMatchObject({
+      code: "IMAGE_LIBRARY_FAILED",
+      details: { cleanupWarnings: expect.any(Array) },
+    })
+    expect(await readFile(target)).toEqual(Buffer.from(PNG))
+    expect(await readFile(collision)).toEqual(external)
+  })
+
+  it("preserves a replaced delete journal manifest during rollback", async () => {
+    const setup = await fixture()
+    await mkdir(setup.libraryPath, { recursive: true })
+    const target = join(setup.libraryPath, "photo.png")
+    await writeFile(target, PNG)
+    let replacedManifest = ""
+    let replacementIdentity: bigint | undefined
+    const service = createImageLibraryService({
+      workspace: setup.root,
+      adapter: adapter({
+        afterPhase: async (phase) => {
+          if ((phase as string) !== "delete-renamed") return
+          const root = join(setup.root, ".garden-publisher", "image-delete")
+          const id = (await readdir(root)).find((name) => /^[0-9a-f-]{36}$/i.test(name))!
+          replacedManifest = join(root, id, "manifest.json")
+          const bytes = await readFile(replacedManifest)
+          await rm(replacedManifest)
+          await writeFile(replacedManifest, bytes)
+          replacementIdentity = (await lstat(replacedManifest, { bigint: true })).ino
+          throw new Error("stop after manifest replacement")
+        },
+      }),
+    })
+
+    const error = await service
+      .delete({
+        path: "content/life/daily.md",
+        name: "photo.png",
+        expectedContentHash: contentHash(PNG),
+      })
+      .catch((caught) => caught)
+    expect(error).toMatchObject({
+      code: "IMAGE_LIBRARY_FAILED",
+      details: { cleanupWarnings: expect.any(Array) },
+    })
+    expect((await lstat(replacedManifest, { bigint: true })).ino).toBe(replacementIdentity)
+  })
+
   it("rolls back an owned delete quarantine when a later step fails", async () => {
     const setup = await fixture()
     await mkdir(setup.libraryPath, { recursive: true })
@@ -1153,6 +1273,277 @@ describe("note-scoped image library", () => {
     await previewing
     await disposing
     expect(disposed).toBe(true)
+  })
+
+  it("serializes full preview decoding globally across different notes", async () => {
+    leaseProbe.immediate = true
+    const first = await fixture("content/life/daily.md")
+    const secondPath = "private/reading/secret.md"
+    const secondNote = join(first.root, ...secondPath.split("/"))
+    const secondLibrary = join(first.root, "private", "_assets", "secret")
+    await mkdir(join(secondNote, ".."), { recursive: true })
+    await writeFile(secondNote, "# secret\n")
+    await mkdir(first.libraryPath, { recursive: true })
+    await mkdir(secondLibrary, { recursive: true })
+    await writeFile(join(first.libraryPath, "one.png"), PNG)
+    await writeFile(join(secondLibrary, "two.png"), PNG)
+    let releaseFirst!: () => void
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve
+    })
+    let firstStarted!: () => void
+    const started = new Promise<void>((resolve) => {
+      firstStarted = resolve
+    })
+    let calls = 0
+    const readDimensions = vi.fn(async () => {
+      calls += 1
+      if (calls === 1) {
+        firstStarted()
+        await firstGate
+      }
+      return { width: 1, height: 1 }
+    })
+    const service = createImageLibraryService({
+      workspace: first.root,
+      adapter: adapter({ readDimensions }),
+    })
+
+    const firstPreview = service.preview({ path: "content/life/daily.md", name: "one.png" })
+    await started
+    const secondPreview = service.preview({ path: secondPath, name: "two.png" })
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    expect(readDimensions).toHaveBeenCalledTimes(1)
+    releaseFirst()
+    await Promise.all([firstPreview, secondPreview])
+    expect(readDimensions).toHaveBeenCalledTimes(2)
+  })
+
+  it.each(["prepared", "renamed"] as const)(
+    "recovers an uncommitted %s delete journal on the next service start",
+    async (phase) => {
+      const setup = await fixture()
+      await mkdir(setup.libraryPath, { recursive: true })
+      const target = join(setup.libraryPath, "photo.png")
+      await writeFile(target, PNG)
+      const id = randomUUID()
+      const quarantine = join(setup.libraryPath, `.garden-delete-${id}`)
+      const stage = join(setup.root, ".garden-publisher", "image-delete", id)
+      await mkdir(quarantine)
+      await mkdir(stage, { recursive: true })
+      const before = await lstat(target, { bigint: true })
+      const quarantineDetails = await lstat(quarantine, { bigint: true })
+      if (phase === "renamed") await rename(target, join(quarantine, "image"))
+      await writeFile(
+        join(stage, "manifest.json"),
+        JSON.stringify({
+          version: 1,
+          id,
+          workspace: contentHash(Buffer.from(setup.root)),
+          note: "content/life/daily.md",
+          name: "photo.png",
+          expectedContentHash: contentHash(PNG),
+          expectedIdentity: {
+            dev: before.dev.toString(),
+            ino: before.ino.toString(),
+            size: before.size.toString(),
+            mtimeNs: before.mtimeNs.toString(),
+          },
+          quarantineIdentity: {
+            dev: quarantineDetails.dev.toString(),
+            ino: quarantineDetails.ino.toString(),
+            birthtimeNs: quarantineDetails.birthtimeNs.toString(),
+          },
+          phase,
+        }),
+      )
+
+      const service = createImageLibraryService({ workspace: setup.root, adapter: adapter() })
+      await expect(service.open({ path: "content/life/daily.md" })).resolves.toMatchObject({
+        images: [{ name: "photo.png" }],
+      })
+      expect(await readFile(target)).toEqual(Buffer.from(PNG))
+      await expect(lstat(quarantine)).rejects.toMatchObject({ code: "ENOENT" })
+      await expect(lstat(stage)).rejects.toMatchObject({ code: "ENOENT" })
+      const expectedLocks = ["content/life/daily.md", "content/_assets/daily"].sort((a, b) =>
+        a.localeCompare(b),
+      )
+      expect(leaseProbe.acquired).toEqual([...expectedLocks, ...expectedLocks])
+    },
+  )
+
+  it("finishes cleanup for a committed delete journal on the next service start", async () => {
+    const setup = await fixture()
+    await mkdir(setup.libraryPath, { recursive: true })
+    const target = join(setup.libraryPath, "photo.png")
+    await writeFile(target, PNG)
+    const before = await lstat(target, { bigint: true })
+    const id = randomUUID()
+    const quarantine = join(setup.libraryPath, `.garden-delete-${id}`)
+    const stage = join(setup.root, ".garden-publisher", "image-delete", id)
+    await mkdir(quarantine)
+    const quarantineDetails = await lstat(quarantine, { bigint: true })
+    await mkdir(stage, { recursive: true })
+    await rename(target, join(quarantine, "image"))
+    await writeFile(join(setup.libraryPath, ".gitkeep"), "")
+    await writeFile(
+      join(stage, "manifest.json"),
+      JSON.stringify({
+        version: 1,
+        id,
+        workspace: contentHash(Buffer.from(setup.root)),
+        note: "content/life/daily.md",
+        name: "photo.png",
+        expectedContentHash: contentHash(PNG),
+        expectedIdentity: {
+          dev: before.dev.toString(),
+          ino: before.ino.toString(),
+          size: before.size.toString(),
+          mtimeNs: before.mtimeNs.toString(),
+        },
+        quarantineIdentity: {
+          dev: quarantineDetails.dev.toString(),
+          ino: quarantineDetails.ino.toString(),
+          birthtimeNs: quarantineDetails.birthtimeNs.toString(),
+        },
+        phase: "committed",
+      }),
+    )
+
+    const service = createImageLibraryService({ workspace: setup.root, adapter: adapter() })
+    await expect(service.open({ path: "content/life/daily.md" })).resolves.toEqual({
+      path: "content/life/daily.md",
+      images: [],
+    })
+    await expect(lstat(target)).rejects.toMatchObject({ code: "ENOENT" })
+    await expect(lstat(quarantine)).rejects.toMatchObject({ code: "ENOENT" })
+    await expect(lstat(stage)).rejects.toMatchObject({ code: "ENOENT" })
+  })
+
+  it("restores the image when the final target-absence directory sync fails", async () => {
+    const setup = await fixture()
+    await mkdir(setup.libraryPath, { recursive: true })
+    const target = join(setup.libraryPath, "photo.png")
+    await writeFile(target, PNG)
+    let failCommitSync = false
+    const service = createImageLibraryService({
+      workspace: setup.root,
+      adapter: adapter({
+        afterPhase: (phase) => {
+          if ((phase as string) === "delete-before-commit") failCommitSync = true
+        },
+        syncDirectory: async (path) => {
+          if (failCommitSync && path === setup.libraryPath) {
+            failCommitSync = false
+            throw new Error("injected final directory sync failure")
+          }
+        },
+      }),
+    })
+
+    await expectCode(
+      service.delete({
+        path: "content/life/daily.md",
+        name: "photo.png",
+        expectedContentHash: contentHash(PNG),
+      }),
+      "IMAGE_LIBRARY_FAILED",
+    )
+    expect(await readFile(target)).toEqual(Buffer.from(PNG))
+    expect((await readdir(setup.libraryPath)).filter((name) => name.startsWith(".garden-delete-"))).toEqual([])
+  })
+
+  it("preserves a replaced committed quarantine captured inside the journal stage", async () => {
+    const setup = await fixture()
+    await mkdir(setup.libraryPath, { recursive: true })
+    const target = join(setup.libraryPath, "photo.png")
+    await writeFile(target, PNG)
+    const before = await lstat(target, { bigint: true })
+    const id = randomUUID()
+    const originalQuarantine = join(setup.libraryPath, `.garden-delete-${id}`)
+    const stage = join(setup.root, ".garden-publisher", "image-delete", id)
+    await mkdir(originalQuarantine)
+    const originalDirectory = await lstat(originalQuarantine, { bigint: true })
+    await mkdir(stage, { recursive: true })
+    await rm(originalQuarantine, { recursive: true })
+    const held = join(stage, "quarantine")
+    await mkdir(held)
+    await writeFile(join(held, "image"), Uint8Array.from([...PNG, 91]))
+    await rm(target)
+    await writeFile(join(setup.libraryPath, ".gitkeep"), "")
+    await writeFile(
+      join(stage, "manifest.json"),
+      JSON.stringify({
+        version: 1,
+        id,
+        workspace: contentHash(Buffer.from(setup.root)),
+        note: "content/life/daily.md",
+        name: "photo.png",
+        expectedContentHash: contentHash(PNG),
+        expectedIdentity: {
+          dev: before.dev.toString(),
+          ino: before.ino.toString(),
+          size: before.size.toString(),
+          mtimeNs: before.mtimeNs.toString(),
+        },
+        quarantineIdentity: {
+          dev: originalDirectory.dev.toString(),
+          ino: originalDirectory.ino.toString(),
+          birthtimeNs: originalDirectory.birthtimeNs.toString(),
+        },
+        phase: "committed",
+      }),
+    )
+
+    const service = createImageLibraryService({ workspace: setup.root, adapter: adapter() })
+    const error = await service.open({ path: "content/life/daily.md" }).catch((caught) => caught)
+    expect(error).toMatchObject({ code: "IMAGE_LIBRARY_FAILED" })
+    expect(await readFile(join(held, "image"))).toEqual(Buffer.from([...PNG, 91]))
+  })
+
+  it("finishes a committed journal already atomically captured for cleanup", async () => {
+    const setup = await fixture()
+    await mkdir(setup.libraryPath, { recursive: true })
+    const target = join(setup.libraryPath, "photo.png")
+    await writeFile(target, PNG)
+    const before = await lstat(target, { bigint: true })
+    const id = randomUUID()
+    const stage = join(setup.root, ".garden-publisher", "image-delete", `${id}.cleanup`)
+    const held = join(stage, "quarantine")
+    await mkdir(held, { recursive: true })
+    const heldDirectory = await lstat(held, { bigint: true })
+    await rename(target, join(held, "image"))
+    await writeFile(join(setup.libraryPath, ".gitkeep"), "")
+    await writeFile(
+      join(stage, "manifest.json"),
+      JSON.stringify({
+        version: 1,
+        id,
+        workspace: contentHash(Buffer.from(setup.root)),
+        note: "content/life/daily.md",
+        name: "photo.png",
+        expectedContentHash: contentHash(PNG),
+        expectedIdentity: {
+          dev: before.dev.toString(),
+          ino: before.ino.toString(),
+          size: before.size.toString(),
+          mtimeNs: before.mtimeNs.toString(),
+        },
+        quarantineIdentity: {
+          dev: heldDirectory.dev.toString(),
+          ino: heldDirectory.ino.toString(),
+          birthtimeNs: heldDirectory.birthtimeNs.toString(),
+        },
+        phase: "committed",
+      }),
+    )
+
+    const service = createImageLibraryService({ workspace: setup.root, adapter: adapter() })
+    await expect(service.open({ path: "content/life/daily.md" })).resolves.toEqual({
+      path: "content/life/daily.md",
+      images: [],
+    })
+    await expect(lstat(stage)).rejects.toMatchObject({ code: "ENOENT" })
   })
 
   it("dispose waits for active opens and prevents all later work", async () => {
