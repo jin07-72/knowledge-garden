@@ -17,10 +17,13 @@ import {
   isDeleteManifestSlot,
   isPublishedDeleteManifestSlot,
   loadDeleteManifest,
+  matchesSerializedDeleteDirectoryIdentity as sameSerializedDirectoryIdentity,
+  matchesSerializedDeleteFileIdentity as sameSerializedFileIdentity,
   publishDeleteManifest,
+  serializeDeleteDirectoryIdentity as serializeDirectoryIdentity,
+  serializeDeleteFileIdentity as serializeFileIdentity,
   type DeleteManifest,
-  type SerializedDeleteDirectoryIdentity as SerializedDirectoryIdentity,
-  type SerializedDeleteFileIdentity as SerializedFileIdentity,
+  validateDeleteManifest,
 } from "./imageLibraryDeleteJournalCodec"
 import { serializeImagePreview } from "./imageLibraryPreviewGate"
 
@@ -36,6 +39,8 @@ type OperationPhase =
   | "delete-quarantine-linked"
   | "delete-quarantined"
   | "delete-target-removed"
+  | "delete-cleanup-latest-captured"
+  | "delete-cleanup-latest-removed"
 
 interface OperationAdapter {
   readDimensions(bytes: Uint8Array): Promise<{ width: number; height: number }>
@@ -390,89 +395,8 @@ interface DeleteJournal {
 }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
-const HASH_PATTERN = /^[a-f0-9]{64}$/
-
-function serializeFileIdentity(value: FileIdentity): SerializedFileIdentity {
-  return {
-    dev: value.dev.toString(),
-    ino: value.ino.toString(),
-    size: value.size.toString(),
-    mtimeNs: value.mtimeNs.toString(),
-  }
-}
-
-function serializeDirectoryIdentity(value: DirectoryProof): SerializedDirectoryIdentity {
-  return {
-    dev: value.dev.toString(),
-    ino: value.ino.toString(),
-    birthtimeNs: value.birthtimeNs.toString(),
-  }
-}
-
-function sameSerializedFileIdentity(value: FileIdentity, expected: SerializedFileIdentity): boolean {
-  return (
-    value.dev.toString() === expected.dev &&
-    value.ino.toString() === expected.ino &&
-    value.size.toString() === expected.size &&
-    value.mtimeNs.toString() === expected.mtimeNs
-  )
-}
-
-function sameSerializedDirectoryIdentity(
-  value: DirectoryProof,
-  expected: SerializedDirectoryIdentity,
-): boolean {
-  return (
-    value.dev.toString() === expected.dev &&
-    value.ino.toString() === expected.ino &&
-    value.birthtimeNs.toString() === expected.birthtimeNs
-  )
-}
-
 function workspaceHash(workspace: string): string {
   return createHash("sha256").update(Buffer.from(workspace)).digest("hex")
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-}
-
-function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  const actual = Object.keys(value).sort()
-  const expected = [...keys].sort()
-  return actual.length === expected.length && actual.every((key, index) => key === expected[index])
-}
-
-function parseIdentity(value: unknown, directory = false): value is SerializedFileIdentity | SerializedDirectoryIdentity {
-  if (!isRecord(value)) return false
-  const keys = directory ? ["dev", "ino", "birthtimeNs"] : ["dev", "ino", "size", "mtimeNs"]
-  return exactKeys(value, keys) && keys.every((key) => typeof value[key] === "string" && /^\d+$/.test(value[key] as string))
-}
-
-function validateDeleteManifest(
-  value: DeleteManifest,
-  expectedId: string,
-  workspace: string,
-  stage: DirectoryProof,
-): DeleteManifest {
-  if (
-    value.version !== 2 ||
-    !Number.isSafeInteger(value.sequence) || value.sequence < 0 ||
-    value.id !== expectedId ||
-    value.workspace !== workspaceHash(workspace) ||
-    typeof value.note !== "string" || MANAGED_NOTE_PATH_PATTERN.exec(value.note) === null ||
-    typeof value.name !== "string" || safeName(value.name) !== value.name ||
-    typeof value.expectedContentHash !== "string" || !HASH_PATTERN.test(value.expectedContentHash) ||
-    !parseIdentity(value.expectedIdentity) || !parseIdentity(value.stageIdentity, true) ||
-    !sameSerializedDirectoryIdentity(stage, value.stageIdentity) ||
-    !(value.quarantineIdentity === null || parseIdentity(value.quarantineIdentity, true)) ||
-    !(value.marker === null || (
-      isRecord(value.marker) && exactKeys(value.marker, ["identity", "hash"]) &&
-      parseIdentity(value.marker.identity) && typeof value.marker.hash === "string" && HASH_PATTERN.test(value.marker.hash)
-    )) ||
-    !["prepared", "renamed", "marker-planned", "committed"].includes(String(value.phase))
-  ) throw failed("图片删除恢复记录无效或认证失败。")
-  return value
 }
 
 async function ensureDirectory(path: string, parent: DirectoryProof): Promise<DirectoryProof> {
@@ -520,6 +444,14 @@ async function inspectMarkerAndImages(
   return { images, ...(marker === undefined ? {} : { marker }) }
 }
 
+function markerIntent(marker: DeleteManifest["marker"]): marker is { state: "intent"; sourceName: string } {
+  return marker !== null && "state" in marker && marker.state === "intent"
+}
+
+function markerProof(marker: DeleteManifest["marker"]): marker is Exclude<DeleteManifest["marker"], null | { state: "intent"; sourceName: string }> {
+  return marker !== null && !("state" in marker && marker.state === "intent")
+}
+
 async function removeCapturedJournal(
   journal: DeleteJournal,
   deleteRoot: DirectoryProof,
@@ -532,42 +464,29 @@ async function removeCapturedJournal(
   if (authenticatedFiles.manifest.sequence !== journal.manifest.sequence)
     throw failed("图片删除恢复记录状态已变化，已安全保留。")
   const children = await readdir(journal.stage.canonical, { withFileTypes: true })
-  if (children.some((entry) => !entry.isFile() || !isDeleteManifestSlot(entry.name)))
+  const sourceName = journal.manifest.marker !== null && "sourceName" in journal.manifest.marker
+    ? journal.manifest.marker.sourceName
+    : undefined
+  const markerCleanupPattern = sourceName === undefined
+    ? undefined
+    : new RegExp(`^\\.${sourceName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.cleanup-[0-9a-f-]{36}$`, "i")
+  if (children.some((entry) => !entry.isFile() || !(
+    isDeleteManifestSlot(entry.name) || entry.name === sourceName || markerCleanupPattern?.test(entry.name)
+  )))
     throw failed("图片删除记录包含未知项目。")
-  if (journal.quarantine !== undefined && await targetExists(journal.quarantinePath)) {
-    await verifyDirectory(journal.quarantinePath, resolve(journal.quarantinePath, ".."), journal.quarantine)
-    const entries = await readdir(journal.quarantinePath, { withFileTypes: true })
-    for (const entry of entries) {
-      const capturedImage = /^capture-[0-9a-f-]{36}$/i.test(entry.name)
-      const capturedMarker = /^marker-rollback-[0-9a-f-]{36}$/i.test(entry.name)
-      if (!entry.isFile() || !(["image", "marker-source"].includes(entry.name) || capturedImage || capturedMarker))
-        throw failed("图片删除隔离目录包含未知项目，已保留。")
-      const path = resolve(journal.quarantinePath, entry.name)
-      const snapshot = await fileSnapshot(path, journal.quarantinePath, MAX_IMAGE_BYTES, true)
-      if ((entry.name === "image" || capturedImage) && (
-        snapshot.proof.hash !== journal.manifest.expectedContentHash ||
-        !sameSerializedFileIdentity(snapshot.proof.identity, journal.manifest.expectedIdentity)
-      )) throw failed("图片删除隔离内容身份异常，已保留。")
-      if ((entry.name === "marker-source" || capturedMarker) && (
-        journal.manifest.marker === null || snapshot.proof.hash !== journal.manifest.marker.hash ||
-        !sameSerializedFileIdentity(snapshot.proof.identity, journal.manifest.marker.identity)
-      )) throw failed("图片库占位恢复源身份异常，已保留。")
-      const captured = resolve(journal.quarantinePath, `.cleanup-${randomUUID()}`)
-      await rename(path, captured)
-      const moved = await fileSnapshot(captured, journal.quarantinePath, MAX_IMAGE_BYTES, true)
-      if (!sameFileObject(moved.proof.identity, snapshot.proof.identity) || moved.proof.hash !== snapshot.proof.hash) {
-        await link(captured, path).catch(() => undefined)
-        throw failed("图片删除隔离内容在清理时被替换，外部内容已保留。")
-      }
-      await unlink(captured)
-      await adapter.syncDirectory?.(journal.quarantinePath)
+
+  const latestPath = authenticatedFiles.path
+  const removeManifestFile = async (
+    owned: (typeof authenticatedFiles.ownedPaths)[number],
+    latest: boolean,
+  ): Promise<void> => {
+    let captured = owned.path
+    if (!/^\.cleanup-manifest\./i.test(resolve(owned.path).split(/[\\/]/).at(-1)!)) {
+      captured = resolve(journal.stage.canonical, `.cleanup-manifest.${owned.sequence.toString().padStart(8, "0")}.${randomUUID()}`)
+      await rename(owned.path, captured)
+      await adapter.syncDirectory?.(journal.stage.canonical)
+      if (latest) await adapter.afterPhase?.("delete-cleanup-latest-captured")
     }
-    await rmdir(journal.quarantinePath)
-    await adapter.syncDirectory?.(resolve(journal.quarantinePath, ".."))
-  }
-  for (const owned of authenticatedFiles.ownedPaths) {
-    const captured = resolve(journal.stage.canonical, `.cleanup-${randomUUID()}`)
-    await rename(owned.path, captured)
     const moved = await fileSnapshot(captured, journal.stage.canonical, 64 * 1024, true)
     if (
       moved.proof.identity.dev !== owned.dev || moved.proof.identity.ino !== owned.ino ||
@@ -577,9 +496,79 @@ async function removeCapturedJournal(
       throw failed("图片删除恢复记录在清理时被替换，外部内容已保留。")
     }
     await unlink(captured)
+    if (latest) await adapter.afterPhase?.("delete-cleanup-latest-removed")
     await adapter.syncDirectory?.(journal.stage.canonical)
   }
-  if (authenticatedFiles.unknownPaths.length === 0) {
+
+  for (const owned of authenticatedFiles.ownedPaths.filter((item) => item.path !== latestPath))
+    await removeManifestFile(owned, false)
+
+  let preservePendingMarkerSource = false
+  if (sourceName !== undefined) {
+    const sourceEntry = children.find((entry) => entry.name === sourceName || markerCleanupPattern?.test(entry.name))
+    if (sourceEntry !== undefined) {
+      if (markerIntent(journal.manifest.marker)) {
+        preservePendingMarkerSource = true
+      } else if (markerProof(journal.manifest.marker)) {
+        const sourcePath = resolve(journal.stage.canonical, sourceEntry.name)
+        const snapshot = await fileSnapshot(sourcePath, journal.stage.canonical, MAX_IMAGE_BYTES, true)
+        if (
+          snapshot.bytes.length !== 0 || snapshot.proof.hash !== journal.manifest.marker.hash ||
+          !sameSerializedFileIdentity(snapshot.proof.identity, journal.manifest.marker.identity)
+        ) throw failed("图片库占位恢复源身份异常，已安全保留。")
+        let captured = sourcePath
+        if (sourceEntry.name === sourceName) {
+          captured = resolve(journal.stage.canonical, `.${sourceName}.cleanup-${randomUUID()}`)
+          await rename(sourcePath, captured)
+          await adapter.syncDirectory?.(journal.stage.canonical)
+        }
+        const moved = await fileSnapshot(captured, journal.stage.canonical, MAX_IMAGE_BYTES, true)
+        if (!sameFileObject(moved.proof.identity, snapshot.proof.identity) || moved.proof.hash !== snapshot.proof.hash)
+          throw failed("图片库占位恢复源在清理时被替换，已安全保留。")
+        await unlink(captured)
+        await adapter.syncDirectory?.(journal.stage.canonical)
+      }
+    }
+  }
+
+  if (journal.quarantine !== undefined && await targetExists(journal.quarantinePath)) {
+    await verifyDirectory(journal.quarantinePath, resolve(journal.quarantinePath, ".."), journal.quarantine)
+    const entries = await readdir(journal.quarantinePath, { withFileTypes: true })
+    for (const entry of entries) {
+      const capturedImage = /^(?:capture-|\.cleanup-image-)[0-9a-f-]{36}$/i.test(entry.name)
+      const capturedMarker = /^(?:marker-rollback-|\.cleanup-marker-)[0-9a-f-]{36}$/i.test(entry.name)
+      if (!entry.isFile() || !(["image", "marker-source"].includes(entry.name) || capturedImage || capturedMarker))
+        throw failed("图片删除隔离目录包含未知项目，已保留。")
+      const path = resolve(journal.quarantinePath, entry.name)
+      const snapshot = await fileSnapshot(path, journal.quarantinePath, MAX_IMAGE_BYTES, true)
+      if ((entry.name === "image" || capturedImage) && (
+        snapshot.proof.hash !== journal.manifest.expectedContentHash ||
+        !sameSerializedFileIdentity(snapshot.proof.identity, journal.manifest.expectedIdentity)
+      )) throw failed("图片删除隔离内容身份异常，已保留。")
+      if ((entry.name === "marker-source" || capturedMarker) && (
+        !markerProof(journal.manifest.marker) || snapshot.proof.hash !== journal.manifest.marker.hash ||
+        !sameSerializedFileIdentity(snapshot.proof.identity, journal.manifest.marker.identity)
+      )) throw failed("图片库占位恢复源身份异常，已保留。")
+      const cleanupKind = entry.name === "marker-source" || capturedMarker ? "marker" : "image"
+      const cleanupPath = resolve(journal.quarantinePath, `.cleanup-${cleanupKind}-${randomUUID()}`)
+      await rename(path, cleanupPath)
+      const moved = await fileSnapshot(cleanupPath, journal.quarantinePath, MAX_IMAGE_BYTES, true)
+      if (!sameFileObject(moved.proof.identity, snapshot.proof.identity) || moved.proof.hash !== snapshot.proof.hash) {
+        await link(cleanupPath, path).catch(() => undefined)
+        throw failed("图片删除隔离内容在清理时被替换，外部内容已保留。")
+      }
+      await unlink(cleanupPath)
+      await adapter.syncDirectory?.(journal.quarantinePath)
+    }
+    await rmdir(journal.quarantinePath)
+    await adapter.syncDirectory?.(resolve(journal.quarantinePath, ".."))
+  }
+  if (!preservePendingMarkerSource) {
+    const latest = authenticatedFiles.ownedPaths.find((item) => item.path === latestPath)
+    if (latest === undefined) throw failed("图片删除恢复记录缺少最新认证状态。")
+    await removeManifestFile(latest, true)
+  }
+  if (authenticatedFiles.unknownPaths.length === 0 && !preservePendingMarkerSource) {
     await rmdir(journal.stage.canonical)
     await adapter.syncDirectory?.(deleteRoot.canonical)
   }
@@ -593,7 +582,10 @@ async function loadJournal(
   const stage = await inspectDirectory(resolve(deleteRoot.canonical, id), deleteRoot.canonical)
   const key = await deleteJournalKey(workspace, false).catch(() => { throw failed("图片删除恢复密钥不可用。") })
   const loaded = await loadDeleteManifest(stage.canonical, key).catch(() => { throw failed("图片删除恢复记录无效或认证失败。") })
-  const manifest = validateDeleteManifest(loaded.manifest, id, workspace, stage)
+  const manifest = (() => {
+    try { return validateDeleteManifest(loaded.manifest, id, workspaceHash(workspace), stage) }
+    catch { throw failed("图片删除恢复记录无效或认证失败。") }
+  })()
   const manifestPath = loaded.path
   const manifestBytes = await fileSnapshot(manifestPath, stage.canonical, 64 * 1024)
   const parsed = parsePath(manifest.note)
@@ -622,7 +614,7 @@ async function restoreUncommitted(
   const library = await libraryProof(workspace, parsed)
   const target = resolve(library.canonical, journal.manifest.name)
   const quarantined = resolve(journal.quarantinePath, "image")
-  if (journal.manifest.marker !== null) {
+  if (markerProof(journal.manifest.marker)) {
     const markerPath = resolve(library.canonical, ".gitkeep")
     if (await targetExists(markerPath)) {
       const marker = await fileSnapshot(markerPath, library.canonical, MAX_IMAGE_BYTES, true)
@@ -735,6 +727,11 @@ async function inspectDeleteJournals(
       throw failed("图片删除恢复目录包含未知项目。")
     const stagePath = resolve(deleteRoot.canonical, id)
     const stageEntries = await readdir(stagePath, { withFileTypes: true })
+    if (stageEntries.length === 0) {
+      await rmdir(stagePath)
+      await adapter.syncDirectory?.(deleteRoot.canonical)
+      continue
+    }
     if (!stageEntries.some((child) => isPublishedDeleteManifestSlot(child.name))) {
       if (stageEntries.every((child) => child.isFile() && isDeleteManifestSlot(child.name))) continue
       throw failed("图片删除恢复目录包含未认证项目。")
@@ -893,17 +890,29 @@ async function deleteImage(
 
     const state = await inspectMarkerAndImages(library, `.garden-delete-${journal.manifest.id}`)
     if (state.images.length === 0 && state.marker === undefined) {
-      const createdMarker = await createOwnedMarkerSource(journal.quarantine!.canonical).catch(() => {
+      const sourceName = `marker-source-${randomUUID()}`
+      journal = await appendDeleteManifest(journal, {
+        ...journal.manifest,
+        sequence: journal.manifest.sequence + 1,
+        marker: { state: "intent", sourceName },
+        phase: "marker-planned",
+      }, journalKey, adapter)
+      const createdMarker = await createOwnedMarkerSource(journal.stage.canonical, sourceName).catch(() => {
         throw failed("无法创建占位文件恢复源。")
       })
       journal = await appendDeleteManifest(journal, {
         ...journal.manifest,
         sequence: journal.manifest.sequence + 1,
-        marker: { identity: serializeFileIdentity(createdMarker.identity), hash: createdMarker.hash },
+        marker: {
+          state: "proof",
+          sourceName,
+          identity: serializeFileIdentity(createdMarker.identity),
+          hash: createdMarker.hash,
+        },
         phase: "marker-planned",
       }, journalKey, adapter)
       const markerPath = resolve(library.canonical, ".gitkeep")
-      await link(resolve(journal.quarantine!.canonical, "marker-source"), markerPath).catch((error) => {
+      await link(resolve(journal.stage.canonical, sourceName), markerPath).catch((error) => {
         if ((error as NodeJS.ErrnoException).code === "EEXIST") throw changed("图片库占位文件已被外部创建。")
         throw failed("无法恢复空图片库占位文件。")
       })

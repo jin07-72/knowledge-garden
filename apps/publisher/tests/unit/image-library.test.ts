@@ -1663,6 +1663,123 @@ describe("note-scoped image library", () => {
     expect((await readdir(setup.libraryPath)).filter((name) => name.startsWith(".garden-delete-"))).toEqual([])
   })
 
+  it.each([
+    "delete-cleanup-latest-captured",
+    "delete-cleanup-latest-removed",
+  ] as const)("recovers committed cleanup after %s", async (seam) => {
+    const setup = await fixture()
+    await mkdir(setup.libraryPath, { recursive: true })
+    await writeFile(join(setup.libraryPath, "photo.png"), PNG)
+    let injected = false
+    const first = createImageLibraryService({
+      workspace: setup.root,
+      adapter: adapter({
+        afterPhase: (phase) => {
+          if ((phase as string) === seam && !injected) {
+            injected = true
+            throw new Error(`injected ${seam}`)
+          }
+        },
+      }),
+    })
+
+    await expectCode(first.delete({
+      path: "content/life/daily.md",
+      name: "photo.png",
+      expectedContentHash: contentHash(PNG),
+    }), "IMAGE_LIBRARY_FAILED")
+    expect(injected).toBe(true)
+    const journalRoot = join(setup.root, ".garden-publisher", "image-delete")
+    const [stageName] = await readdir(journalRoot)
+    const interruptedEntries = await readdir(join(journalRoot, stageName!))
+    if (seam === "delete-cleanup-latest-captured") {
+      expect(interruptedEntries).toHaveLength(1)
+      expect(interruptedEntries[0]).toMatch(/^\.cleanup-manifest\.\d{8}\.[0-9a-f-]{36}$/i)
+    } else {
+      expect(interruptedEntries).toEqual([])
+    }
+
+    const second = createImageLibraryService({ workspace: setup.root, adapter: adapter() })
+    await expect(second.open({ path: "content/life/daily.md" })).resolves.toEqual({
+      path: "content/life/daily.md",
+      images: [],
+    })
+    expect((await readdir(setup.libraryPath)).filter((name) => name.startsWith(".garden-delete-"))).toEqual([])
+    expect(await readdir(journalRoot)).toEqual([])
+  })
+
+  it("recovers when syncing the removed latest committed slot fails", async () => {
+    const setup = await fixture()
+    await mkdir(setup.libraryPath, { recursive: true })
+    await writeFile(join(setup.libraryPath, "photo.png"), PNG)
+    let failNextSync = false
+    const first = createImageLibraryService({
+      workspace: setup.root,
+      adapter: adapter({
+        afterPhase: (phase) => {
+          if ((phase as string) === "delete-cleanup-latest-removed") failNextSync = true
+        },
+        syncDirectory: async (path) => {
+          if (failNextSync && path.includes("image-delete")) {
+            failNextSync = false
+            throw new Error("injected latest-slot directory sync failure")
+          }
+        },
+      }),
+    })
+
+    await expectCode(first.delete({
+      path: "content/life/daily.md",
+      name: "photo.png",
+      expectedContentHash: contentHash(PNG),
+    }), "IMAGE_LIBRARY_FAILED")
+    const second = createImageLibraryService({ workspace: setup.root, adapter: adapter() })
+    await expect(second.open({ path: "content/life/daily.md" })).resolves.toEqual({
+      path: "content/life/daily.md",
+      images: [],
+    })
+  })
+
+  it("restores the image and preserves an unproved marker source from the crash gap", async () => {
+    const setup = await fixture()
+    await mkdir(setup.libraryPath, { recursive: true })
+    const target = join(setup.libraryPath, "photo.png")
+    await writeFile(target, PNG)
+    const before = await lstat(target, { bigint: true })
+    const id = randomUUID()
+    const quarantine = join(setup.libraryPath, `.garden-delete-${id}`)
+    const stage = join(setup.root, ".garden-publisher", "image-delete", id)
+    await mkdir(quarantine)
+    await mkdir(stage, { recursive: true })
+    const quarantineDetails = await lstat(quarantine, { bigint: true })
+    await rename(target, join(quarantine, "image"))
+    const sourceName = `marker-source-${randomUUID()}`
+    const pendingSource = join(stage, sourceName)
+    await writeFile(pendingSource, "")
+    await writeDeleteManifest(stage, setup.root, {
+      id,
+      workspace: contentHash(Buffer.from(setup.root)),
+      note: "content/life/daily.md",
+      name: "photo.png",
+      expectedContentHash: contentHash(PNG),
+      expectedIdentity: {
+        dev: before.dev.toString(), ino: before.ino.toString(), size: before.size.toString(), mtimeNs: before.mtimeNs.toString(),
+      },
+      quarantineIdentity: {
+        dev: quarantineDetails.dev.toString(), ino: quarantineDetails.ino.toString(), birthtimeNs: quarantineDetails.birthtimeNs.toString(),
+      },
+      marker: { state: "intent", sourceName } as unknown as DeleteManifest["marker"],
+      phase: "marker-planned",
+    })
+
+    const service = createImageLibraryService({ workspace: setup.root, adapter: adapter() })
+    await expect(service.open({ path: "content/life/daily.md" })).resolves.toMatchObject({
+      images: [{ name: "photo.png" }],
+    })
+    expect(await readFile(pendingSource)).toEqual(Buffer.alloc(0))
+    await expect(lstat(quarantine)).rejects.toMatchObject({ code: "ENOENT" })
+  })
+
   it("preserves a replaced committed quarantine captured inside the journal stage", async () => {
     const setup = await fixture()
     await mkdir(setup.libraryPath, { recursive: true })

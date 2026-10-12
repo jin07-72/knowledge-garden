@@ -4,6 +4,8 @@ import { link, lstat, open, readdir, rename, unlink } from "node:fs/promises"
 import { resolve } from "node:path"
 import { internalRecoveryKey } from "./noteFiles"
 import { syncImageLibraryMarker } from "./imageLibraryFs"
+import { MANAGED_NOTE_PATH_PATTERN } from "../../shared/contracts"
+import { normalizeImageName } from "./imageFormats"
 
 export interface SerializedDeleteFileIdentity {
   readonly dev: string
@@ -30,8 +32,15 @@ export interface OwnedDeleteFileProof {
 }
 
 export interface DeleteMarkerProof {
+  readonly state?: "proof"
+  readonly sourceName?: string
   readonly identity: SerializedDeleteFileIdentity
   readonly hash: string
+}
+
+export interface DeleteMarkerIntent {
+  readonly state: "intent"
+  readonly sourceName: string
 }
 
 export interface DeleteManifest {
@@ -45,7 +54,7 @@ export interface DeleteManifest {
   readonly expectedIdentity: SerializedDeleteFileIdentity
   readonly stageIdentity: SerializedDeleteDirectoryIdentity
   readonly quarantineIdentity: SerializedDeleteDirectoryIdentity | null
-  readonly marker: DeleteMarkerProof | null
+  readonly marker: DeleteMarkerProof | DeleteMarkerIntent | null
   readonly phase: "prepared" | "renamed" | "marker-planned" | "committed"
 }
 
@@ -56,7 +65,86 @@ interface Envelope {
 
 const SLOT_PATTERN = /^manifest\.(\d{8})\.json$/
 const TEMP_PATTERN = /^\.manifest\.(\d{8})\.[0-9a-f-]{36}\.tmp$/i
+const CLEANUP_PATTERN = /^\.cleanup-manifest\.(\d{8})\.[0-9a-f-]{36}$/i
 const AUTH_PATTERN = /^[a-f0-9]{64}$/
+const MARKER_SOURCE_PATTERN = /^marker-source-[0-9a-f]{8}-[0-9a-f-]{27}$/i
+
+interface FileIdentityLike {
+  readonly dev: bigint
+  readonly ino: bigint
+  readonly size: bigint
+  readonly mtimeNs: bigint
+}
+
+interface DirectoryIdentityLike {
+  readonly dev: bigint
+  readonly ino: bigint
+  readonly birthtimeNs: bigint
+}
+
+export function serializeDeleteFileIdentity(value: FileIdentityLike): SerializedDeleteFileIdentity {
+  return { dev: String(value.dev), ino: String(value.ino), size: String(value.size), mtimeNs: String(value.mtimeNs) }
+}
+
+export function serializeDeleteDirectoryIdentity(value: DirectoryIdentityLike): SerializedDeleteDirectoryIdentity {
+  return { dev: String(value.dev), ino: String(value.ino), birthtimeNs: String(value.birthtimeNs) }
+}
+
+export function matchesSerializedDeleteFileIdentity(value: FileIdentityLike, expected: SerializedDeleteFileIdentity): boolean {
+  return String(value.dev) === expected.dev && String(value.ino) === expected.ino &&
+    String(value.size) === expected.size && String(value.mtimeNs) === expected.mtimeNs
+}
+
+export function matchesSerializedDeleteDirectoryIdentity(value: DirectoryIdentityLike, expected: SerializedDeleteDirectoryIdentity): boolean {
+  return String(value.dev) === expected.dev && String(value.ino) === expected.ino &&
+    String(value.birthtimeNs) === expected.birthtimeNs
+}
+
+function record(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function keys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const actual = Object.keys(value).sort()
+  const sorted = [...expected].sort()
+  return actual.length === sorted.length && actual.every((key, index) => key === sorted[index])
+}
+
+function serializedIdentity(value: unknown, directory = false): boolean {
+  if (!record(value)) return false
+  const expected = directory ? ["dev", "ino", "birthtimeNs"] : ["dev", "ino", "size", "mtimeNs"]
+  return keys(value, expected) && expected.every((key) => typeof value[key] === "string" && /^\d+$/.test(value[key] as string))
+}
+
+export function validateDeleteManifest(
+  value: DeleteManifest,
+  expectedId: string,
+  expectedWorkspaceHash: string,
+  stage: DirectoryIdentityLike,
+): DeleteManifest {
+  const hash = (candidate: unknown) => typeof candidate === "string" && AUTH_PATTERN.test(candidate)
+  const validMarker = value.marker === null || (record(value.marker) && (
+    (keys(value.marker, ["state", "sourceName"]) && value.marker.state === "intent" &&
+      typeof value.marker.sourceName === "string" && MARKER_SOURCE_PATTERN.test(value.marker.sourceName)) ||
+    (keys(value.marker, ["state", "sourceName", "identity", "hash"]) && value.marker.state === "proof" &&
+      typeof value.marker.sourceName === "string" && MARKER_SOURCE_PATTERN.test(value.marker.sourceName) &&
+      serializedIdentity(value.marker.identity) && hash(value.marker.hash)) ||
+    (keys(value.marker, ["identity", "hash"]) && serializedIdentity(value.marker.identity) && hash(value.marker.hash))
+  ))
+  let normalizedName: string | undefined
+  try { normalizedName = normalizeImageName(value.name) } catch { normalizedName = undefined }
+  if (
+    value.version !== 2 || !Number.isSafeInteger(value.sequence) || value.sequence < 0 ||
+    value.id !== expectedId || value.workspace !== expectedWorkspaceHash ||
+    typeof value.note !== "string" || MANAGED_NOTE_PATH_PATTERN.exec(value.note) === null ||
+    normalizedName !== value.name || !hash(value.expectedContentHash) ||
+    !serializedIdentity(value.expectedIdentity) || !serializedIdentity(value.stageIdentity, true) ||
+    !matchesSerializedDeleteDirectoryIdentity(stage, value.stageIdentity) ||
+    !(value.quarantineIdentity === null || serializedIdentity(value.quarantineIdentity, true)) ||
+    !validMarker || !["prepared", "renamed", "marker-planned", "committed"].includes(String(value.phase))
+  ) throw new Error("invalid authenticated delete manifest")
+  return value
+}
 
 function payload(manifest: DeleteManifest): Buffer {
   return Buffer.from(JSON.stringify(manifest), "utf8")
@@ -77,8 +165,8 @@ export async function deleteJournalKey(workspace: string, create: boolean): Prom
   return internalRecoveryKey(workspace, create)
 }
 
-export async function createOwnedMarkerSource(quarantine: string): Promise<OwnedDeleteFileProof> {
-  const path = resolve(quarantine, "marker-source")
+export async function createOwnedMarkerSource(directory: string, sourceName: string): Promise<OwnedDeleteFileProof> {
+  const path = resolve(directory, sourceName)
   const flags = process.platform === "win32"
     ? "wx"
     : constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW
@@ -98,7 +186,7 @@ export async function createOwnedMarkerSource(quarantine: string): Promise<Owned
       hash: createHash("sha256").digest("hex"),
     }
   } catch (error) {
-    const captured = resolve(quarantine, `.marker-source-failed-${randomUUID()}`)
+    const captured = resolve(directory, `.marker-source-failed-${randomUUID()}`)
     try {
       const opened = await handle.stat({ bigint: true })
       await rename(path, captured)
@@ -145,14 +233,18 @@ export async function loadDeleteManifest(
 ): Promise<{
   readonly manifest: DeleteManifest
   readonly path: string
-  readonly ownedPaths: readonly { path: string; dev: bigint; ino: bigint; size: bigint; hash: string }[]
+  readonly ownedPaths: readonly { path: string; sequence: number; kind: "published" | "temporary"; dev: bigint; ino: bigint; size: bigint; hash: string }[]
   readonly unknownPaths: readonly string[]
 }> {
   const entries = await readdir(stage, { withFileTypes: true })
   const slots = entries
-    .filter((entry) => entry.isFile() && SLOT_PATTERN.test(entry.name))
-    .sort((left, right) => right.name.localeCompare(left.name))
-  const ownedPaths: { path: string; dev: bigint; ino: bigint; size: bigint; hash: string }[] = []
+    .filter((entry) => entry.isFile() && (SLOT_PATTERN.test(entry.name) || CLEANUP_PATTERN.test(entry.name)))
+    .sort((left, right) => {
+      const leftSequence = Number((SLOT_PATTERN.exec(left.name) ?? CLEANUP_PATTERN.exec(left.name))![1])
+      const rightSequence = Number((SLOT_PATTERN.exec(right.name) ?? CLEANUP_PATTERN.exec(right.name))![1])
+      return rightSequence - leftSequence || left.name.localeCompare(right.name)
+    })
+  const ownedPaths: { path: string; sequence: number; kind: "published" | "temporary"; dev: bigint; ino: bigint; size: bigint; hash: string }[] = []
   const slotIdentities = new Map<string, { dev: bigint; ino: bigint }>()
   let latest: { manifest: DeleteManifest; path: string } | undefined
   for (const entry of slots) {
@@ -181,11 +273,11 @@ export async function loadDeleteManifest(
       authenticated(key, envelope as Envelope)
     ) {
       const manifest = (envelope as Envelope).manifest
-      const sequence = SLOT_PATTERN.exec(entry.name)![1]!
+      const sequence = (SLOT_PATTERN.exec(entry.name) ?? CLEANUP_PATTERN.exec(entry.name))![1]!
       if (manifest.sequence.toString().padStart(8, "0") !== sequence)
         throw new Error("delete manifest sequence mismatch")
       const details = await lstat(path, { bigint: true })
-      ownedPaths.push({ path, dev: details.dev, ino: details.ino, size: details.size, hash: createHash("sha256").update(raw).digest("hex") })
+      ownedPaths.push({ path, sequence: Number(sequence), kind: "published", dev: details.dev, ino: details.ino, size: details.size, hash: createHash("sha256").update(raw).digest("hex") })
       slotIdentities.set(sequence, { dev: details.dev, ino: details.ino })
       latest ??= { manifest, path }
       continue
@@ -202,6 +294,8 @@ export async function loadDeleteManifest(
     if (slot !== undefined && slot.dev === details.dev && slot.ino === details.ino)
       ownedPaths.push({
         path,
+        sequence: Number(sequence),
+        kind: "temporary",
         dev: details.dev,
         ino: details.ino,
         size: details.size,
@@ -213,9 +307,9 @@ export async function loadDeleteManifest(
 }
 
 export function isDeleteManifestSlot(name: string): boolean {
-  return SLOT_PATTERN.test(name) || TEMP_PATTERN.test(name)
+  return SLOT_PATTERN.test(name) || TEMP_PATTERN.test(name) || CLEANUP_PATTERN.test(name)
 }
 
 export function isPublishedDeleteManifestSlot(name: string): boolean {
-  return SLOT_PATTERN.test(name)
+  return SLOT_PATTERN.test(name) || CLEANUP_PATTERN.test(name)
 }

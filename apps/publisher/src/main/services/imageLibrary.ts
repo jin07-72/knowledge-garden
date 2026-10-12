@@ -61,6 +61,8 @@ export type ImageLibraryPhase =
   | "delete-quarantine-linked"
   | "delete-quarantined"
   | "delete-target-removed"
+  | "delete-cleanup-latest-captured"
+  | "delete-cleanup-latest-removed"
 
 export interface ImageLibraryAdapter {
   chooseImages(): Promise<readonly string[] | undefined>
