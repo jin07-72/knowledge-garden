@@ -23,7 +23,7 @@ const uint32Bytes = (value: number) =>
 const uint32LittleEndian = (value: number) =>
   bytes(value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff)
 
-function pngDimensions(width: number, height: number): Uint8Array {
+function pngHeader(width: number, height: number): Uint8Array {
   return append(
     bytes(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a),
     uint32Bytes(13),
@@ -34,7 +34,20 @@ function pngDimensions(width: number, height: number): Uint8Array {
   )
 }
 
-function jpegDimensions(width: number, height: number): Uint8Array {
+function pngDimensions(width: number, height: number): Uint8Array {
+  return append(
+    pngHeader(width, height),
+    bytes(0, 0, 0, 0),
+    uint32Bytes(1),
+    ascii("IDAT"),
+    bytes(0, 0, 0, 0, 0),
+    uint32Bytes(0),
+    ascii("IEND"),
+    bytes(0, 0, 0, 0),
+  )
+}
+
+function jpegHeader(width: number, height: number): Uint8Array {
   return append(
     bytes(0xff, 0xd8, 0xff, 0xe0, 0x00, 0x04, 0x00, 0x00),
     bytes(0xff, 0xc0, 0x00, 0x0b, 0x08, (height >>> 8) & 0xff, height & 0xff),
@@ -42,11 +55,27 @@ function jpegDimensions(width: number, height: number): Uint8Array {
   )
 }
 
-function gifDimensions(width: number, height: number): Uint8Array {
-  return append(ascii("GIF89a"), bytes(width & 0xff, width >>> 8, height & 0xff, height >>> 8))
+function jpegDimensions(width: number, height: number): Uint8Array {
+  return append(
+    jpegHeader(width, height),
+    bytes(0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3f, 0x00),
+    bytes(0, 0xff, 0xd9),
+  )
 }
 
-function webpDimensions(width: number, height: number): Uint8Array {
+function gifHeader(width: number, height: number): Uint8Array {
+  return append(ascii("GIF89a"), bytes(width & 0xff, width >>> 8, height & 0xff, height >>> 8, 0, 0, 0))
+}
+
+function gifDimensions(width: number, height: number): Uint8Array {
+  return append(
+    gifHeader(width, height),
+    bytes(0x2c, 0, 0, 0, 0, width & 0xff, width >>> 8, height & 0xff, height >>> 8, 0),
+    bytes(2, 1, 0, 0, 0x3b),
+  )
+}
+
+function webpHeader(width: number, height: number): Uint8Array {
   return append(
     ascii("RIFF"),
     uint32LittleEndian(22),
@@ -55,6 +84,21 @@ function webpDimensions(width: number, height: number): Uint8Array {
     bytes(0, 0, 0, 0),
     bytes((width - 1) & 0xff, ((width - 1) >>> 8) & 0xff, ((width - 1) >>> 16) & 0xff),
     bytes((height - 1) & 0xff, ((height - 1) >>> 8) & 0xff, ((height - 1) >>> 16) & 0xff),
+  )
+}
+
+function webpDimensions(width: number, height: number): Uint8Array {
+  return append(
+    ascii("RIFF"),
+    uint32LittleEndian(40),
+    ascii("WEBPVP8X"),
+    uint32LittleEndian(10),
+    bytes(0, 0, 0, 0),
+    bytes((width - 1) & 0xff, ((width - 1) >>> 8) & 0xff, ((width - 1) >>> 16) & 0xff),
+    bytes((height - 1) & 0xff, ((height - 1) >>> 8) & 0xff, ((height - 1) >>> 16) & 0xff),
+    ascii("VP8 "),
+    uint32LittleEndian(10),
+    bytes(0, 0, 0, 0x9d, 0x01, 0x2a, width & 0xff, width >>> 8, height & 0xff, height >>> 8),
   )
 }
 
@@ -286,11 +330,23 @@ describe("image format detection", () => {
 
 describe("bounded image metadata", () => {
   it.each([
+    ["PNG IHDR", pngHeader(640, 480)],
+    ["JPEG SOF", jpegHeader(640, 480)],
+    ["GIF logical screen", gifHeader(640, 480)],
+    ["WebP VP8X", webpHeader(640, 480)],
+    ["AVIF ispe", avifDimensions(640, 480)],
+  ] as const)("rejects a %s header without complete image payload structure", (_label, input) => {
+    expect(() => readBoundedImageMetadata(input)).toThrow(
+      expect.objectContaining({ code: "IMAGE_LIBRARY_INVALID" }),
+    )
+  })
+
+  it.each([
     ["PNG", pngDimensions(640, 480), "image/png"],
     ["JPEG", jpegDimensions(640, 480), "image/jpeg"],
     ["GIF", gifDimensions(640, 480), "image/gif"],
     ["animated WebP canvas", webpDimensions(640, 480), "image/webp"],
-    ["AVIF item property", avifDimensions(640, 480), "image/avif"],
+    ["AVIF item property", avifWithLargeMediaData(640, 480, 1), "image/avif"],
   ] as const)("reads %s dimensions without a decoder", (_label, input, mime) => {
     expect(readBoundedImageMetadata(input)).toEqual({ width: 640, height: 480, mime })
   })

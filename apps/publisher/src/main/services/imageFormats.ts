@@ -157,9 +157,30 @@ function boundedDimensions(
 }
 
 function pngMetadata(bytes: Uint8Array): BoundedImageMetadata {
-  if (bytes.length < 29 || uint32(bytes, 8) !== 13 || !hasAscii(bytes, 12, "IHDR"))
+  if (bytes.length < 33 || uint32(bytes, 8) !== 13 || !hasAscii(bytes, 12, "IHDR"))
     throw invalidImage()
-  return boundedDimensions(uint32(bytes, 16), uint32(bytes, 20), "image/png")
+  const metadata = boundedDimensions(uint32(bytes, 16), uint32(bytes, 20), "image/png")
+  let offset = 8
+  let hasImageData = false
+  // Framing is sufficient for the pre-decode allocation gate; the native decoder validates CRCs.
+  while (offset < bytes.length) {
+    if (offset + 12 > bytes.length) throw invalidImage()
+    const length = uint32(bytes, offset)
+    const data = offset + 8
+    const end = data + length
+    if (!Number.isSafeInteger(end) || end + 4 > bytes.length) throw invalidImage()
+    if (hasAscii(bytes, offset + 4, "IHDR") && (offset !== 8 || length !== 13)) throw invalidImage()
+    if (hasAscii(bytes, offset + 4, "IDAT")) {
+      if (length === 0) throw invalidImage()
+      hasImageData = true
+    }
+    if (hasAscii(bytes, offset + 4, "IEND")) {
+      if (length !== 0 || !hasImageData || end + 4 !== bytes.length) throw invalidImage()
+      return metadata
+    }
+    offset = end + 4
+  }
+  throw invalidImage()
 }
 
 const JPEG_START_OF_FRAME = new Set([
@@ -169,76 +190,163 @@ const JPEG_START_OF_FRAME = new Set([
 function jpegMetadata(bytes: Uint8Array): BoundedImageMetadata {
   const limit = Math.min(bytes.length, IMAGE_METADATA_SCAN_BYTES)
   let offset = 2
-  while (offset < limit) {
-    while (offset < limit && bytes[offset] !== 0xff) offset += 1
-    while (offset < limit && bytes[offset] === 0xff) offset += 1
-    if (offset >= limit) break
+  let metadata: BoundedImageMetadata | undefined
+  let sawScan = false
+  let entropyBytes = 0
+  while (offset < bytes.length) {
+    if (bytes[offset] !== 0xff) throw invalidImage()
+    while (offset < bytes.length && bytes[offset] === 0xff) offset += 1
+    if (offset >= bytes.length) throw invalidImage()
     const marker = bytes[offset++]
-    if (marker === 0xd9 || marker === 0xda) break
-    if (marker === 0x00 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd8)) continue
-    if (offset + 2 > limit) throw invalidImage()
+    if (marker === 0xd9) {
+      if (metadata === undefined || !sawScan || entropyBytes === 0) throw invalidImage()
+      return metadata
+    }
+    if (marker === 0x00 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7))
+      throw invalidImage()
+    if (offset + 2 > bytes.length || (metadata === undefined && offset + 2 > limit))
+      throw invalidImage()
     const length = uint16(bytes, offset)
-    if (length < 2 || offset + length > limit || offset + length > bytes.length)
+    const end = offset + length
+    if (length < 2 || end > bytes.length || (metadata === undefined && end > limit))
       throw invalidImage()
     if (JPEG_START_OF_FRAME.has(marker)) {
-      if (length < 7) throw invalidImage()
-      return boundedDimensions(uint16(bytes, offset + 5), uint16(bytes, offset + 3), "image/jpeg")
+      const components = bytes[offset + 7]
+      if (length !== 8 + components * 3 || components === 0 || metadata !== undefined)
+        throw invalidImage()
+      metadata = boundedDimensions(uint16(bytes, offset + 5), uint16(bytes, offset + 3), "image/jpeg")
+    } else if (marker === 0xda) {
+      const components = bytes[offset + 2]
+      if (metadata === undefined || components === 0 || length !== 6 + components * 2)
+        throw invalidImage()
+      sawScan = true
+      offset = end
+      let nextMarker: number | undefined
+      while (offset < bytes.length) {
+        if (bytes[offset] !== 0xff) {
+          entropyBytes += 1
+          offset += 1
+          continue
+        }
+        const markerStart = offset
+        while (offset < bytes.length && bytes[offset] === 0xff) offset += 1
+        if (offset >= bytes.length) throw invalidImage()
+        const entropyMarker = bytes[offset]
+        if (entropyMarker === 0x00) {
+          entropyBytes += 1
+          offset += 1
+          continue
+        }
+        if (entropyMarker >= 0xd0 && entropyMarker <= 0xd7) {
+          offset += 1
+          continue
+        }
+        offset = markerStart
+        nextMarker = entropyMarker
+        break
+      }
+      if (nextMarker === undefined) throw invalidImage()
+      continue
     }
-    offset += length
+    offset = end
   }
   throw invalidImage()
 }
 
 function gifMetadata(bytes: Uint8Array): BoundedImageMetadata {
-  if (bytes.length < 10) throw invalidImage()
-  return boundedDimensions(uint16LittleEndian(bytes, 6), uint16LittleEndian(bytes, 8), "image/gif")
+  if (bytes.length < 13) throw invalidImage()
+  const metadata = boundedDimensions(uint16LittleEndian(bytes, 6), uint16LittleEndian(bytes, 8), "image/gif")
+  let offset = 13
+  if ((bytes[10] & 0x80) !== 0) offset += 3 * (1 << ((bytes[10] & 0x07) + 1))
+  if (offset > bytes.length) throw invalidImage()
+  let hasImage = false
+  const subBlocks = (): void => {
+    while (offset < bytes.length) {
+      const length = bytes[offset++]
+      if (length === 0) return
+      if (offset + length > bytes.length) throw invalidImage()
+      offset += length
+    }
+    throw invalidImage()
+  }
+  while (offset < bytes.length) {
+    const block = bytes[offset++]
+    if (block === 0x3b) {
+      if (!hasImage || offset !== bytes.length) throw invalidImage()
+      return metadata
+    }
+    if (block === 0x21) {
+      if (offset + 2 > bytes.length) throw invalidImage()
+      offset += 1
+      const size = bytes[offset++]
+      if (offset + size > bytes.length) throw invalidImage()
+      offset += size
+      subBlocks()
+      continue
+    }
+    if (block !== 0x2c || offset + 9 > bytes.length) throw invalidImage()
+    const imageWidth = uint16LittleEndian(bytes, offset + 4)
+    const imageHeight = uint16LittleEndian(bytes, offset + 6)
+    const packed = bytes[offset + 8]
+    if (imageWidth === 0 || imageHeight === 0) throw invalidImage()
+    offset += 9
+    if ((packed & 0x80) !== 0) offset += 3 * (1 << ((packed & 0x07) + 1))
+    if (offset >= bytes.length || bytes[offset++] < 2) throw invalidImage()
+    subBlocks()
+    hasImage = true
+  }
+  throw invalidImage()
 }
 
 function webpMetadata(bytes: Uint8Array): BoundedImageMetadata {
   if (bytes.length < 20) throw invalidImage()
   const riffEnd = uint32LittleEndian(bytes, 4) + 8
-  if (!Number.isSafeInteger(riffEnd) || riffEnd < 20 || riffEnd > bytes.length) throw invalidImage()
+  if (!Number.isSafeInteger(riffEnd) || riffEnd < 20 || riffEnd !== bytes.length) throw invalidImage()
   const limit = Math.min(riffEnd, IMAGE_METADATA_SCAN_BYTES)
   let offset = 12
-  while (offset + 8 <= limit) {
+  let metadata: BoundedImageMetadata | undefined
+  let hasImageData = false
+  while (offset < riffEnd) {
+    if (offset + 8 > riffEnd) throw invalidImage()
     const size = uint32LittleEndian(bytes, offset + 4)
     const data = offset + 8
     const end = data + size
     if (!Number.isSafeInteger(end) || end > riffEnd || end > bytes.length) throw invalidImage()
     if (hasAscii(bytes, offset, "VP8X")) {
-      if (size !== 10 || data + 10 > limit) throw invalidImage()
-      return boundedDimensions(
+      if (size !== 10 || data + 10 > limit || metadata !== undefined) throw invalidImage()
+      metadata = boundedDimensions(
         uint24LittleEndian(bytes, data + 4) + 1,
         uint24LittleEndian(bytes, data + 7) + 1,
         "image/webp",
       )
-    }
-    if (hasAscii(bytes, offset, "VP8 ")) {
+    } else if (hasAscii(bytes, offset, "VP8 ")) {
       if (
         size < 10 ||
         data + 10 > limit ||
         !startsWith(bytes.subarray(data + 3), [0x9d, 0x01, 0x2a])
       )
         throw invalidImage()
-      return boundedDimensions(
+      metadata ??= boundedDimensions(
         uint16LittleEndian(bytes, data + 6) & 0x3fff,
         uint16LittleEndian(bytes, data + 8) & 0x3fff,
         "image/webp",
       )
-    }
-    if (hasAscii(bytes, offset, "VP8L")) {
+      hasImageData = true
+    } else if (hasAscii(bytes, offset, "VP8L")) {
       if (size < 5 || data + 5 > limit || bytes[data] !== 0x2f) throw invalidImage()
       const bits = uint32LittleEndian(bytes, data + 1)
-      return boundedDimensions(
+      metadata ??= boundedDimensions(
         (bits & 0x3fff) + 1,
         (Math.floor(bits / 0x4000) & 0x3fff) + 1,
         "image/webp",
       )
+      hasImageData = true
     }
     offset = end + (size & 1)
     if (offset > riffEnd) throw invalidImage()
   }
-  throw invalidImage()
+  if (offset !== riffEnd || metadata === undefined || !hasImageData) throw invalidImage()
+  return metadata
 }
 
 interface IsoBox {
@@ -284,6 +392,7 @@ function collectAvifDimensions(
   metadataLimit: number,
   container: "top" | "meta" | "iprp" | "ipco",
   found: Array<{ width: number; height: number }>,
+  state: { hasMediaData: boolean },
 ): void {
   let offset = start
   while (offset < end) {
@@ -292,14 +401,17 @@ function collectAvifDimensions(
     if (box.end <= offset) throw invalidImage()
     if (container === "top" && box.type === "meta") {
       if (box.data + 4 > box.end || box.data + 4 > metadataLimit) throw invalidImage()
-      collectAvifDimensions(bytes, box.data + 4, box.end, metadataLimit, "meta", found)
+      collectAvifDimensions(bytes, box.data + 4, box.end, metadataLimit, "meta", found, state)
     } else if (container === "meta" && box.type === "iprp") {
-      collectAvifDimensions(bytes, box.data, box.end, metadataLimit, "iprp", found)
+      collectAvifDimensions(bytes, box.data, box.end, metadataLimit, "iprp", found, state)
     } else if (container === "iprp" && box.type === "ipco") {
-      collectAvifDimensions(bytes, box.data, box.end, metadataLimit, "ipco", found)
+      collectAvifDimensions(bytes, box.data, box.end, metadataLimit, "ipco", found, state)
     } else if (container === "ipco" && box.type === "ispe") {
       if (box.data + 12 !== box.end || box.data + 12 > metadataLimit) throw invalidImage()
       found.push({ width: uint32(bytes, box.data + 4), height: uint32(bytes, box.data + 8) })
+    } else if (container === "top" && box.type === "mdat") {
+      if (box.data === box.end) throw invalidImage()
+      state.hasMediaData = true
     }
     offset = box.end
   }
@@ -309,8 +421,9 @@ function collectAvifDimensions(
 function avifMetadata(bytes: Uint8Array): BoundedImageMetadata {
   const limit = Math.min(bytes.length, IMAGE_METADATA_SCAN_BYTES)
   const found: Array<{ width: number; height: number }> = []
-  collectAvifDimensions(bytes, 0, bytes.length, limit, "top", found)
-  if (found.length === 0) throw invalidImage()
+  const state = { hasMediaData: false }
+  collectAvifDimensions(bytes, 0, bytes.length, limit, "top", found, state)
+  if (found.length === 0 || !state.hasMediaData) throw invalidImage()
   let maximum = boundedDimensions(found[0].width, found[0].height, "image/avif")
   for (const dimensions of found.slice(1)) {
     const candidate = boundedDimensions(dimensions.width, dimensions.height, "image/avif")

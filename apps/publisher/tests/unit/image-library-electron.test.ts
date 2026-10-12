@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest"
 import { createElectronImageLibraryAdapter } from "../../src/main/services/imageLibraryElectron"
 
-const pngDimensions = (width: number, height: number) =>
+const pngHeader = (width: number, height: number) =>
   Uint8Array.from([
     0x89,
     0x50,
@@ -33,6 +33,110 @@ const pngDimensions = (width: number, height: number) =>
     0,
     0,
   ])
+
+const pngDimensions = (width: number, height: number) =>
+  Uint8Array.from([
+    ...pngHeader(width, height),
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    1,
+    0x49,
+    0x44,
+    0x41,
+    0x54,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0x49,
+    0x45,
+    0x4e,
+    0x44,
+    0,
+    0,
+    0,
+    0,
+  ])
+
+const truncatedImageInputs = [
+  ["PNG", pngHeader(640, 480)],
+  [
+    "JPEG",
+    Uint8Array.from([
+      0xff,
+      0xd8,
+      0xff,
+      0xe0,
+      0,
+      4,
+      0,
+      0,
+      0xff,
+      0xc0,
+      0,
+      11,
+      8,
+      1,
+      0xe0,
+      2,
+      0x80,
+      1,
+      1,
+      0x11,
+      0,
+    ]),
+  ],
+  ["GIF", Uint8Array.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x80, 2, 0xe0, 1, 0, 0, 0])],
+  [
+    "WebP",
+    Uint8Array.from([
+      0x52,
+      0x49,
+      0x46,
+      0x46,
+      22,
+      0,
+      0,
+      0,
+      0x57,
+      0x45,
+      0x42,
+      0x50,
+      0x56,
+      0x50,
+      0x38,
+      0x58,
+      10,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0x7f,
+      2,
+      0,
+      0xdf,
+      1,
+      0,
+    ]),
+  ],
+  [
+    "AVIF",
+    Uint8Array.from([0, 0, 0, 16, 0x66, 0x74, 0x79, 0x70, 0x61, 0x76, 0x69, 0x66, 0, 0, 0, 0]),
+  ],
+] as const
 
 function nativeImage(options?: { empty?: boolean }) {
   const thumbnail = { toDataURL: vi.fn(() => "data:image/png;base64,iVBORw0KGgo=") }
@@ -141,6 +245,24 @@ describe("Electron image library adapter", () => {
     })
     expect(createImageFromBuffer).not.toHaveBeenCalled()
   })
+
+  it.each(truncatedImageInputs)(
+    "rejects a truncated %s before nativeImage receives any bytes",
+    async (_format, input) => {
+    const createImageFromBuffer = vi.fn(() => nativeImage())
+    const adapter = createElectronImageLibraryAdapter({
+      getWindow: () => undefined,
+      showOpenDialog: vi.fn(),
+      createImageFromBuffer,
+      writeClipboard: vi.fn(),
+    })
+
+    await expect(adapter.renderThumbnail(input)).rejects.toMatchObject({
+      code: "IMAGE_LIBRARY_INVALID",
+    })
+    expect(createImageFromBuffer).not.toHaveBeenCalled()
+    },
+  )
 
   it("allows the exact pixel budget before native decode", async () => {
     const image = nativeImage()
