@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto"
 import { constants, type BigIntStats } from "node:fs"
-import { link, lstat, mkdir, open, readdir, realpath, rename, rm, stat } from "node:fs/promises"
-import { basename, isAbsolute, relative, resolve } from "node:path"
+import { link, lstat, mkdir, open, readdir, realpath, rename, rmdir, stat, unlink } from "node:fs/promises"
+import { isAbsolute, relative, resolve } from "node:path"
 import {
   MANAGED_NOTE_PATH_PATTERN,
   type AppError,
@@ -10,8 +10,19 @@ import {
 } from "../../shared/contracts"
 import { MAX_MARKDOWN_UTF8_BYTES } from "../../shared/ipcSchemas"
 import { detectImageFormat, imageDataUrl, markdownForImage, normalizeImageName } from "./imageFormats"
-import { syncImageLibraryMarker } from "./imageLibraryFs"
 import { acquireInternalNotePathLease, type InternalNotePathLease } from "./noteFiles"
+import {
+  createOwnedMarkerSource,
+  deleteJournalKey,
+  isDeleteManifestSlot,
+  isPublishedDeleteManifestSlot,
+  loadDeleteManifest,
+  publishDeleteManifest,
+  type DeleteManifest,
+  type SerializedDeleteDirectoryIdentity as SerializedDirectoryIdentity,
+  type SerializedDeleteFileIdentity as SerializedFileIdentity,
+} from "./imageLibraryDeleteJournalCodec"
+import { serializeImagePreview } from "./imageLibraryPreviewGate"
 
 const MAX_IMAGE_BYTES = 25 * 1024 * 1024
 const operationErrors = new WeakSet<object>()
@@ -368,68 +379,6 @@ async function targetExists(path: string): Promise<boolean> {
   }
 }
 
-async function createMarker(library: DirectoryProof, rollbackDirectory?: DirectoryProof): Promise<FileProof> {
-  const path = resolve(library.canonical, ".gitkeep")
-  let handle: Awaited<ReturnType<typeof open>> | undefined
-  let created: FileProof | undefined
-  try {
-    const flags = process.platform === "win32"
-      ? "wx"
-      : constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW
-    handle = await open(path, flags, 0o600)
-    const details = await handle.stat({ bigint: true })
-    if (!details.isFile() || details.size !== 0n) throw changed()
-    created = { identity: identity(details), hash: createHash("sha256").digest("hex") }
-    await syncImageLibraryMarker(handle)
-    return created
-  } catch (error) {
-    await handle?.close().catch(() => undefined)
-    handle = undefined
-    if (created !== undefined && rollbackDirectory !== undefined) {
-      try {
-        const held = resolve(rollbackDirectory.canonical, "marker")
-        await rename(path, held)
-        const moved = await fileSnapshot(held, rollbackDirectory.canonical, MAX_IMAGE_BYTES, true)
-        if (moved.bytes.length !== 0 || !sameFileObject(moved.proof.identity, created.identity))
-          throw new Error("marker identity changed")
-      } catch {
-        throw operationError("IMAGE_LIBRARY_FAILED", "无法确认失败后的占位文件清理。", {
-          cleanupWarnings: [{ code: "DELETE_MARKER_UNCERTAIN", message: "请人工检查图片库。" }],
-        })
-      }
-    }
-    if (isImageLibraryOperationError(error)) throw error
-    throw failed("无法恢复空图片库占位文件。")
-  } finally {
-    await handle?.close().catch(() => undefined)
-  }
-}
-
-interface SerializedFileIdentity {
-  readonly dev: string
-  readonly ino: string
-  readonly size: string
-  readonly mtimeNs: string
-}
-
-interface SerializedDirectoryIdentity {
-  readonly dev: string
-  readonly ino: string
-  readonly birthtimeNs: string
-}
-
-interface DeleteManifest {
-  readonly version: 1
-  readonly id: string
-  readonly workspace: string
-  readonly note: string
-  readonly name: string
-  readonly expectedContentHash: string
-  readonly expectedIdentity: SerializedFileIdentity
-  readonly quarantineIdentity: SerializedDirectoryIdentity | null
-  readonly phase: "prepared" | "renamed" | "committed"
-}
-
 interface DeleteJournal {
   readonly stage: DirectoryProof
   readonly manifestPath: string
@@ -437,10 +386,10 @@ interface DeleteJournal {
   readonly manifestProof: FileProof
   readonly quarantinePath: string
   readonly quarantine?: DirectoryProof
+  readonly key: Buffer
 }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
-const CLEANUP_DIRECTORY_PATTERN = /^([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.cleanup$/i
 const HASH_PATTERN = /^[a-f0-9]{64}$/
 
 function serializeFileIdentity(value: FileIdentity): SerializedFileIdentity {
@@ -500,31 +449,30 @@ function parseIdentity(value: unknown, directory = false): value is SerializedFi
   return exactKeys(value, keys) && keys.every((key) => typeof value[key] === "string" && /^\d+$/.test(value[key] as string))
 }
 
-function parseDeleteManifest(bytes: Uint8Array, expectedId: string, workspace: string): DeleteManifest {
-  let value: unknown
-  try {
-    value = JSON.parse(Buffer.from(bytes).toString("utf8"))
-  } catch {
-    throw failed("图片删除恢复记录无效。")
-  }
+function validateDeleteManifest(
+  value: DeleteManifest,
+  expectedId: string,
+  workspace: string,
+  stage: DirectoryProof,
+): DeleteManifest {
   if (
-    !isRecord(value) ||
-    !exactKeys(value, ["version", "id", "workspace", "note", "name", "expectedContentHash", "expectedIdentity", "quarantineIdentity", "phase"]) ||
-    value.version !== 1 ||
+    value.version !== 2 ||
+    !Number.isSafeInteger(value.sequence) || value.sequence < 0 ||
     value.id !== expectedId ||
     value.workspace !== workspaceHash(workspace) ||
-    typeof value.note !== "string" ||
-    MANAGED_NOTE_PATH_PATTERN.exec(value.note) === null ||
-    typeof value.name !== "string" ||
-    safeName(value.name) !== value.name ||
-    typeof value.expectedContentHash !== "string" ||
-    !HASH_PATTERN.test(value.expectedContentHash) ||
-    !parseIdentity(value.expectedIdentity) ||
+    typeof value.note !== "string" || MANAGED_NOTE_PATH_PATTERN.exec(value.note) === null ||
+    typeof value.name !== "string" || safeName(value.name) !== value.name ||
+    typeof value.expectedContentHash !== "string" || !HASH_PATTERN.test(value.expectedContentHash) ||
+    !parseIdentity(value.expectedIdentity) || !parseIdentity(value.stageIdentity, true) ||
+    !sameSerializedDirectoryIdentity(stage, value.stageIdentity) ||
     !(value.quarantineIdentity === null || parseIdentity(value.quarantineIdentity, true)) ||
-    !["prepared", "renamed", "committed"].includes(String(value.phase))
-  )
-    throw failed("图片删除恢复记录无效。")
-  return value as unknown as DeleteManifest
+    !(value.marker === null || (
+      isRecord(value.marker) && exactKeys(value.marker, ["identity", "hash"]) &&
+      parseIdentity(value.marker.identity) && typeof value.marker.hash === "string" && HASH_PATTERN.test(value.marker.hash)
+    )) ||
+    !["prepared", "renamed", "marker-planned", "committed"].includes(String(value.phase))
+  ) throw failed("图片删除恢复记录无效或认证失败。")
+  return value
 }
 
 async function ensureDirectory(path: string, parent: DirectoryProof): Promise<DirectoryProof> {
@@ -547,45 +495,6 @@ async function exclusiveDirectory(path: string, parent: DirectoryProof): Promise
   return inspectDirectory(path, parent.canonical)
 }
 
-async function writeManifestFile(
-  path: string,
-  root: string,
-  manifest: DeleteManifest,
-): Promise<{ handle: Awaited<ReturnType<typeof open>>; proof: FileProof }> {
-  const handle = await open(path, "wx", 0o600).catch(() => {
-    throw failed("无法创建图片删除恢复记录。")
-  })
-  try {
-    await handle.writeFile(JSON.stringify(manifest))
-    await handle.sync()
-    const proof = (await fileSnapshot(path, root, 64 * 1024, true)).proof
-    const opened = await handle.stat({ bigint: true })
-    if (!sameIdentity(identity(opened), proof.identity)) throw failed("图片删除恢复记录身份无效。")
-    return { handle, proof }
-  } catch {
-    await handle.close().catch(() => undefined)
-    throw failed("无法同步图片删除恢复记录。")
-  }
-}
-
-async function rewriteManifest(
-  handle: Awaited<ReturnType<typeof open>>,
-  path: string,
-  root: string,
-  manifest: DeleteManifest,
-): Promise<FileProof> {
-  try {
-    await handle.truncate(0)
-    await handle.write(JSON.stringify(manifest), 0, "utf8")
-    await handle.sync()
-    const proof = (await fileSnapshot(path, root, 64 * 1024, true)).proof
-    const opened = await handle.stat({ bigint: true })
-    if (!sameIdentity(identity(opened), proof.identity)) throw failed("图片删除恢复记录身份已变化。")
-    return proof
-  } catch {
-    throw failed("无法更新图片删除恢复记录。")
-  }
-}
 
 async function inspectMarkerAndImages(
   library: DirectoryProof,
@@ -611,60 +520,85 @@ async function inspectMarkerAndImages(
   return { images, ...(marker === undefined ? {} : { marker }) }
 }
 
-async function moveQuarantineIntoStage(journal: DeleteJournal): Promise<void> {
-  if (journal.quarantine === undefined || !(await targetExists(journal.quarantinePath))) return
-  const held = resolve(journal.stage.canonical, "quarantine")
-  if (pathsEqual(journal.quarantinePath, held)) return
-  await verifyDirectory(journal.quarantinePath, resolve(journal.quarantinePath, ".."), journal.quarantine)
-  if (await targetExists(held)) throw failed("图片删除暂存目录包含未知项目。")
-  await rename(journal.quarantinePath, held)
-  const moved = await inspectDirectory(held, journal.stage.canonical)
-  if (
-    moved.dev !== journal.quarantine.dev ||
-    moved.ino !== journal.quarantine.ino ||
-    moved.birthtimeNs !== journal.quarantine.birthtimeNs
-  )
-    throw failed("图片删除隔离目录身份已变化。")
-}
-
-async function removeCapturedJournal(journal: DeleteJournal, deleteRoot: DirectoryProof): Promise<void> {
-  await moveQuarantineIntoStage(journal)
+async function removeCapturedJournal(
+  journal: DeleteJournal,
+  deleteRoot: DirectoryProof,
+  adapter: OperationAdapter,
+): Promise<void> {
   await verifyFile(journal.manifestPath, journal.stage.canonical, journal.manifestProof)
+  const authenticatedFiles = await loadDeleteManifest(journal.stage.canonical, journal.key).catch(() => {
+    throw failed("图片删除恢复记录已被替换，已安全保留。")
+  })
+  if (authenticatedFiles.manifest.sequence !== journal.manifest.sequence)
+    throw failed("图片删除恢复记录状态已变化，已安全保留。")
   const children = await readdir(journal.stage.canonical, { withFileTypes: true })
-  if (children.some((entry) => !entry.isFile() && !(entry.name === "quarantine" && entry.isDirectory())))
+  if (children.some((entry) => !entry.isFile() || !isDeleteManifestSlot(entry.name)))
     throw failed("图片删除记录包含未知项目。")
-  if (children.some((entry) => entry.name !== "manifest.json" && entry.name !== "quarantine"))
-    throw failed("图片删除记录包含未知项目。")
-  let captured = journal.stage.canonical
-  if (!CLEANUP_DIRECTORY_PATTERN.test(basename(journal.stage.canonical))) {
-    captured = resolve(deleteRoot.canonical, `${journal.manifest.id}.cleanup`)
-    await rename(journal.stage.canonical, captured)
-    const moved = await inspectDirectory(captured, deleteRoot.canonical)
-    if (
-      moved.dev !== journal.stage.dev ||
-      moved.ino !== journal.stage.ino ||
-      moved.birthtimeNs !== journal.stage.birthtimeNs
-    )
-      throw failed("图片删除记录身份已变化。")
+  if (journal.quarantine !== undefined && await targetExists(journal.quarantinePath)) {
+    await verifyDirectory(journal.quarantinePath, resolve(journal.quarantinePath, ".."), journal.quarantine)
+    const entries = await readdir(journal.quarantinePath, { withFileTypes: true })
+    for (const entry of entries) {
+      const capturedImage = /^capture-[0-9a-f-]{36}$/i.test(entry.name)
+      const capturedMarker = /^marker-rollback-[0-9a-f-]{36}$/i.test(entry.name)
+      if (!entry.isFile() || !(["image", "marker-source"].includes(entry.name) || capturedImage || capturedMarker))
+        throw failed("图片删除隔离目录包含未知项目，已保留。")
+      const path = resolve(journal.quarantinePath, entry.name)
+      const snapshot = await fileSnapshot(path, journal.quarantinePath, MAX_IMAGE_BYTES, true)
+      if ((entry.name === "image" || capturedImage) && (
+        snapshot.proof.hash !== journal.manifest.expectedContentHash ||
+        !sameSerializedFileIdentity(snapshot.proof.identity, journal.manifest.expectedIdentity)
+      )) throw failed("图片删除隔离内容身份异常，已保留。")
+      if ((entry.name === "marker-source" || capturedMarker) && (
+        journal.manifest.marker === null || snapshot.proof.hash !== journal.manifest.marker.hash ||
+        !sameSerializedFileIdentity(snapshot.proof.identity, journal.manifest.marker.identity)
+      )) throw failed("图片库占位恢复源身份异常，已保留。")
+      const captured = resolve(journal.quarantinePath, `.cleanup-${randomUUID()}`)
+      await rename(path, captured)
+      const moved = await fileSnapshot(captured, journal.quarantinePath, MAX_IMAGE_BYTES, true)
+      if (!sameFileObject(moved.proof.identity, snapshot.proof.identity) || moved.proof.hash !== snapshot.proof.hash) {
+        await link(captured, path).catch(() => undefined)
+        throw failed("图片删除隔离内容在清理时被替换，外部内容已保留。")
+      }
+      await unlink(captured)
+      await adapter.syncDirectory?.(journal.quarantinePath)
+    }
+    await rmdir(journal.quarantinePath)
+    await adapter.syncDirectory?.(resolve(journal.quarantinePath, ".."))
   }
-  await rm(captured, { recursive: true })
+  for (const owned of authenticatedFiles.ownedPaths) {
+    const captured = resolve(journal.stage.canonical, `.cleanup-${randomUUID()}`)
+    await rename(owned.path, captured)
+    const moved = await fileSnapshot(captured, journal.stage.canonical, 64 * 1024, true)
+    if (
+      moved.proof.identity.dev !== owned.dev || moved.proof.identity.ino !== owned.ino ||
+      moved.proof.identity.size !== owned.size || moved.proof.hash !== owned.hash
+    ) {
+      await link(captured, owned.path).catch(() => undefined)
+      throw failed("图片删除恢复记录在清理时被替换，外部内容已保留。")
+    }
+    await unlink(captured)
+    await adapter.syncDirectory?.(journal.stage.canonical)
+  }
+  if (authenticatedFiles.unknownPaths.length === 0) {
+    await rmdir(journal.stage.canonical)
+    await adapter.syncDirectory?.(deleteRoot.canonical)
+  }
 }
 
 async function loadJournal(
   workspace: string,
   deleteRoot: DirectoryProof,
   id: string,
-  directoryName = id,
 ): Promise<DeleteJournal> {
-  const stage = await inspectDirectory(resolve(deleteRoot.canonical, directoryName), deleteRoot.canonical)
-  const manifestPath = resolve(stage.canonical, "manifest.json")
+  const stage = await inspectDirectory(resolve(deleteRoot.canonical, id), deleteRoot.canonical)
+  const key = await deleteJournalKey(workspace, false).catch(() => { throw failed("图片删除恢复密钥不可用。") })
+  const loaded = await loadDeleteManifest(stage.canonical, key).catch(() => { throw failed("图片删除恢复记录无效或认证失败。") })
+  const manifest = validateDeleteManifest(loaded.manifest, id, workspace, stage)
+  const manifestPath = loaded.path
   const manifestBytes = await fileSnapshot(manifestPath, stage.canonical, 64 * 1024)
-  const manifest = parseDeleteManifest(manifestBytes.bytes, id, workspace)
   const parsed = parsePath(manifest.note)
   const library = await libraryProof(workspace, parsed)
   const quarantinePath = resolve(library.canonical, `.garden-delete-${id}`)
-  const heldQuarantinePath = resolve(stage.canonical, "quarantine")
-  let currentQuarantinePath = quarantinePath
   let quarantine: DirectoryProof | undefined
   if (manifest.quarantineIdentity !== null && await targetExists(quarantinePath)) {
     quarantine = await inspectDirectory(quarantinePath, library.canonical)
@@ -674,13 +608,8 @@ async function loadJournal(
     quarantine = await inspectDirectory(quarantinePath, library.canonical)
     if ((await readdir(quarantine.canonical)).length !== 0)
       throw failed("未登记的图片删除隔离目录包含内容，已保留。")
-  } else if (manifest.quarantineIdentity !== null && await targetExists(heldQuarantinePath)) {
-    quarantine = await inspectDirectory(heldQuarantinePath, stage.canonical)
-    currentQuarantinePath = heldQuarantinePath
-    if (!sameSerializedDirectoryIdentity(quarantine, manifest.quarantineIdentity))
-      throw failed("图片删除隔离目录身份不匹配。")
   }
-  return { stage, manifestPath, manifest, manifestProof: manifestBytes.proof, quarantinePath: currentQuarantinePath, ...(quarantine === undefined ? {} : { quarantine }) }
+  return { stage, manifestPath, manifest, manifestProof: manifestBytes.proof, quarantinePath, key, ...(quarantine === undefined ? {} : { quarantine }) }
 }
 
 async function restoreUncommitted(
@@ -693,9 +622,42 @@ async function restoreUncommitted(
   const library = await libraryProof(workspace, parsed)
   const target = resolve(library.canonical, journal.manifest.name)
   const quarantined = resolve(journal.quarantinePath, "image")
+  if (journal.manifest.marker !== null) {
+    const markerPath = resolve(library.canonical, ".gitkeep")
+    if (await targetExists(markerPath)) {
+      const marker = await fileSnapshot(markerPath, library.canonical, MAX_IMAGE_BYTES, true)
+      if (
+        marker.bytes.length !== 0 || marker.proof.hash !== journal.manifest.marker.hash ||
+        !sameSerializedFileIdentity(marker.proof.identity, journal.manifest.marker.identity)
+      ) throw operationError("IMAGE_LIBRARY_FAILED", "图片库占位文件已被外部替换，已安全保留。", {
+        cleanupWarnings: [{ code: "DELETE_MARKER_UNCERTAIN", message: "请人工检查图片库占位文件。" }],
+      })
+      if (journal.quarantine === undefined) throw failed("图片删除恢复记录缺少隔离目录。")
+      const held = resolve(journal.quarantine.canonical, `marker-rollback-${randomUUID()}`)
+      await rename(markerPath, held)
+      const captured = await fileSnapshot(held, journal.quarantine.canonical, MAX_IMAGE_BYTES, true)
+      if (
+        captured.bytes.length !== 0 || captured.proof.hash !== journal.manifest.marker.hash ||
+        !sameSerializedFileIdentity(captured.proof.identity, journal.manifest.marker.identity)
+      ) {
+        await link(held, markerPath).catch(() => undefined)
+        throw failed("图片库占位文件在回滚时发生变化，已保留。")
+      }
+      await unlink(held)
+      await adapter.syncDirectory?.(library.canonical)
+      await adapter.syncDirectory?.(journal.quarantine.canonical)
+    }
+  }
   const hasQuarantined = journal.quarantine !== undefined && await targetExists(quarantined)
   if (hasQuarantined) {
     const moved = await fileSnapshot(quarantined, journal.quarantine!.canonical, MAX_IMAGE_BYTES, true)
+    if (
+      moved.proof.hash !== journal.manifest.expectedContentHash ||
+      !sameSerializedFileIdentity(moved.proof.identity, journal.manifest.expectedIdentity)
+    )
+      throw operationError("IMAGE_LIBRARY_FAILED", "未提交删除的隔离内容身份异常，已安全保留。", {
+        cleanupWarnings: [{ code: "DELETE_RECOVERY_UNCERTAIN", message: "请人工检查图片删除恢复记录。" }],
+      })
     if (!(await targetExists(target))) {
       try {
         await link(quarantined, target)
@@ -725,7 +687,7 @@ async function restoreUncommitted(
     )
       throw failed("图片删除恢复目标身份不匹配。")
   }
-  await removeCapturedJournal(journal, deleteRoot)
+  await removeCapturedJournal(journal, deleteRoot, adapter)
 }
 
 async function recoverJournal(
@@ -751,7 +713,7 @@ async function recoverJournal(
         })
     }
   }
-  await removeCapturedJournal(journal, deleteRoot)
+  await removeCapturedJournal(journal, deleteRoot, adapter)
 }
 
 async function inspectDeleteJournals(
@@ -768,11 +730,16 @@ async function inspectDeleteJournals(
   const entries = await readdir(deleteRoot.canonical, { withFileTypes: true })
   if (entries.length > 64) throw failed("图片删除恢复记录过多。")
   for (const entry of entries) {
-    const cleanupMatch = CLEANUP_DIRECTORY_PATTERN.exec(entry.name)
-    const id = cleanupMatch?.[1] ?? entry.name
+    const id = entry.name
     if (!entry.isDirectory() || entry.isSymbolicLink() || !UUID_PATTERN.test(id))
       throw failed("图片删除恢复目录包含未知项目。")
-    const journal = await loadJournal(workspace, deleteRoot, id, entry.name)
+    const stagePath = resolve(deleteRoot.canonical, id)
+    const stageEntries = await readdir(stagePath, { withFileTypes: true })
+    if (!stageEntries.some((child) => isPublishedDeleteManifestSlot(child.name))) {
+      if (stageEntries.every((child) => child.isFile() && isDeleteManifestSlot(child.name))) continue
+      throw failed("图片删除恢复目录包含未认证项目。")
+    }
+    const journal = await loadJournal(workspace, deleteRoot, id)
     const parsed = parsePath(journal.manifest.note)
     const leases = await acquireLocks(workspace, [parsed.path, parsed.attachmentPath])
     let primary: unknown
@@ -794,38 +761,89 @@ async function createDeleteJournal(
   original: FileProof,
   library: DirectoryProof,
   adapter: OperationAdapter,
-): Promise<{ journal: DeleteJournal; deleteRoot: DirectoryProof; handle: Awaited<ReturnType<typeof open>> }> {
+): Promise<{ journal: DeleteJournal; deleteRoot: DirectoryProof; key: Buffer }> {
   const workspaceDirectory = await inspectDirectory(workspace, workspace)
   const garden = await ensureDirectory(resolve(workspace, ".garden-publisher"), workspaceDirectory)
   const deleteRoot = await ensureDirectory(resolve(garden.canonical, "image-delete"), garden)
   const id = randomUUID()
   const stage = await exclusiveDirectory(resolve(deleteRoot.canonical, id), deleteRoot)
+  const key = await deleteJournalKey(workspace, true).catch(() => { throw failed("无法创建图片删除恢复密钥。") })
   const quarantinePath = resolve(library.canonical, `.garden-delete-${id}`)
   let manifest: DeleteManifest = {
-    version: 1,
+    version: 2,
+    sequence: 0,
     id,
     workspace: workspaceHash(workspace),
     note: parsed.path,
     name,
     expectedContentHash: original.hash,
     expectedIdentity: serializeFileIdentity(original.identity),
+    stageIdentity: serializeDirectoryIdentity(stage),
     quarantineIdentity: null,
+    marker: null,
     phase: "prepared",
   }
-  const manifestPath = resolve(stage.canonical, "manifest.json")
-  const writer = await writeManifestFile(manifestPath, stage.canonical, manifest)
-  await adapter.syncDirectory?.(stage.canonical)
+  let manifestPath = await publishDeleteManifest(stage.canonical, manifest, key, adapter.syncDirectory)
   await adapter.syncDirectory?.(deleteRoot.canonical)
   const quarantine = await exclusiveDirectory(quarantinePath, library)
-  manifest = { ...manifest, quarantineIdentity: serializeDirectoryIdentity(quarantine) }
-  const manifestProof = await rewriteManifest(writer.handle, manifestPath, stage.canonical, manifest)
-  await adapter.syncDirectory?.(stage.canonical)
+  manifest = { ...manifest, sequence: 1, quarantineIdentity: serializeDirectoryIdentity(quarantine) }
+  manifestPath = await publishDeleteManifest(stage.canonical, manifest, key, adapter.syncDirectory)
+  const manifestProof = (await fileSnapshot(manifestPath, stage.canonical, 64 * 1024, true)).proof
   await adapter.syncDirectory?.(library.canonical)
   return {
-    journal: { stage, manifestPath, manifest, manifestProof, quarantinePath, quarantine },
+    journal: { stage, manifestPath, manifest, manifestProof, quarantinePath, quarantine, key },
     deleteRoot,
-    handle: writer.handle,
+    key,
   }
+}
+
+async function appendDeleteManifest(
+  journal: DeleteJournal,
+  manifest: DeleteManifest,
+  key: Buffer,
+  adapter: OperationAdapter,
+): Promise<DeleteJournal> {
+  const manifestPath = await publishDeleteManifest(journal.stage.canonical, manifest, key, adapter.syncDirectory)
+  return {
+    ...journal,
+    manifest,
+    manifestPath,
+    manifestProof: (await fileSnapshot(manifestPath, journal.stage.canonical, 64 * 1024, true)).proof,
+  }
+}
+
+async function quarantineWithoutOverwrite(
+  target: string,
+  quarantined: string,
+  library: DirectoryProof,
+  quarantine: DirectoryProof,
+  original: FileProof,
+): Promise<FileProof> {
+  try {
+    await link(target, quarantined)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") throw changed("图片删除隔离位置已被外部占用。")
+    throw changed("待删除图片在隔离前已发生变化。")
+  }
+  const linked = await fileSnapshot(quarantined, quarantine.canonical, MAX_IMAGE_BYTES, true)
+  if (linked.proof.hash !== original.hash || !sameFileObject(linked.proof.identity, original.identity))
+    throw changed("待删除图片在隔离前已被替换。")
+  const captured = resolve(quarantine.canonical, `capture-${randomUUID()}`)
+  await rename(target, captured)
+  const moved = await fileSnapshot(captured, quarantine.canonical, MAX_IMAGE_BYTES, true)
+  if (moved.proof.hash !== original.hash || !sameFileObject(moved.proof.identity, original.identity)) {
+    try {
+      await link(captured, target)
+    } catch {
+      throw operationError("IMAGE_LIBRARY_CHANGED", "待删除位置已被替换，外部内容已保留。", {
+        cleanupWarnings: [{ code: "DELETE_RECOVERY_COLLISION", message: "请人工检查图片删除隔离目录。" }],
+      })
+    }
+    throw changed("待删除位置在原子隔离时已被替换。")
+  }
+  await unlink(captured)
+  await verifyDirectory(library.canonical, resolve(library.canonical, ".."), library)
+  return (await fileSnapshot(quarantined, quarantine.canonical, MAX_IMAGE_BYTES, true)).proof
 }
 
 async function deleteImage(
@@ -850,88 +868,74 @@ async function deleteImage(
 
   let journal: DeleteJournal | undefined
   let deleteRoot: DirectoryProof | undefined
-  let manifestHandle: Awaited<ReturnType<typeof open>> | undefined
+  let journalKey: Buffer | undefined
   let committed = false
-  let createdMarker: FileProof | undefined
   let primary: unknown
   try {
     const created = await createDeleteJournal(workspace, parsed, name, original.proof, library, adapter)
     journal = created.journal
     deleteRoot = created.deleteRoot
-    manifestHandle = created.handle
+    journalKey = created.key
     await adapter.afterPhase?.("delete-quarantine-linked")
     await adapter.afterPhase?.("delete-before-rename")
     const quarantined = resolve(journal.quarantinePath, "image")
-    if (await targetExists(quarantined)) throw changed("图片删除隔离位置已被外部占用。")
-    await rename(target, quarantined)
-    const moved = await fileSnapshot(quarantined, journal.quarantine!.canonical, MAX_IMAGE_BYTES, true)
-    if (
-      moved.proof.hash !== original.proof.hash ||
-      !sameFileObject(moved.proof.identity, original.proof.identity)
-    )
-      throw changed("待删除位置在原子隔离前已被替换。")
+    const movedProof = await quarantineWithoutOverwrite(target, quarantined, library, journal.quarantine!, original.proof)
+    const moved = { proof: movedProof }
     await adapter.syncDirectory?.(journal.quarantine!.canonical)
     await adapter.syncDirectory?.(library.canonical)
-    journal = { ...journal, manifest: { ...journal.manifest, phase: "renamed" } }
-    journal = {
-      ...journal,
-      manifestProof: await rewriteManifest(
-        manifestHandle,
-        journal.manifestPath,
-        journal.stage.canonical,
-        journal.manifest,
-      ),
-    }
-    await adapter.syncDirectory?.(journal.stage.canonical)
+    journal = await appendDeleteManifest(journal, {
+      ...journal.manifest,
+      sequence: journal.manifest.sequence + 1,
+      phase: "renamed",
+    }, journalKey, adapter)
     await adapter.afterPhase?.("delete-quarantined")
     await adapter.afterPhase?.("delete-renamed")
 
     const state = await inspectMarkerAndImages(library, `.garden-delete-${journal.manifest.id}`)
     if (state.images.length === 0 && state.marker === undefined) {
-      createdMarker = await createMarker(library, journal.quarantine)
+      const createdMarker = await createOwnedMarkerSource(journal.quarantine!.canonical).catch(() => {
+        throw failed("无法创建占位文件恢复源。")
+      })
+      journal = await appendDeleteManifest(journal, {
+        ...journal.manifest,
+        sequence: journal.manifest.sequence + 1,
+        marker: { identity: serializeFileIdentity(createdMarker.identity), hash: createdMarker.hash },
+        phase: "marker-planned",
+      }, journalKey, adapter)
+      const markerPath = resolve(library.canonical, ".gitkeep")
+      await link(resolve(journal.quarantine!.canonical, "marker-source"), markerPath).catch((error) => {
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") throw changed("图片库占位文件已被外部创建。")
+        throw failed("无法恢复空图片库占位文件。")
+      })
+      const publishedMarker = await fileSnapshot(markerPath, library.canonical, MAX_IMAGE_BYTES, true)
+      if (!sameFileObject(publishedMarker.proof.identity, createdMarker.identity) || publishedMarker.bytes.length !== 0)
+        throw changed("图片库占位文件身份无效。")
       await adapter.syncDirectory?.(library.canonical)
     }
     if (await targetExists(target)) throw changed("删除位置已被外部创建。")
     await verifyFile(quarantined, journal.quarantine!.canonical, moved.proof)
     await adapter.afterPhase?.("delete-before-commit")
     await adapter.syncDirectory?.(library.canonical)
-    journal = { ...journal, manifest: { ...journal.manifest, phase: "committed" } }
-    journal = {
-      ...journal,
-      manifestProof: await rewriteManifest(
-        manifestHandle,
-        journal.manifestPath,
-        journal.stage.canonical,
-        journal.manifest,
-      ),
-    }
-    await adapter.syncDirectory?.(journal.stage.canonical)
+    journal = await appendDeleteManifest(journal, {
+      ...journal.manifest,
+      sequence: journal.manifest.sequence + 1,
+      phase: "committed",
+    }, journalKey, adapter)
     committed = true
     await adapter.afterPhase?.("delete-committed")
   } catch (error) {
     primary = error
   }
-  await manifestHandle?.close().catch(() => {
-    primary = failed("无法关闭图片删除恢复记录。")
-  })
-  if (!committed && primary !== undefined && createdMarker !== undefined && journal?.quarantine !== undefined) {
-    const markerPath = resolve(library.canonical, ".gitkeep")
-    const heldMarker = resolve(journal.quarantine.canonical, "marker")
-    try {
-      await rename(markerPath, heldMarker)
-      const movedMarker = await fileSnapshot(heldMarker, journal.quarantine.canonical, MAX_IMAGE_BYTES, true)
-      if (movedMarker.bytes.length !== 0 || !sameFileObject(movedMarker.proof.identity, createdMarker.identity))
-        throw new Error("marker changed")
-    } catch {
-      throw operationError("IMAGE_LIBRARY_FAILED", "图片删除失败且占位文件恢复未能确认。", {
-        cleanupWarnings: [{ code: "DELETE_MARKER_UNCERTAIN", message: "请刷新并人工检查图片库。" }],
-      })
-    }
-  }
   if (journal !== undefined && deleteRoot !== undefined) {
     try {
       await recoverJournal(workspace, journal, deleteRoot, adapter)
     } catch {
+      if (!committed && isImageLibraryOperationError(primary) && primary.code === "IMAGE_LIBRARY_CHANGED") {
+        throw operationError(primary.code, primary.message, {
+          ...primary.details,
+          cleanupWarnings: [{ code: "DELETE_RECOVERY_UNCERTAIN", message: "外部替换已保留，请刷新后重试。" }],
+        })
+      }
       throw operationError("IMAGE_LIBRARY_FAILED", committed
         ? "图片已删除，但删除记录清理未能确认。"
         : "图片删除失败且自动恢复未能确认。", {
@@ -942,22 +946,6 @@ async function deleteImage(
   if (primary !== undefined) {
     if (isImageLibraryOperationError(primary)) throw primary
     throw failed("无法永久删除图片。")
-  }
-}
-
-let previewTail: Promise<void> = Promise.resolve()
-
-async function serializePreview<T>(operation: () => Promise<T>): Promise<T> {
-  let release!: () => void
-  const predecessor = previewTail
-  previewTail = new Promise<void>((resolve) => {
-    release = resolve
-  })
-  await predecessor
-  try {
-    return await operation()
-  } finally {
-    release()
   }
 }
 
@@ -986,7 +974,7 @@ export function createImageLibraryOperations(options: {
     },
 
     preview(request) {
-      return serializePreview(() => withOperation(options.workspace, request.path, async ({ parsed, library }) => {
+      return serializeImagePreview(() => withOperation(options.workspace, request.path, async ({ parsed, library }) => {
         const name = safeName(request.name)
         const image = await fileSnapshot(resolve(library.canonical, name), library.canonical, MAX_IMAGE_BYTES)
         if (request.expectedContentHash !== undefined && image.proof.hash !== request.expectedContentHash)
