@@ -1,6 +1,39 @@
 import { describe, expect, it, vi } from "vitest"
 import { createElectronImageLibraryAdapter } from "../../src/main/services/imageLibraryElectron"
 
+const pngDimensions = (width: number, height: number) =>
+  Uint8Array.from([
+    0x89,
+    0x50,
+    0x4e,
+    0x47,
+    0x0d,
+    0x0a,
+    0x1a,
+    0x0a,
+    0,
+    0,
+    0,
+    13,
+    0x49,
+    0x48,
+    0x44,
+    0x52,
+    (width >>> 24) & 0xff,
+    (width >>> 16) & 0xff,
+    (width >>> 8) & 0xff,
+    width & 0xff,
+    (height >>> 24) & 0xff,
+    (height >>> 16) & 0xff,
+    (height >>> 8) & 0xff,
+    height & 0xff,
+    8,
+    2,
+    0,
+    0,
+    0,
+  ])
+
 function nativeImage(options?: { empty?: boolean }) {
   const thumbnail = { toDataURL: vi.fn(() => "data:image/png;base64,iVBORw0KGgo=") }
   return {
@@ -55,7 +88,7 @@ describe("Electron image library adapter", () => {
       createImageFromBuffer,
       writeClipboard,
     })
-    const bytes = Uint8Array.from([1, 2, 3])
+    const bytes = pngDimensions(640, 480)
 
     await expect(adapter.renderThumbnail(bytes)).resolves.toEqual({
       width: 640,
@@ -71,6 +104,60 @@ describe("Electron image library adapter", () => {
     expect(createImageFromBuffer).toHaveBeenCalledTimes(2)
   })
 
+  it("rejects oversized metadata before nativeImage receives any bytes", async () => {
+    const createImageFromBuffer = vi.fn(() => nativeImage())
+    const adapter = createElectronImageLibraryAdapter({
+      getWindow: () => undefined,
+      showOpenDialog: vi.fn(),
+      createImageFromBuffer,
+      writeClipboard: vi.fn(),
+    })
+
+    await expect(adapter.renderThumbnail(pngDimensions(10_000, 4_001))).rejects.toMatchObject({
+      code: "IMAGE_LIBRARY_TOO_LARGE",
+    })
+    await expect(adapter.readDimensions(pngDimensions(0xffff_ffff, 1))).rejects.toMatchObject({
+      code: "IMAGE_LIBRARY_TOO_LARGE",
+    })
+    expect(createImageFromBuffer).not.toHaveBeenCalled()
+  })
+
+  it("rejects zero-sized and malformed metadata before nativeImage receives any bytes", async () => {
+    const createImageFromBuffer = vi.fn(() => nativeImage())
+    const adapter = createElectronImageLibraryAdapter({
+      getWindow: () => undefined,
+      showOpenDialog: vi.fn(),
+      createImageFromBuffer,
+      writeClipboard: vi.fn(),
+    })
+
+    await expect(adapter.renderThumbnail(pngDimensions(0, 480))).rejects.toMatchObject({
+      code: "IMAGE_LIBRARY_INVALID",
+    })
+    await expect(
+      adapter.readDimensions(pngDimensions(640, 480).subarray(0, 28)),
+    ).rejects.toMatchObject({
+      code: "IMAGE_LIBRARY_INVALID",
+    })
+    expect(createImageFromBuffer).not.toHaveBeenCalled()
+  })
+
+  it("allows the exact pixel budget before native decode", async () => {
+    const image = nativeImage()
+    const createImageFromBuffer = vi.fn(() => image)
+    const adapter = createElectronImageLibraryAdapter({
+      getWindow: () => undefined,
+      showOpenDialog: vi.fn(),
+      createImageFromBuffer,
+      writeClipboard: vi.fn(),
+    })
+    await expect(adapter.readDimensions(pngDimensions(10_000, 4_000))).resolves.toEqual({
+      width: 640,
+      height: 480,
+    })
+    expect(createImageFromBuffer).toHaveBeenCalledOnce()
+  })
+
   it("rejects empty native images before dimensions or data URLs are used", async () => {
     const image = nativeImage({ empty: true })
     const adapter = createElectronImageLibraryAdapter({
@@ -79,10 +166,10 @@ describe("Electron image library adapter", () => {
       createImageFromBuffer: vi.fn(() => image),
       writeClipboard: vi.fn(),
     })
-    await expect(adapter.renderThumbnail(Uint8Array.from([1]))).rejects.toThrow(
+    await expect(adapter.renderThumbnail(pngDimensions(1, 1))).rejects.toThrow(
       "The selected image could not be decoded.",
     )
-    await expect(adapter.readDimensions(Uint8Array.from([1]))).rejects.toThrow(
+    await expect(adapter.readDimensions(pngDimensions(1, 1))).rejects.toThrow(
       "The selected image could not be decoded.",
     )
     expect(image.getSize).not.toHaveBeenCalled()

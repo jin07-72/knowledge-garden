@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest"
 import {
   detectImageFormat,
+  IMAGE_MAX_DECODED_DIMENSION,
+  IMAGE_MAX_DECODED_PIXELS,
   imageDataUrl,
   markdownForImage,
   normalizeImageName,
+  readBoundedImageMetadata,
   type ImageFormat,
 } from "../../src/main/services/imageFormats"
 
@@ -17,6 +20,57 @@ const append = (...parts: readonly Uint8Array[]) =>
   Uint8Array.from(parts.flatMap((part) => [...part]))
 const uint32Bytes = (value: number) =>
   bytes((value >>> 24) & 0xff, (value >>> 16) & 0xff, (value >>> 8) & 0xff, value & 0xff)
+const uint32LittleEndian = (value: number) =>
+  bytes(value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff)
+
+function pngDimensions(width: number, height: number): Uint8Array {
+  return append(
+    bytes(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a),
+    uint32Bytes(13),
+    ascii("IHDR"),
+    uint32Bytes(width),
+    uint32Bytes(height),
+    bytes(8, 2, 0, 0, 0),
+  )
+}
+
+function jpegDimensions(width: number, height: number): Uint8Array {
+  return append(
+    bytes(0xff, 0xd8, 0xff, 0xe0, 0x00, 0x04, 0x00, 0x00),
+    bytes(0xff, 0xc0, 0x00, 0x0b, 0x08, (height >>> 8) & 0xff, height & 0xff),
+    bytes((width >>> 8) & 0xff, width & 0xff, 0x01, 0x01, 0x11, 0x00),
+  )
+}
+
+function gifDimensions(width: number, height: number): Uint8Array {
+  return append(ascii("GIF89a"), bytes(width & 0xff, width >>> 8, height & 0xff, height >>> 8))
+}
+
+function webpDimensions(width: number, height: number): Uint8Array {
+  return append(
+    ascii("RIFF"),
+    uint32LittleEndian(22),
+    ascii("WEBPVP8X"),
+    uint32LittleEndian(10),
+    bytes(0, 0, 0, 0),
+    bytes((width - 1) & 0xff, ((width - 1) >>> 8) & 0xff, ((width - 1) >>> 16) & 0xff),
+    bytes((height - 1) & 0xff, ((height - 1) >>> 8) & 0xff, ((height - 1) >>> 16) & 0xff),
+  )
+}
+
+function avifDimensions(width: number, height: number): Uint8Array {
+  const ispe = append(
+    uint32Bytes(20),
+    ascii("ispe"),
+    bytes(0, 0, 0, 0),
+    uint32Bytes(width),
+    uint32Bytes(height),
+  )
+  const ipco = append(uint32Bytes(8 + ispe.length), ascii("ipco"), ispe)
+  const iprp = append(uint32Bytes(8 + ipco.length), ascii("iprp"), ipco)
+  const meta = append(uint32Bytes(12 + iprp.length), ascii("meta"), bytes(0, 0, 0, 0), iprp)
+  return append(avifHeader("avif"), meta)
+}
 
 function avifHeader(
   majorBrand: "avif" | "avis" | "mif1" = "avif",
@@ -197,6 +251,49 @@ describe("image format detection", () => {
 
     for (const header of [beyondBound, unsafeExtendedSize])
       expectInvalid(() => detectImageFormat(header, "photo.avif"))
+  })
+})
+
+describe("bounded image metadata", () => {
+  it.each([
+    ["PNG", pngDimensions(640, 480), "image/png"],
+    ["JPEG", jpegDimensions(640, 480), "image/jpeg"],
+    ["GIF", gifDimensions(640, 480), "image/gif"],
+    ["animated WebP canvas", webpDimensions(640, 480), "image/webp"],
+    ["AVIF item property", avifDimensions(640, 480), "image/avif"],
+  ] as const)("reads %s dimensions without a decoder", (_label, input, mime) => {
+    expect(readBoundedImageMetadata(input)).toEqual({ width: 640, height: 480, mime })
+  })
+
+  it("accepts the exact pixel budget and rejects the next pixel row", () => {
+    expect(IMAGE_MAX_DECODED_PIXELS).toBe(40_000_000)
+    expect(readBoundedImageMetadata(pngDimensions(10_000, 4_000))).toMatchObject({
+      width: 10_000,
+      height: 4_000,
+    })
+    expect(() => readBoundedImageMetadata(pngDimensions(10_000, 4_001))).toThrow(
+      expect.objectContaining({ code: "IMAGE_LIBRARY_TOO_LARGE" }),
+    )
+  })
+
+  it("rejects zero, over-dimension, truncated, and integer-overflow dimensions", () => {
+    expect(IMAGE_MAX_DECODED_DIMENSION).toBe(16_384)
+    for (const input of [
+      pngDimensions(0, 480),
+      gifDimensions(640, 0),
+      pngDimensions(IMAGE_MAX_DECODED_DIMENSION + 1, 1),
+      avifDimensions(0xffff_ffff, 0xffff_ffff),
+      pngDimensions(640, 480).subarray(0, 28),
+    ])
+      expect(() => readBoundedImageMetadata(input)).toThrow(
+        expect.objectContaining({
+          code: expect.stringMatching(/^IMAGE_LIBRARY_(?:INVALID|TOO_LARGE)$/),
+        }),
+      )
+  })
+
+  it("rejects unsupported signatures instead of sending them to a decoder", () => {
+    expectInvalid(() => readBoundedImageMetadata(ascii("not an image")))
   })
 })
 

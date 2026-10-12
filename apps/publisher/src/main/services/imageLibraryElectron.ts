@@ -1,4 +1,5 @@
 import type { ImageLibraryAdapter } from "./imageLibrary"
+import { readBoundedImageMetadata } from "./imageFormats"
 
 interface DialogResult {
   readonly canceled: boolean
@@ -48,8 +49,10 @@ function decodedImage(image: NativeImagePort): NativeImagePort {
 export function createElectronImageLibraryAdapter<Window>(
   dependencies: ElectronImageLibraryDependencies<Window>,
 ): ImageLibraryAdapter {
-  const createImage = (bytes: Uint8Array): NativeImagePort =>
-    decodedImage(dependencies.createImageFromBuffer(Buffer.from(bytes)))
+  const createImage = (bytes: Uint8Array): NativeImagePort => {
+    readBoundedImageMetadata(bytes)
+    return decodedImage(dependencies.createImageFromBuffer(Buffer.from(bytes)))
+  }
   return {
     chooseImages: async () => {
       const window = dependencies.getWindow()
