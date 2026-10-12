@@ -133,6 +133,63 @@ const domainPublicErrorMessages: Readonly<Partial<Record<AppError["code"], strin
   DOMAIN_UNSAFE_PATH: "An unsafe or changed domain path was rejected.",
 } satisfies Record<DomainPublicErrorCode, string>
 
+const imageLibraryPublicErrorMessages: Readonly<Partial<Record<AppError["code"], string>>> = {
+  IMAGE_LIBRARY_INVALID: "图片库请求无效，请刷新后重试。",
+  IMAGE_LIBRARY_UNSAFE: "图片库路径不安全，已停止操作。",
+  IMAGE_LIBRARY_TOO_LARGE: "所选图片超过数量或大小限制。",
+  IMAGE_LIBRARY_CONFLICT: "图片名称冲突，请确认后重试。",
+  IMAGE_LIBRARY_CHANGED: "图片或笔记已发生变化，请刷新后重试。",
+  IMAGE_LIBRARY_FAILED: "图片库操作失败，请重试。",
+}
+
+const cleanupWarningMessages: Readonly<Record<string, string>> = {
+  LOCK_RELEASE_FAILED: "部分操作锁未能安全释放。",
+  CLEANUP_UNCERTAIN: "部分清理状态无法确认，请人工检查后重试。",
+  CLEANUP_SYNC_FAILED: "清理后的目录同步失败，请人工检查后重试。",
+  CLEANUP_RETAINED: "图片库目录含有外部内容，已安全保留。",
+  CLEANUP_FAILED: "部分图片库项目未能安全清理。",
+  DELETE_MARKER_UNCERTAIN: "请人工检查图片库占位文件。",
+  DELETE_RECOVERY_UNCERTAIN: "请人工检查图片删除恢复记录。",
+  DELETE_RECOVERY_COLLISION: "图片删除恢复位置存在冲突，请人工检查。",
+  DELETE_CLEANUP_UNCERTAIN: "请人工检查图片删除记录。",
+}
+
+function publicCleanupWarnings(details: unknown):
+  | readonly { readonly code: string; readonly message: string }[]
+  | undefined {
+  try {
+    if (typeof details !== "object" || details === null) return undefined
+    const descriptor = Object.getOwnPropertyDescriptor(details, "cleanupWarnings")
+    if (!descriptor || !("value" in descriptor) || !Array.isArray(descriptor.value)) return undefined
+    if (descriptor.value.length === 0 || descriptor.value.length > 32) return undefined
+    const warnings: { code: string; message: string }[] = []
+    for (const value of descriptor.value) {
+      if (typeof value !== "object" || value === null) return undefined
+      const code = Object.getOwnPropertyDescriptor(value, "code")
+      const message = Object.getOwnPropertyDescriptor(value, "message")
+      if (
+        !code ||
+        !("value" in code) ||
+        typeof code.value !== "string" ||
+        !/^[A-Z][A-Z0-9_]{0,63}$/.test(code.value) ||
+        !message ||
+        !("value" in message) ||
+        typeof message.value !== "string" ||
+        message.value.length < 1 ||
+        message.value.length > 500
+      )
+        return undefined
+      warnings.push({
+        code: code.value,
+        message: cleanupWarningMessages[code.value] ?? "部分清理状态需要人工检查。",
+      })
+    }
+    return warnings
+  } catch {
+    return undefined
+  }
+}
+
 export const appErrorSchema = z
   .object({
     code: z.enum(APP_ERROR_CODES),
@@ -141,11 +198,15 @@ export const appErrorSchema = z
   })
   .strip()
   .transform(
-    ({ code, message }): AppError =>
-      ({
+    ({ code, message, details }): AppError => {
+      const cleanupWarnings = publicCleanupWarnings(details)
+      return ({
         code,
-        message: domainPublicErrorMessages[code] ?? message,
-      }) as AppError,
+        message:
+          domainPublicErrorMessages[code] ?? imageLibraryPublicErrorMessages[code] ?? message,
+        ...(cleanupWarnings ? { details: { cleanupWarnings } } : {}),
+      }) as AppError
+    },
   )
 
 const pathSchema = z.string().min(1).max(512)

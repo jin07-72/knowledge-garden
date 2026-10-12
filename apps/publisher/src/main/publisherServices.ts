@@ -41,6 +41,11 @@ import {
   type DomainCatalog,
   type DomainCatalogOptions,
 } from "./services/domains"
+import {
+  createImageLibraryService,
+  type ImageLibraryAdapter,
+  type ImageLibraryService,
+} from "./services/imageLibrary"
 
 export interface PreviewServicePort {
   start(request: {
@@ -57,6 +62,11 @@ export interface PublisherServiceDependencies {
   readonly trash: TrashAdapter
   readonly isTracked: (workspace: string, path: string) => Promise<boolean>
   readonly preview: PreviewServicePort
+  readonly imageLibraryAdapter?: ImageLibraryAdapter
+  readonly imageLibraryFactory?: (options: {
+    readonly workspace: string
+    readonly adapter: ImageLibraryAdapter
+  }) => ImageLibraryService
   readonly changeScanner?: Pick<ChangeScanner, "list" | "cancel"> &
     Partial<Pick<ChangeScanner, "dispose">>
   readonly deploymentHistory?: DeploymentHistoryService
@@ -116,6 +126,7 @@ export async function createPublisherServices(
   const changeScanner = dependencies.changeScanner ?? createChangeScanner({ workspace })
   let domains: DomainCatalog | undefined
   let deploymentHistory: DeploymentHistoryService | undefined
+  let images: ImageLibraryService | undefined
   let publisher:
     ReturnType<NonNullable<PublisherServiceDependencies["publisherFactory"]>> | undefined
 
@@ -134,6 +145,13 @@ export async function createPublisherServices(
     if (deploymentHistory && dependencies.deploymentHistory === undefined) {
       try {
         await deploymentHistory.dispose()
+      } catch (error) {
+        failures.push(error)
+      }
+    }
+    if (images) {
+      try {
+        await images.dispose()
       } catch (error) {
         failures.push(error)
       }
@@ -162,6 +180,20 @@ export async function createPublisherServices(
     deploymentHistory =
       dependencies.deploymentHistory ??
       createDeploymentHistoryService({ workspace, openExternal: dependencies.openExternal })
+    const imageLibraryAdapter =
+      dependencies.imageLibraryAdapter ??
+      ({
+        chooseImages: async () => undefined,
+        renderThumbnail: async () => Promise.reject(unavailable("Image decoding")),
+        readDimensions: async () => Promise.reject(unavailable("Image decoding")),
+        writeClipboard: () => {
+          throw unavailable("Clipboard")
+        },
+      } satisfies ImageLibraryAdapter)
+    images = (dependencies.imageLibraryFactory ?? createImageLibraryService)({
+      workspace,
+      adapter: imageLibraryAdapter,
+    })
     reject = async <T>(name: string): Promise<T> => Promise.reject(unavailable(name))
     publishListeners = new Set<(progress: PublishProgress) => void>()
     emitPublish = (progress: PublishProgress): void => {
@@ -173,7 +205,8 @@ export async function createPublisherServices(
   }
   const catalog = domains
   const history = deploymentHistory
-  if (!catalog || !history)
+  const imageLibrary = images
+  if (!catalog || !history || !imageLibrary)
     return rollbackConstruction(new Error("Publisher services failed to initialize."))
   let activePublish: string | undefined
   let preparingPublish = 0
@@ -243,6 +276,7 @@ export async function createPublisherServices(
     },
     dispose: async () => {
       switchPreparing = true
+      await imageLibrary.dispose()
       await catalog.dispose()
       recoveryDisposed = true
       if (recoveryTimer) clearTimeout(recoveryTimer)
@@ -297,6 +331,7 @@ export async function createPublisherServices(
         discard: (request) => discardEditorRecovery(workspace, request, trash),
       },
     },
+    images: imageLibrary,
     preview: {
       start: (request) => preview.start({ workspace, ...request }),
       stop: () => preview.stop(),

@@ -27,6 +27,11 @@ import {
   type HistoryCancelRequest,
   type HistoryRequest,
   type HistoryLinkRequest,
+  type ImageLibraryCommitRequest,
+  type ImageLibraryItemRequest,
+  type ImageLibraryPreview,
+  type ImageLibrarySelection,
+  type ImageLibraryView,
   type IpcResult,
   type NoteCreateRequest,
   type NoteDocument,
@@ -68,6 +73,10 @@ import {
   domainRemoveSchema,
   domainRenameSchema,
   domainSlugSchema,
+  imageLibraryCommitRequestSchema,
+  imageLibraryDeleteRequestSchema,
+  imageLibraryItemRequestSchema,
+  imageLibraryPathRequestSchema,
   markdownSchema,
   previewProgressSchema,
   publishProgressSchema,
@@ -114,6 +123,14 @@ export interface PublisherIpcServices {
       write(request: NoteRecoveryWriteRequest): Promise<NoteRecoveryReceipt>
       discard(request: NoteRecoveryDiscardRequest): Promise<void>
     }
+  }
+  readonly images: {
+    open(request: NotePathRequest): Promise<ImageLibraryView>
+    select(request: NotePathRequest): Promise<ImageLibrarySelection>
+    commit(request: ImageLibraryCommitRequest): Promise<ImageLibraryView>
+    preview(request: ImageLibraryItemRequest): Promise<ImageLibraryPreview>
+    delete(request: Required<ImageLibraryItemRequest>): Promise<ImageLibraryView>
+    copyMarkdown(request: ImageLibraryItemRequest): Promise<void>
   }
   readonly preview: {
     start(request: PreviewStartRequest): Promise<PreviewStatus>
@@ -840,6 +857,60 @@ export function registerPublisherIpc(options: RegisterPublisherIpcOptions): () =
         noteRecoveryDiscardSchema,
         isTrustedSender,
         (request) => services.notes.recovery.discard(request),
+      ),
+    ],
+    [
+      IPC_CHANNELS.requests.imagesOpen,
+      secureHandler(
+        IPC_CHANNELS.requests.imagesOpen,
+        imageLibraryPathRequestSchema,
+        isTrustedSender,
+        (request) => services.images.open(request),
+      ),
+    ],
+    [
+      IPC_CHANNELS.requests.imagesSelect,
+      secureHandler(
+        IPC_CHANNELS.requests.imagesSelect,
+        imageLibraryPathRequestSchema,
+        isTrustedSender,
+        (request) => services.images.select(request),
+      ),
+    ],
+    [
+      IPC_CHANNELS.requests.imagesCommit,
+      secureHandler(
+        IPC_CHANNELS.requests.imagesCommit,
+        imageLibraryCommitRequestSchema,
+        isTrustedSender,
+        (request) => services.images.commit(request),
+      ),
+    ],
+    [
+      IPC_CHANNELS.requests.imagesPreview,
+      secureHandler(
+        IPC_CHANNELS.requests.imagesPreview,
+        imageLibraryItemRequestSchema,
+        isTrustedSender,
+        (request) => services.images.preview(request),
+      ),
+    ],
+    [
+      IPC_CHANNELS.requests.imagesDelete,
+      secureHandler(
+        IPC_CHANNELS.requests.imagesDelete,
+        imageLibraryDeleteRequestSchema,
+        isTrustedSender,
+        (request) => services.images.delete(request),
+      ),
+    ],
+    [
+      IPC_CHANNELS.requests.imagesCopyMarkdown,
+      secureHandler(
+        IPC_CHANNELS.requests.imagesCopyMarkdown,
+        imageLibraryItemRequestSchema,
+        isTrustedSender,
+        (request) => services.images.copyMarkdown(request),
       ),
     ],
     [

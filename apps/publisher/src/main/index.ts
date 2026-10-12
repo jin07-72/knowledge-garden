@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, net, shell } from "electron"
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, net, shell } from "electron"
 import { existsSync } from "node:fs"
 import { isAbsolute, join, resolve } from "node:path"
 import { randomUUID } from "node:crypto"
@@ -46,6 +46,7 @@ import {
   inspectBlogCandidate,
   type BlogImportService,
 } from "./services/blogImport"
+import { createElectronImageLibraryAdapter } from "./services/imageLibraryElectron"
 
 let mainWindow: BrowserWindow | undefined
 let mainWindowTrust: RendererTrustPolicy | undefined
@@ -409,11 +410,23 @@ app.whenReady().then(async () => {
       })
     }
     const trash = createElectronTrashAdapter(shell)
+    const imageLibraryAdapter = createElectronImageLibraryAdapter<BrowserWindow>({
+      getWindow: () => {
+        const window = mainWindow
+        return window && !window.isDestroyed() && !window.webContents.isDestroyed()
+          ? window
+          : undefined
+      },
+      showOpenDialog: (window, options) => dialog.showOpenDialog(window, options),
+      createImageFromBuffer: (bytes) => nativeImage.createFromBuffer(bytes),
+      writeClipboard: (text) => clipboard.writeText(text),
+    })
     publisherServices = await createPublisherServices({
       workspace,
       trash,
       isTracked,
       preview: previewManager,
+      imageLibraryAdapter,
       openExternal: (url) => shell.openExternal(url),
       ...(bundledRuntime ? { runtime: bundledRuntime } : {}),
       ...(e2e ? {} : { previewPortAvailable: () => isPreviewPortAvailable(8080) }),

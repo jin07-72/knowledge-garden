@@ -94,6 +94,14 @@ function services(): PublisherIpcServices & {
         discard: call("notesRecoveryDiscard"),
       },
     },
+    images: {
+      open: call("imagesOpen"),
+      select: call("imagesSelect"),
+      commit: call("imagesCommit"),
+      preview: call("imagesPreview"),
+      delete: call("imagesDelete"),
+      copyMarkdown: call("imagesCopyMarkdown"),
+    },
     preview: {
       start: call("previewStart"),
       stop: call("previewStop"),
@@ -661,18 +669,8 @@ describe("secure publisher IPC", () => {
   })
   it("registers only the explicit request allowlist", () => {
     const { ipc, dispose } = setup()
-    const reservedImageChannels = new Set<string>([
-      IPC_CHANNELS.requests.imagesOpen,
-      IPC_CHANNELS.requests.imagesSelect,
-      IPC_CHANNELS.requests.imagesCommit,
-      IPC_CHANNELS.requests.imagesPreview,
-      IPC_CHANNELS.requests.imagesDelete,
-      IPC_CHANNELS.requests.imagesCopyMarkdown,
-    ])
     expect([...ipc.handlers.keys()].sort()).toEqual(
-      [...Object.values(IPC_CHANNELS.requests)]
-        .filter((channel) => !reservedImageChannels.has(channel))
-        .sort(),
+      [...Object.values(IPC_CHANNELS.requests)].sort(),
     )
     expect(ipc.handlers.has("shell.exec")).toBe(false)
     expect(ipc.handlers.has("fs.readFile")).toBe(false)
@@ -972,6 +970,206 @@ describe("secure publisher IPC", () => {
     expect(servicePorts.calls.notesRead).toHaveBeenCalledWith({
       path: "private/life/daily-note.md",
     })
+  })
+
+  it("registers and forwards exactly six validated image-library requests", async () => {
+    const { ipc, servicePorts } = setup()
+    const path = "content/life/daily.md"
+    const selectionId = "11111111-1111-4111-8111-111111111111"
+    const hash = "a".repeat(64)
+    const item = {
+      name: "cover.png",
+      sizeBytes: 8,
+      width: 1,
+      height: 1,
+      contentHash: hash,
+      thumbnailDataUrl: "data:image/png;base64,iVBORw0KGgo=",
+      markdown: "![cover](<../_assets/daily/cover.png>)",
+    }
+    const view = { path, images: [item] }
+    servicePorts.calls.imagesOpen.mockResolvedValueOnce(view)
+    servicePorts.calls.imagesSelect.mockResolvedValueOnce({
+      cancelled: true,
+      images: [],
+      conflicts: [],
+    })
+    servicePorts.calls.imagesCommit.mockResolvedValueOnce(view)
+    servicePorts.calls.imagesPreview.mockResolvedValueOnce({
+      ...item,
+      thumbnailDataUrl: undefined,
+      dataUrl: "data:image/png;base64,iVBORw0KGgo=",
+    })
+    servicePorts.calls.imagesDelete.mockResolvedValueOnce(view)
+    servicePorts.calls.imagesCopyMarkdown.mockResolvedValueOnce(undefined)
+
+    const pairs = [
+      [IPC_CHANNELS.requests.imagesOpen, { path }, "imagesOpen"],
+      [IPC_CHANNELS.requests.imagesSelect, { path }, "imagesSelect"],
+      [
+        IPC_CHANNELS.requests.imagesCommit,
+        { path, selectionId, overwrite: ["cover.png"] },
+        "imagesCommit",
+      ],
+      [IPC_CHANNELS.requests.imagesPreview, { path, name: "cover.png" }, "imagesPreview"],
+      [
+        IPC_CHANNELS.requests.imagesDelete,
+        { path, name: "cover.png", expectedContentHash: hash },
+        "imagesDelete",
+      ],
+      [
+        IPC_CHANNELS.requests.imagesCopyMarkdown,
+        { path, name: "cover.png" },
+        "imagesCopyMarkdown",
+      ],
+    ] as const
+
+    for (const [channel, request, call] of pairs) {
+      await expect(ipc.invoke(channel, trustedEvent, request)).resolves.toMatchObject({ ok: true })
+      expect(servicePorts.calls[call]).toHaveBeenCalledExactlyOnceWith(request)
+    }
+  })
+
+  it("rejects malformed image requests and dead or untrusted senders before dispatch", async () => {
+    const { ipc, servicePorts } = setup()
+    const invalid = [
+      [IPC_CHANNELS.requests.imagesOpen, { path: "C:/secret.md" }, "imagesOpen"],
+      [IPC_CHANNELS.requests.imagesSelect, { path: "../daily.md" }, "imagesSelect"],
+      [
+        IPC_CHANNELS.requests.imagesCommit,
+        { path: "content/life/daily.md", selectionId: "token", overwrite: [] },
+        "imagesCommit",
+      ],
+      [
+        IPC_CHANNELS.requests.imagesPreview,
+        { path: "content/life/daily.md", name: "../secret.png" },
+        "imagesPreview",
+      ],
+      [
+        IPC_CHANNELS.requests.imagesDelete,
+        { path: "content/life/daily.md", name: "cover.png", expectedContentHash: "bad" },
+        "imagesDelete",
+      ],
+      [
+        IPC_CHANNELS.requests.imagesCopyMarkdown,
+        { path: "content/life/daily.md", name: "cover.png", sourcePath: "C:/secret.png" },
+        "imagesCopyMarkdown",
+      ],
+    ] as const
+    for (const [channel, request, call] of invalid) {
+      await expect(ipc.invoke(channel, trustedEvent, request)).resolves.toMatchObject({
+        ok: false,
+        error: { code: "INVALID_INPUT" },
+      })
+      expect(servicePorts.calls[call]).not.toHaveBeenCalled()
+    }
+
+    const dead = { sender: { isDestroyed: () => true } }
+    await expect(
+      ipc.invoke(IPC_CHANNELS.requests.imagesOpen, dead, { path: "content/life/daily.md" }),
+    ).resolves.toMatchObject({ ok: false, error: { code: "IPC_UNAUTHORIZED" } })
+    await expect(
+      ipc.invoke(IPC_CHANNELS.requests.imagesOpen, { sender: { isDestroyed: () => false } }, {
+        path: "content/life/daily.md",
+      }),
+    ).resolves.toMatchObject({ ok: false, error: { code: "IPC_UNAUTHORIZED" } })
+    expect(servicePorts.calls.imagesOpen).not.toHaveBeenCalled()
+  })
+
+  it("never returns selected source paths and rejects a cancellation carrying a token", async () => {
+    const { ipc, servicePorts } = setup()
+    const path = "content/life/daily.md"
+    const selectionId = "11111111-1111-4111-8111-111111111111"
+    servicePorts.calls.imagesSelect.mockResolvedValueOnce({
+      cancelled: false,
+      selectionId,
+      conflicts: [],
+      sourcePath: "C:/Users/private/source.png",
+      images: [
+        {
+          name: "photo.png",
+          sizeBytes: 8,
+          width: 1,
+          height: 1,
+          contentHash: "a".repeat(64),
+          thumbnailDataUrl: "data:image/png;base64,iVBORw0KGgo=",
+          markdown: "![photo](<../_assets/daily/photo.png>)",
+          conflict: false,
+          sourcePath: "C:/Users/private/source.png",
+        },
+      ],
+    })
+    const selected = await ipc.invoke(IPC_CHANNELS.requests.imagesSelect, trustedEvent, { path })
+    expect(selected).toEqual({
+      ok: true,
+      value: {
+        cancelled: false,
+        selectionId,
+        conflicts: [],
+        images: [
+          {
+            name: "photo.png",
+            sizeBytes: 8,
+            width: 1,
+            height: 1,
+            contentHash: "a".repeat(64),
+            thumbnailDataUrl: "data:image/png;base64,iVBORw0KGgo=",
+            markdown: "![photo](<../_assets/daily/photo.png>)",
+            conflict: false,
+          },
+        ],
+      },
+    })
+    expect(JSON.stringify(selected)).not.toContain("C:/Users")
+
+    servicePorts.calls.imagesSelect.mockResolvedValueOnce({
+      cancelled: true,
+      selectionId,
+      images: [],
+      conflicts: [],
+    })
+    await expect(
+      ipc.invoke(IPC_CHANNELS.requests.imagesSelect, trustedEvent, { path }),
+    ).resolves.toEqual({
+      ok: false,
+      error: { code: "INTERNAL_ERROR", message: "The application could not complete the request." },
+    })
+    expect(servicePorts.calls.imagesSelect).toHaveBeenCalledTimes(2)
+  })
+
+  it("sanitizes image-library failures while preserving bounded cleanup warnings", async () => {
+    const { ipc, servicePorts } = setup()
+    servicePorts.calls.imagesOpen.mockRejectedValueOnce({
+      code: "IMAGE_LIBRARY_FAILED",
+      message: "C:/Users/private/secret.png could not be opened",
+      stack: "C:/Users/private/secret.png",
+      details: {
+        path: "C:/Users/private/secret.png",
+        cleanupWarnings: [
+          {
+            code: "CLEANUP_RETAINED",
+            message: "C:/Users/private/secret.png was retained",
+            path: "C:/Users/private/secret.png",
+          },
+        ],
+      },
+    })
+    const result = await ipc.invoke(IPC_CHANNELS.requests.imagesOpen, trustedEvent, {
+      path: "content/life/daily.md",
+    })
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        code: "IMAGE_LIBRARY_FAILED",
+        message: "图片库操作失败，请重试。",
+        details: {
+          cleanupWarnings: [
+            { code: "CLEANUP_RETAINED", message: "图片库目录含有外部内容，已安全保留。" },
+          ],
+        },
+      },
+    })
+    expect(JSON.stringify(result)).not.toContain("C:/Users")
+    expect(servicePorts.calls.imagesOpen).toHaveBeenCalledOnce()
   })
 
   it("rejects untrusted or destroyed senders before dispatch", async () => {

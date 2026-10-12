@@ -12,6 +12,10 @@ import {
 import { createBlogRuntime, runBlogManagementShutdown } from "../../src/main/blogRuntime"
 import type { DomainCatalog } from "../../src/main/services/domains"
 import type { PreviewStatus } from "../../src/shared/contracts"
+import type {
+  ImageLibraryAdapter,
+  ImageLibraryService,
+} from "../../src/main/services/imageLibrary"
 import { git } from "../helpers/git"
 
 const temporaryDirectories: string[] = []
@@ -68,7 +72,110 @@ function domainCatalog(overrides: Partial<DomainCatalog> = {}): DomainCatalog {
   }
 }
 
+function imageAdapter(): ImageLibraryAdapter {
+  return {
+    chooseImages: vi.fn(async () => undefined),
+    renderThumbnail: vi.fn(async () => ({
+      width: 1,
+      height: 1,
+      dataUrl: "data:image/png;base64,iVBORw0KGgo=",
+    })),
+    readDimensions: vi.fn(async () => ({ width: 1, height: 1 })),
+    writeClipboard: vi.fn(),
+  }
+}
+
+function imageService(overrides: Partial<ImageLibraryService> = {}): ImageLibraryService {
+  return {
+    open: vi.fn(),
+    select: vi.fn(),
+    commit: vi.fn(),
+    preview: vi.fn(),
+    copyMarkdown: vi.fn(),
+    delete: vi.fn(),
+    dispose: vi.fn(async () => undefined),
+    ...overrides,
+  }
+}
+
 describe("publisher service wiring", () => {
+  it("creates exactly one workspace-bound image service and exposes it unchanged", async () => {
+    const workspace = await garden()
+    const adapter = imageAdapter()
+    const images = imageService()
+    const imageLibraryFactory = vi.fn(() => images)
+    const services = await createPublisherServices({
+      workspace,
+      trash: { trashItem: async () => undefined },
+      isTracked: async () => false,
+      preview: preview(),
+      imageLibraryAdapter: adapter,
+      imageLibraryFactory,
+    })
+
+    expect(imageLibraryFactory).toHaveBeenCalledExactlyOnceWith({ workspace, adapter })
+    expect(services.images).toBe(images)
+    await services.dispose()
+    expect(images.dispose).toHaveBeenCalledOnce()
+  })
+
+  it("invalidates and drains the image service before disposing workspace services", async () => {
+    const workspace = await garden()
+    const order: string[] = []
+    let releaseImages!: () => void
+    const imageDisposal = new Promise<void>((resolve) => {
+      releaseImages = resolve
+    })
+    const images = imageService({
+      dispose: vi.fn(async () => {
+        order.push("images")
+        await imageDisposal
+      }),
+    })
+    const catalog = domainCatalog({
+      dispose: vi.fn(async () => {
+        order.push("domains")
+      }),
+    })
+    const services = await createPublisherServices({
+      workspace,
+      trash: { trashItem: async () => undefined },
+      isTracked: async () => false,
+      preview: preview(),
+      imageLibraryAdapter: imageAdapter(),
+      imageLibraryFactory: () => images,
+      domainCatalogFactory: () => catalog,
+    })
+
+    const disposal = services.dispose()
+    await vi.waitFor(() => expect(images.dispose).toHaveBeenCalledOnce())
+    expect(order).toEqual(["images"])
+    expect(catalog.dispose).not.toHaveBeenCalled()
+    releaseImages()
+    await disposal
+    expect(order.slice(0, 2)).toEqual(["images", "domains"])
+  })
+
+  it("disposes the constructed image service when later construction fails", async () => {
+    const workspace = await garden()
+    const images = imageService()
+    const primary = new Error("publisher construction failed")
+    await expect(
+      createPublisherServices({
+        workspace,
+        trash: { trashItem: async () => undefined },
+        isTracked: async () => false,
+        preview: preview(),
+        imageLibraryAdapter: imageAdapter(),
+        imageLibraryFactory: () => images,
+        publisherFactory: () => {
+          throw primary
+        },
+      }),
+    ).rejects.toBe(primary)
+    expect(images.dispose).toHaveBeenCalledOnce()
+  })
+
   it("keeps imports closed across repeated preview cleanup failures after services become irreversible", async () => {
     const services = {
       assertSwitchSafe: vi.fn(async () => undefined),
