@@ -5,12 +5,25 @@ import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type { AppError } from "../../src/shared/contracts"
 
-const importFault = vi.hoisted(() => ({ path: undefined as string | undefined }))
+const importFault = vi.hoisted(() => ({ path: undefined as string | undefined, replacement: undefined as Uint8Array | undefined, replacementIdentity: undefined as bigint | undefined }))
+const cleanupFault = vi.hoisted(() => ({ path: undefined as string | undefined }))
 vi.mock("../../src/main/services/imageLibraryImportFs", async (load) => {
   const actual = await load<typeof import("../../src/main/services/imageLibraryImportFs")>()
+  const fs = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises")
   return { ...actual, async captureImportPathIdentity(path: string) {
-    if (path === importFault.path) { importFault.path = undefined; throw new Error("injected capture failure") }
+    if (path === importFault.path) {
+      importFault.path = undefined
+      if (importFault.replacement !== undefined) {
+        const replacement = importFault.replacement; importFault.replacement = undefined
+        await fs.rm(path); await fs.writeFile(path, replacement)
+        importFault.replacementIdentity = (await fs.lstat(path, { bigint: true })).ino
+      }
+      throw new Error("injected capture failure")
+    }
     return actual.captureImportPathIdentity(path)
+  }, async removeImportArtifact(path: string) {
+    if (path === cleanupFault.path) { cleanupFault.path = undefined; throw new Error("injected cleanup failure") }
+    return actual.removeImportArtifact(path)
   } }
 })
 import {
@@ -43,6 +56,9 @@ function adapter(paths: readonly string[] | undefined): ImageLibraryAdapter {
 
 afterEach(async () => {
   importFault.path = undefined
+  importFault.replacement = undefined
+  importFault.replacementIdentity = undefined
+  cleanupFault.path = undefined
   await Promise.all(cleanups.splice(0).map((path) => rm(path, { recursive: true, force: true })))
 })
 
@@ -95,6 +111,86 @@ describe("image import transactions", () => {
     await expect(
       service.commit({ path: "content/life/daily.md", selectionId: selection.selectionId, overwrite: [] }),
     ).rejects.toMatchObject({ code: "IMAGE_LIBRARY_CHANGED" } satisfies Partial<AppError>)
+  })
+
+  it("keeps committed targets when the final import-root sync fails", async () => {
+    const fixture = await setup(); const source = join(fixture.root, "photo.png"); await writeFile(source, PNG)
+    const importRoot = join(fixture.root, ".garden-publisher", "image-import")
+    const configured = adapter([source]); configured.syncDirectory = async (path) => {
+      if (path === importRoot) throw new Error("injected final sync failure")
+    }
+    const service = createImageLibraryService({ workspace: fixture.root, adapter: configured })
+    const selected = await service.select({ path: "content/life/daily.md" }); if (selected.cancelled) throw new Error("cancelled")
+    await expect(service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, overwrite: [] })).rejects.toMatchObject({
+      code: "IMAGE_LIBRARY_FAILED",
+      details: { cleanupWarnings: expect.any(Array) },
+    })
+    expect(await readFile(join(fixture.library, "photo.png"))).toEqual(Buffer.from(PNG))
+    await expect(readFile(join(fixture.library, ".gitkeep"))).rejects.toMatchObject({ code: "ENOENT" })
+  })
+
+  it("does not roll back after cleanup removed an overwrite backup and then failed", async () => {
+    const fixture = await setup(); const source = join(fixture.root, "photo.png"); const fresh = Uint8Array.from([...PNG, 9]); await writeFile(source, fresh)
+    await mkdir(fixture.library, { recursive: true }); await writeFile(join(fixture.library, "photo.png"), PNG)
+    const service = createImageLibraryService({ workspace: fixture.root, adapter: adapter([source]) })
+    const selected = await service.select({ path: "content/life/daily.md" }); if (selected.cancelled) throw new Error("cancelled")
+    const stageRoot = join(fixture.root, ".garden-publisher", "image-import", selected.selectionId)
+    cleanupFault.path = join(stageRoot, "manifest.json")
+    await expect(service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, overwrite: ["photo.png"] })).rejects.toMatchObject({
+      code: "IMAGE_LIBRARY_FAILED",
+      details: { cleanupWarnings: expect.any(Array) },
+    })
+    expect(await readFile(join(fixture.library, "photo.png"))).toEqual(Buffer.from(fresh))
+    await expect(readFile(join(stageRoot, "backup", "photo.png"))).rejects.toMatchObject({ code: "ENOENT" })
+    await expect(readFile(join(stageRoot, "manifest.json"))).resolves.toBeTruthy()
+  })
+
+  it("removes an owned publication when its first target snapshot fails", async () => {
+    const fixture = await setup(); const source = join(fixture.root, "photo.png"); await writeFile(source, PNG)
+    const service = createImageLibraryService({ workspace: fixture.root, adapter: adapter([source]) })
+    const selected = await service.select({ path: "content/life/daily.md" }); if (selected.cancelled) throw new Error("cancelled")
+    importFault.path = join(fixture.library, "photo.png")
+    await expect(service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, overwrite: [] })).rejects.toMatchObject({ code: "IMAGE_LIBRARY_INVALID" })
+    await expect(readFile(join(fixture.library, "photo.png"))).rejects.toMatchObject({ code: "ENOENT" })
+    expect(await readFile(join(fixture.library, ".gitkeep"))).toEqual(Buffer.alloc(0))
+    expect(await readdir(join(fixture.root, ".garden-publisher", "image-import"))).toEqual([])
+  })
+
+  it("preserves an external same-content replacement when the first target snapshot fails", async () => {
+    const fixture = await setup(); const source = join(fixture.root, "photo.png"); await writeFile(source, PNG)
+    const service = createImageLibraryService({ workspace: fixture.root, adapter: adapter([source]) })
+    const selected = await service.select({ path: "content/life/daily.md" }); if (selected.cancelled) throw new Error("cancelled")
+    const target = join(fixture.library, "photo.png")
+    importFault.path = target; importFault.replacement = PNG
+    const caught = await service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, overwrite: [] }).catch((error) => error as AppError)
+    expect(caught).toMatchObject({ code: "IMAGE_LIBRARY_FAILED", details: { cleanupWarnings: expect.any(Array) } })
+    expect((await lstat(target, { bigint: true })).ino).toBe(importFault.replacementIdentity)
+    expect(await readFile(target)).toEqual(Buffer.from(PNG))
+  })
+
+  it("rejects an external open while dispose waits for commit refresh", async () => {
+    const fixture = await setup(); const source = join(fixture.root, "photo.png"); await writeFile(source, PNG)
+    let committed = false; let refreshStarted!: () => void; let releaseRefresh!: () => void
+    const started = new Promise<void>((resolve) => { refreshStarted = resolve })
+    const gate = new Promise<void>((resolve) => { releaseRefresh = resolve })
+    const configured = adapter([source]); configured.afterPhase = async (phase) => {
+      if (phase === "import-marker-removed") committed = true
+      if (phase === "note-validated" && committed) { refreshStarted(); await gate }
+    }
+    const service = createImageLibraryService({ workspace: fixture.root, adapter: configured })
+    const selected = await service.select({ path: "content/life/daily.md" }); if (selected.cancelled) throw new Error("cancelled")
+    const committing = service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, overwrite: [] })
+    await started
+    const disposing = service.dispose()
+    const externalOpen = service.open({ path: "content/life/daily.md" })
+    let externalError: AppError | undefined
+    void externalOpen.catch((error) => { externalError = error as AppError })
+    await Promise.resolve()
+    const rejectedBeforeRelease = externalError
+    releaseRefresh()
+    const outcomes = await Promise.allSettled([externalOpen, committing, disposing])
+    expect(rejectedBeforeRelease).toMatchObject({ code: "IMAGE_LIBRARY_FAILED" })
+    expect(outcomes[1]).toMatchObject({ status: "fulfilled", value: { images: [{ name: "photo.png" }] } })
   })
 
   it("dispose waits for a selection already in flight, then clears its token", async () => {

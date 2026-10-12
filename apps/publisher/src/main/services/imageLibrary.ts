@@ -827,7 +827,6 @@ export function createImageLibraryService(options: {
   adapter: ImageLibraryAdapter
 }): ImageLibraryService {
   let disposed = false
-  let internalOpen = false
   const active = new Set<Promise<unknown>>()
   const imports = createImageImportManager(options)
 
@@ -840,9 +839,7 @@ export function createImageLibraryService(options: {
   // repeat it so a residue appearing later also fails closed.
   track(imports.inspect())
 
-  const service: ImageLibraryService = {
-    open(request: NotePathRequest): Promise<ImageLibraryView> {
-      if (disposed && !internalOpen) return Promise.reject(failed("图片库服务已关闭。"))
+  function openCore(request: NotePathRequest): Promise<ImageLibraryView> {
       const operation = (async (): Promise<ImageLibraryView> => {
         await imports.inspect()
         const parsed = parseNotePath(request.path)
@@ -920,15 +917,18 @@ export function createImageLibraryService(options: {
         await releaseLocks(leases, primaryError)
         return result!
       })()
-      return track(operation)
+      return operation
+  }
+
+  const service: ImageLibraryService = {
+    open(request: NotePathRequest): Promise<ImageLibraryView> {
+      if (disposed) return Promise.reject(failed("图片库服务已关闭。"))
+      return track(openCore(request))
     },
 
     select(request: NotePathRequest): Promise<ImageLibrarySelection> {
       if (disposed) return Promise.reject(failed("图片库服务已关闭。"))
-      return track(imports.select(request, () => {
-        internalOpen = true
-        try { return service.open(request) } finally { internalOpen = false }
-      }))
+      return track(imports.select(request, () => openCore(request)))
     },
 
     commit(request: ImageLibraryCommitRequest): Promise<ImageLibraryView> {
@@ -948,8 +948,7 @@ export function createImageLibraryService(options: {
             : caught
         }
         await releaseLocks(leases, primary)
-        internalOpen = true
-        try { return await service.open(request) } finally { internalOpen = false }
+        return await openCore(request)
       })())
     },
 

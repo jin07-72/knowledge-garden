@@ -16,7 +16,7 @@ import {
   type NotePathRequest,
 } from "../../shared/contracts"
 import { detectImageFormat, markdownForImage, normalizeImageName } from "./imageFormats"
-import { captureImportPathIdentity } from "./imageLibraryImportFs"
+import { captureImportPathIdentity, removeImportArtifact } from "./imageLibraryImportFs"
 import { acquireInternalNotePathLease, type InternalNotePathLease } from "./noteFiles"
 import type { ImageLibraryAdapter, RenderedImage } from "./imageLibrary"
 
@@ -80,11 +80,11 @@ function validateThumbnail(rendered: RenderedImage): void {
   try { detectImageFormat(bytes, `thumbnail.${match[1] === "jpeg" ? "jpg" : match[1]}`) } catch { throw invalid("缩略图格式与内容不匹配。") }
 }
 
-async function sourceSnapshot(path: string): Promise<{ identity: Identity; bytes: Uint8Array; hash: string }> {
+async function sourceSnapshot(path: string, initialStat?: (path: string) => Promise<BigIntStats>): Promise<{ identity: Identity; bytes: Uint8Array; hash: string }> {
   let handle: Awaited<ReturnType<typeof open>> | undefined
   try {
     if (!isAbsolute(path) || resolve(path) !== path) throw invalid("图片源路径无效。")
-    const before = await lstat(path, { bigint: true })
+    const before = initialStat === undefined ? await lstat(path, { bigint: true }) : await initialStat(path)
     if (before.isSymbolicLink() || !before.isFile()) throw invalid("图片源必须是普通文件。")
     if (before.size > BigInt(MAX_FILE_BYTES)) throw tooLarge()
     const canonical = await realpath(path)
@@ -213,6 +213,32 @@ interface QuarantinedFile {
   proof?: FileProof
 }
 
+interface PublishedFile {
+  readonly path: string
+  readonly staged: string
+  readonly expected: FileProof
+  proof?: FileProof
+}
+
+async function removeOwnedPublication(item: PublishedFile, ledger: StageLedger | undefined): Promise<boolean> {
+  try {
+    const target = await sourceSnapshot(item.path)
+    if (item.proof !== undefined) {
+      if (!sameIdentity(target.identity, item.proof.identity) || target.hash !== item.proof.hash) return false
+    } else {
+      const staged = await sourceSnapshot(item.staged)
+      if (!sameIdentity(target.identity, staged.identity) || target.hash !== item.expected.hash || staged.hash !== item.expected.hash || !sameRenamedFile(staged.identity, item.expected.identity)) return false
+    }
+    await unlink(item.path)
+    if (item.proof === undefined && ledger?.files.has(item.staged)) {
+      const restoredStage = await sourceSnapshot(item.staged)
+      if (!sameRenamedFile(restoredStage.identity, item.expected.identity) || restoredStage.hash !== item.expected.hash) return false
+      ledger.files.set(item.staged, { identity: restoredStage.identity, hash: restoredStage.hash })
+    }
+    return true
+  } catch { return false }
+}
+
 async function restoreQuarantinedFile(item: QuarantinedFile, ledger: StageLedger | undefined): Promise<boolean> {
   try {
     const backup = await sourceSnapshot(item.backup)
@@ -265,7 +291,7 @@ async function cleanupOwnedStage(ledger: StageLedger): Promise<boolean> {
       const current = await sourceSnapshot(path)
       if (!sameIdentity(current.identity, proof.identity) || current.hash !== proof.hash) return false
     }
-    for (const path of [...ledger.files.keys()].reverse()) await unlink(path)
+    for (const path of [...ledger.files.keys()].reverse()) await removeImportArtifact(path)
     for (const directory of [...ledger.directories].reverse()) await rmdir(directory.path)
     await rmdir(ledger.root.path)
     return true
@@ -481,12 +507,13 @@ export function createImageImportManager(options: { workspace: string; adapter: 
 
       const stageRoot = join(options.workspace, ".garden-publisher", "image-import", session.id)
       const staged = join(stageRoot, "new"), backups = join(stageRoot, "backup")
-      const published: Array<{ path: string; proof?: FileProof }> = []; const movedBackups: QuarantinedFile[] = []
+      const published: PublishedFile[] = []; const movedBackups: QuarantinedFile[] = []
       let markerRemoved = false
       let markerMove: QuarantinedFile | undefined
       let stageProof: DirectoryProof | undefined
       let manifestWriter: ManifestWriter | undefined
       let stageLedger: StageLedger | undefined
+      let committed = false
       const manifestPath = join(stageRoot, "manifest.json")
       const markerPath = join(targetRoot, ".gitkeep")
       const markerEntry = session.library.find(({ name }) => name === ".gitkeep")
@@ -573,9 +600,9 @@ export function createImageImportManager(options: { workspace: string; adapter: 
             if ((failure as NodeJS.ErrnoException).code === "EEXIST") throw changed("发布目标已被外部创建。")
             throw failed("无法原子发布图片。")
           }
-          const publication = { path: target, proof: undefined as FileProof | undefined }
+          const publication: PublishedFile = { path: target, staged: stagedPath, expected: stagedProof }
           published.push(publication)
-          const linkedSnapshot = await sourceSnapshot(target)
+          const linkedSnapshot = await sourceSnapshot(target, captureImportPathIdentity)
           if (linkedSnapshot.hash !== source.hash) throw changed()
           publication.proof = { identity: linkedSnapshot.identity, hash: linkedSnapshot.hash }
           stageLedger.files.set(stagedPath, { identity: linkedSnapshot.identity, hash: linkedSnapshot.hash })
@@ -631,6 +658,7 @@ export function createImageImportManager(options: { workspace: string; adapter: 
         const expectedFinal = expectedBeforeMarker.filter(({ name }) => name !== ".gitkeep")
         if (!sameLibraryManifest(await readLibraryManifest(targetRoot, session.libraryDirectory), expectedFinal)) throw changed("图片库最终状态与预期不一致。")
         await options.adapter.syncDirectory?.(targetRoot)
+        committed = true
         await manifestWriter.handle.close(); manifestWriter = undefined
         if (!(await cleanupOwnedStage(stageLedger))) throw failed("无法确认图片导入暂存目录清理。", true)
         await options.adapter.syncDirectory?.(importRoot)
@@ -640,13 +668,9 @@ export function createImageImportManager(options: { workspace: string; adapter: 
           try { await manifestWriter.handle.close() } catch { uncertain = true }
           manifestWriter = undefined
         }
+        if (committed) throw failed("图片已导入，但导入记录清理未能确认。", true)
         for (const item of [...published].reverse()) {
-          if (item.proof === undefined) { uncertain = true; continue }
-          try {
-            const snapshot = await sourceSnapshot(item.path)
-            if (sameIdentity(snapshot.identity, item.proof.identity) && snapshot.hash === item.proof.hash) await unlink(item.path)
-            else uncertain = true
-          } catch (failure) { if ((failure as NodeJS.ErrnoException).code !== "ENOENT") uncertain = true }
+          if (!(await removeOwnedPublication(item, stageLedger))) uncertain = true
         }
         for (const item of [...movedBackups].reverse()) {
           if (!(await restoreQuarantinedFile(item, stageLedger))) uncertain = true
