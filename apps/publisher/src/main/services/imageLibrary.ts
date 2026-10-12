@@ -11,6 +11,8 @@ import {
   type AppError,
   type ImageLibraryItem,
   type ImageLibraryCommitRequest,
+  type ImageLibraryItemRequest,
+  type ImageLibraryPreview,
   type ImageLibrarySelection,
   type ImageLibraryView,
   type NotePathRequest,
@@ -18,6 +20,10 @@ import {
 import { MAX_MARKDOWN_UTF8_BYTES } from "../../shared/ipcSchemas"
 import { detectImageFormat, markdownForImage } from "./imageFormats"
 import { createImageImportManager, isImageLibraryImportError } from "./imageLibraryImport"
+import {
+  createImageLibraryOperations,
+  isImageLibraryOperationError,
+} from "./imageLibraryOperations"
 import {
   captureImageLibraryPathIdentity,
   completeImageLibraryOwnershipCapture,
@@ -47,6 +53,10 @@ export type ImageLibraryPhase =
   | "import-published"
   | "import-before-marker-backup"
   | "import-marker-removed"
+  | "delete-before-quarantine"
+  | "delete-quarantine-linked"
+  | "delete-quarantined"
+  | "delete-target-removed"
 
 export interface ImageLibraryAdapter {
   chooseImages(): Promise<readonly string[] | undefined>
@@ -62,6 +72,9 @@ export interface ImageLibraryService {
   open(request: NotePathRequest): Promise<ImageLibraryView>
   select(request: NotePathRequest): Promise<ImageLibrarySelection>
   commit(request: ImageLibraryCommitRequest): Promise<ImageLibraryView>
+  preview(request: ImageLibraryItemRequest): Promise<ImageLibraryPreview>
+  copyMarkdown(request: ImageLibraryItemRequest): Promise<void>
+  delete(request: Required<ImageLibraryItemRequest>): Promise<ImageLibraryView>
   dispose(): Promise<void>
 }
 
@@ -829,11 +842,24 @@ export function createImageLibraryService(options: {
   let disposed = false
   const active = new Set<Promise<unknown>>()
   const imports = createImageImportManager(options)
+  const operations = createImageLibraryOperations(options)
 
   function track<T>(operation: Promise<T>): Promise<T> {
     active.add(operation)
     void operation.then(() => active.delete(operation), () => active.delete(operation))
     return operation
+  }
+
+  async function runImageOperation<T>(operation: () => Promise<T>): Promise<T> {
+    await imports.inspect()
+    try {
+      return await operation()
+    } catch (error) {
+      if (isImageLibraryOperationError(error) || isImageLibraryImportError(error)) {
+        throw imageError(error.code, error.message, error.details)
+      }
+      throw failed()
+    }
   }
   // Start a read-only, bounded residue audit immediately; public operations
   // repeat it so a residue appearing later also fails closed.
@@ -949,6 +975,24 @@ export function createImageLibraryService(options: {
         }
         await releaseLocks(leases, primary)
         return await openCore(request)
+      })())
+    },
+
+    preview(request: ImageLibraryItemRequest): Promise<ImageLibraryPreview> {
+      if (disposed) return Promise.reject(failed("图片库服务已关闭。"))
+      return track(runImageOperation(() => operations.preview(request)))
+    },
+
+    copyMarkdown(request: ImageLibraryItemRequest): Promise<void> {
+      if (disposed) return Promise.reject(failed("图片库服务已关闭。"))
+      return track(runImageOperation(() => operations.copyMarkdown(request)))
+    },
+
+    delete(request: Required<ImageLibraryItemRequest>): Promise<ImageLibraryView> {
+      if (disposed) return Promise.reject(failed("图片库服务已关闭。"))
+      return track((async () => {
+        await runImageOperation(() => operations.delete(request))
+        return openCore(request)
       })())
     },
 

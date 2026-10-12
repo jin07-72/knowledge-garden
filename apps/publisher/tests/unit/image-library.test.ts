@@ -1,4 +1,5 @@
 import { constants } from "node:fs"
+import { createHash, randomUUID } from "node:crypto"
 import {
   lstat,
   mkdir,
@@ -110,6 +111,10 @@ const AVIF = Uint8Array.from([
   0, 0, 0, 16, 0x66, 0x74, 0x79, 0x70, 0x61, 0x76, 0x69, 0x66, 0, 0, 0, 0,
 ])
 const THUMBNAIL = `data:image/png;base64,${Buffer.from(PNG).toString("base64")}`
+
+function contentHash(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex")
+}
 
 interface Fixture {
   readonly root: string
@@ -807,6 +812,347 @@ describe("note-scoped image library", () => {
       mtimeNs: before.mtimeNs,
       ctimeNs: before.ctimeNs,
     })
+  })
+
+  it("previews one verified image with the byte MIME, dimensions, size, and hash", async () => {
+    const setup = await fixture()
+    await mkdir(setup.libraryPath, { recursive: true })
+    await writeFile(join(setup.libraryPath, "封 面.JPG"), JPEG)
+    const readDimensions = vi.fn(async (_bytes: Uint8Array) => ({ width: 1920, height: 1080 }))
+    const service = createImageLibraryService({
+      workspace: setup.root,
+      adapter: adapter({ readDimensions }),
+    })
+
+    await expect(
+      service.preview({
+        path: "content/life/daily.md",
+        name: "封 面.JPG",
+        expectedContentHash: contentHash(JPEG),
+      }),
+    ).resolves.toEqual({
+      name: "封 面.JPG",
+      sizeBytes: JPEG.length,
+      width: 1920,
+      height: 1080,
+      contentHash: contentHash(JPEG),
+      markdown: "![封 面](<../_assets/daily/封 面.JPG>)",
+      dataUrl: `data:image/jpeg;base64,${Buffer.from(JPEG).toString("base64")}`,
+    })
+    expect(readDimensions).toHaveBeenCalledTimes(1)
+    expect(Buffer.from(readDimensions.mock.calls[0]![0])).toEqual(Buffer.from(JPEG))
+  })
+
+  it("rejects preview extension/signature mismatches and stale expected hashes", async () => {
+    const setup = await fixture()
+    await mkdir(setup.libraryPath, { recursive: true })
+    await writeFile(join(setup.libraryPath, "wrong.jpg"), PNG)
+    await writeFile(join(setup.libraryPath, "right.png"), PNG)
+    const service = createImageLibraryService({ workspace: setup.root, adapter: adapter() })
+
+    await expectCode(
+      service.preview({ path: "content/life/daily.md", name: "wrong.jpg" }),
+      "IMAGE_LIBRARY_INVALID",
+    )
+    await expectCode(
+      service.preview({
+        path: "content/life/daily.md",
+        name: "right.png",
+        expectedContentHash: "0".repeat(64),
+      }),
+      "IMAGE_LIBRARY_CHANGED",
+    )
+  })
+
+  it("rejects preview as changed when its note or attachment lease is lost", async () => {
+    const setup = await fixture()
+    await mkdir(setup.libraryPath, { recursive: true })
+    await writeFile(join(setup.libraryPath, "right.png"), PNG)
+    leaseProbe.assertError = new Error("lease lost")
+    const readDimensions = vi.fn(async () => ({ width: 1, height: 1 }))
+    const service = createImageLibraryService({
+      workspace: setup.root,
+      adapter: adapter({ readDimensions }),
+    })
+
+    await expectCode(
+      service.preview({ path: "content/life/daily.md", name: "right.png" }),
+      "IMAGE_LIBRARY_CHANGED",
+    )
+    expect(readDimensions).not.toHaveBeenCalled()
+  })
+
+  it("preserves a preview validation error and reports lease cleanup failure", async () => {
+    const setup = await fixture()
+    await mkdir(setup.libraryPath, { recursive: true })
+    await writeFile(join(setup.libraryPath, "wrong.jpg"), PNG)
+    leaseProbe.failRelease = true
+    const service = createImageLibraryService({ workspace: setup.root, adapter: adapter() })
+
+    const error = await service
+      .preview({ path: "content/life/daily.md", name: "wrong.jpg" })
+      .catch((caught) => caught)
+    expect(error).toMatchObject({
+      code: "IMAGE_LIBRARY_INVALID",
+      details: { cleanupWarnings: expect.any(Array) },
+    })
+    expect(JSON.stringify(error)).not.toContain(setup.root)
+  })
+
+  it("fails closed before previewing while an unverified import residue exists", async () => {
+    const setup = await fixture()
+    await mkdir(setup.libraryPath, { recursive: true })
+    await writeFile(join(setup.libraryPath, "photo.png"), PNG)
+    await mkdir(join(setup.root, ".garden-publisher", "image-import", randomUUID()), {
+      recursive: true,
+    })
+    const readDimensions = vi.fn(async () => ({ width: 1, height: 1 }))
+    const service = createImageLibraryService({
+      workspace: setup.root,
+      adapter: adapter({ readDimensions }),
+    })
+
+    await expectCode(
+      service.preview({ path: "content/life/daily.md", name: "photo.png" }),
+      "IMAGE_LIBRARY_FAILED",
+    )
+    expect(readDimensions).not.toHaveBeenCalled()
+  })
+
+  it("copies the exact safe Markdown link without changing the note", async () => {
+    const setup = await fixture()
+    const writeClipboard = vi.fn()
+    const service = createImageLibraryService({
+      workspace: setup.root,
+      adapter: adapter({ writeClipboard }),
+    })
+    const before = await readFile(setup.notePath)
+
+    await service.copyMarkdown({
+      path: "content/life/daily.md",
+      name: "图 表#100%.png",
+    })
+
+    expect(writeClipboard).toHaveBeenCalledOnce()
+    expect(writeClipboard).toHaveBeenCalledWith(
+      "![图 表#100%](<../_assets/daily/图 表%23100%25.png>)",
+    )
+    expect(await readFile(setup.notePath)).toEqual(before)
+  })
+
+  it("requires the current content hash before deleting and preserves a stale target", async () => {
+    const setup = await fixture()
+    await mkdir(setup.libraryPath, { recursive: true })
+    const target = join(setup.libraryPath, "photo.png")
+    await writeFile(target, PNG)
+    const service = createImageLibraryService({ workspace: setup.root, adapter: adapter() })
+
+    await expectCode(
+      service.delete({
+        path: "content/life/daily.md",
+        name: "photo.png",
+        expectedContentHash: "0".repeat(64),
+      }),
+      "IMAGE_LIBRARY_CHANGED",
+    )
+    expect(await readFile(target)).toEqual(Buffer.from(PNG))
+  })
+
+  it("permanently deletes the last verified image and restores the empty marker", async () => {
+    const setup = await fixture()
+    await mkdir(setup.libraryPath, { recursive: true })
+    const target = join(setup.libraryPath, "photo.png")
+    await writeFile(target, PNG)
+    const synced: string[] = []
+    const service = createImageLibraryService({
+      workspace: setup.root,
+      adapter: adapter({ syncDirectory: async (path) => void synced.push(path) }),
+    })
+
+    await expect(
+      service.delete({
+        path: "content/life/daily.md",
+        name: "photo.png",
+        expectedContentHash: contentHash(PNG),
+      }),
+    ).resolves.toEqual({ path: "content/life/daily.md", images: [] })
+
+    expect(await readdir(setup.libraryPath)).toEqual([".gitkeep"])
+    expect(await readFile(join(setup.libraryPath, ".gitkeep"))).toHaveLength(0)
+    expect(synced).toContain(setup.libraryPath)
+  })
+
+  it("preserves the image when an existing empty-library marker is invalid", async () => {
+    const setup = await fixture()
+    await mkdir(setup.libraryPath, { recursive: true })
+    const target = join(setup.libraryPath, "photo.png")
+    await writeFile(target, PNG)
+    await writeFile(join(setup.libraryPath, ".gitkeep"), "external")
+    const service = createImageLibraryService({ workspace: setup.root, adapter: adapter() })
+
+    await expectCode(
+      service.delete({
+        path: "content/life/daily.md",
+        name: "photo.png",
+        expectedContentHash: contentHash(PNG),
+      }),
+      "IMAGE_LIBRARY_INVALID",
+    )
+    expect(await readFile(target)).toEqual(Buffer.from(PNG))
+    expect(await readFile(join(setup.libraryPath, ".gitkeep"), "utf8")).toBe("external")
+  })
+
+  it("preserves an externally replaced image at the delete boundary", async () => {
+    const setup = await fixture()
+    await mkdir(setup.libraryPath, { recursive: true })
+    const target = join(setup.libraryPath, "photo.png")
+    await writeFile(target, PNG)
+    const replacement = Uint8Array.from([...PNG, 2])
+    const service = createImageLibraryService({
+      workspace: setup.root,
+      adapter: adapter({
+        afterPhase: async (phase) => {
+          if ((phase as string) !== "delete-before-quarantine") return
+          await rm(target)
+          await writeFile(target, replacement)
+        },
+      }),
+    })
+
+    await expectCode(
+      service.delete({
+        path: "content/life/daily.md",
+        name: "photo.png",
+        expectedContentHash: contentHash(PNG),
+      }),
+      "IMAGE_LIBRARY_CHANGED",
+    )
+    expect(await readFile(target)).toEqual(Buffer.from(replacement))
+  })
+
+  it("rolls back an owned delete quarantine when a later step fails", async () => {
+    const setup = await fixture()
+    await mkdir(setup.libraryPath, { recursive: true })
+    const target = join(setup.libraryPath, "photo.png")
+    await writeFile(target, PNG)
+    const service = createImageLibraryService({
+      workspace: setup.root,
+      adapter: adapter({
+        afterPhase: async (phase) => {
+          if ((phase as string) === "delete-quarantined") throw new Error("injected failure")
+        },
+      }),
+    })
+
+    await expectCode(
+      service.delete({
+        path: "content/life/daily.md",
+        name: "photo.png",
+        expectedContentHash: contentHash(PNG),
+      }),
+      "IMAGE_LIBRARY_FAILED",
+    )
+    expect(await readFile(target)).toEqual(Buffer.from(PNG))
+    expect((await readdir(setup.libraryPath)).filter((name) => name !== "photo.png")).toEqual([])
+  })
+
+  it("registers and removes the owned quarantine before later awaited validation", async () => {
+    const setup = await fixture()
+    await mkdir(setup.libraryPath, { recursive: true })
+    const target = join(setup.libraryPath, "photo.png")
+    await writeFile(target, PNG)
+    const service = createImageLibraryService({
+      workspace: setup.root,
+      adapter: adapter({
+        afterPhase: async (phase) => {
+          if ((phase as string) === "delete-quarantine-linked") throw new Error("stop after link")
+        },
+      }),
+    })
+
+    await expectCode(
+      service.delete({
+        path: "content/life/daily.md",
+        name: "photo.png",
+        expectedContentHash: contentHash(PNG),
+      }),
+      "IMAGE_LIBRARY_FAILED",
+    )
+    expect(await readFile(target)).toEqual(Buffer.from(PNG))
+    expect(await readdir(setup.libraryPath)).toEqual(["photo.png"])
+  })
+
+  it("restores the last image when the replacement marker cannot be made durable", async () => {
+    const setup = await fixture()
+    await mkdir(setup.libraryPath, { recursive: true })
+    const target = join(setup.libraryPath, "photo.png")
+    await writeFile(target, PNG)
+    ownershipFault.markerSync = true
+    const service = createImageLibraryService({ workspace: setup.root, adapter: adapter() })
+
+    await expectCode(
+      service.delete({
+        path: "content/life/daily.md",
+        name: "photo.png",
+        expectedContentHash: contentHash(PNG),
+      }),
+      "IMAGE_LIBRARY_FAILED",
+    )
+    expect(await readFile(target)).toEqual(Buffer.from(PNG))
+    expect(await readdir(setup.libraryPath)).toEqual(["photo.png"])
+  })
+
+  it("dispose waits for an admitted preview and rejects every new image operation", async () => {
+    const setup = await fixture()
+    await mkdir(setup.libraryPath, { recursive: true })
+    await writeFile(join(setup.libraryPath, "photo.png"), PNG)
+    let releaseDimensions!: () => void
+    const dimensionsGate = new Promise<void>((resolve) => {
+      releaseDimensions = resolve
+    })
+    let dimensionsStarted!: () => void
+    const started = new Promise<void>((resolve) => {
+      dimensionsStarted = resolve
+    })
+    const service = createImageLibraryService({
+      workspace: setup.root,
+      adapter: adapter({
+        readDimensions: async () => {
+          dimensionsStarted()
+          await dimensionsGate
+          return { width: 10, height: 20 }
+        },
+      }),
+    })
+
+    const previewing = service.preview({ path: "content/life/daily.md", name: "photo.png" })
+    await started
+    let disposed = false
+    const disposing = service.dispose().then(() => {
+      disposed = true
+    })
+    await Promise.resolve()
+    expect(disposed).toBe(false)
+    await expectCode(
+      service.preview({ path: "content/life/daily.md", name: "photo.png" }),
+      "IMAGE_LIBRARY_FAILED",
+    )
+    await expectCode(
+      service.copyMarkdown({ path: "content/life/daily.md", name: "photo.png" }),
+      "IMAGE_LIBRARY_FAILED",
+    )
+    await expectCode(
+      service.delete({
+        path: "content/life/daily.md",
+        name: "photo.png",
+        expectedContentHash: contentHash(PNG),
+      }),
+      "IMAGE_LIBRARY_FAILED",
+    )
+    releaseDimensions()
+    await previewing
+    await disposing
+    expect(disposed).toBe(true)
   })
 
   it("dispose waits for active opens and prevents all later work", async () => {
