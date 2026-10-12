@@ -123,6 +123,111 @@ function webpLosslessDimensions(width: number, height: number, payloadBytes: num
   return bytes
 }
 
+const uint24LittleEndian = (value: number) =>
+  bytes(value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff)
+
+function webpChunk(type: string, payload: Uint8Array): Uint8Array {
+  return append(ascii(type), uint32LittleEndian(payload.length), payload, payload.length & 1 ? bytes(0) : bytes())
+}
+
+function webpContainer(...chunks: readonly Uint8Array[]): Uint8Array {
+  const body = append(ascii("WEBP"), ...chunks)
+  return append(ascii("RIFF"), uint32LittleEndian(body.length), body)
+}
+
+function vp8Payload(width: number, height: number): Uint8Array {
+  return bytes(0, 0, 0, 0x9d, 0x01, 0x2a, width & 0xff, width >>> 8, height & 0xff, height >>> 8)
+}
+
+function animatedWebp(
+  canvasWidth: number,
+  canvasHeight: number,
+  frameWidth: number,
+  frameHeight: number,
+  x = 0,
+  y = 0,
+): Uint8Array {
+  const frameHeader = append(
+    uint24LittleEndian(x / 2),
+    uint24LittleEndian(y / 2),
+    uint24LittleEndian(frameWidth - 1),
+    uint24LittleEndian(frameHeight - 1),
+    uint24LittleEndian(1),
+    bytes(0),
+  )
+  return webpContainer(
+    webpChunk(
+      "VP8X",
+      append(
+        bytes(0x02, 0, 0, 0),
+        uint24LittleEndian(canvasWidth - 1),
+        uint24LittleEndian(canvasHeight - 1),
+      ),
+    ),
+    webpChunk("ANIM", bytes(0, 0, 0, 0, 0, 0)),
+    webpChunk("ANMF", append(frameHeader, webpChunk("VP8 ", vp8Payload(frameWidth, frameHeight)))),
+  )
+}
+
+function pngChunk(type: string, payload: Uint8Array): Uint8Array {
+  return append(uint32Bytes(payload.length), ascii(type), payload, bytes(0, 0, 0, 0))
+}
+
+function apngDimensions(
+  canvasWidth: number,
+  canvasHeight: number,
+  frameWidth: number,
+  frameHeight: number,
+  x = 0,
+  y = 0,
+): Uint8Array {
+  const frameControl = append(
+    uint32Bytes(0),
+    uint32Bytes(frameWidth),
+    uint32Bytes(frameHeight),
+    uint32Bytes(x),
+    uint32Bytes(y),
+    bytes(0, 1, 0, 1, 0, 0),
+  )
+  return append(
+    bytes(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a),
+    pngChunk(
+      "IHDR",
+      append(uint32Bytes(canvasWidth), uint32Bytes(canvasHeight), bytes(8, 2, 0, 0, 0)),
+    ),
+    pngChunk("fcTL", frameControl),
+    pngChunk("IDAT", bytes()),
+    pngChunk("IDAT", bytes(0)),
+    pngChunk("IEND", bytes()),
+  )
+}
+
+function gifFrameDimensions(
+  canvasWidth: number,
+  canvasHeight: number,
+  frameWidth: number,
+  frameHeight: number,
+  x = 0,
+  y = 0,
+): Uint8Array {
+  return append(
+    gifHeader(canvasWidth, canvasHeight),
+    bytes(
+      0x2c,
+      x & 0xff,
+      x >>> 8,
+      y & 0xff,
+      y >>> 8,
+      frameWidth & 0xff,
+      frameWidth >>> 8,
+      frameHeight & 0xff,
+      frameHeight >>> 8,
+      0,
+    ),
+    bytes(2, 1, 0, 0, 0x3b),
+  )
+}
+
 function avifDimensions(width: number, height: number): Uint8Array {
   const ispe = append(
     uint32Bytes(20),
@@ -144,6 +249,20 @@ function avifWithLargeMediaData(width: number, height: number, payloadBytes: num
   bytes.set(uint32Bytes(8 + payloadBytes), header.length)
   bytes.set(ascii("mdat"), header.length + 4)
   return bytes
+}
+
+function isoBox(type: string, payload: Uint8Array): Uint8Array {
+  return append(uint32Bytes(8 + payload.length), ascii(type), payload)
+}
+
+function avisSequenceWithLargeLeadingMediaData(width: number, height: number, payloadBytes: number): Uint8Array {
+  const trackHeader = new Uint8Array(84)
+  trackHeader.set(uint32Bytes(width * 0x1_0000), 76)
+  trackHeader.set(uint32Bytes(height * 0x1_0000), 80)
+  const mdat = new Uint8Array(8 + payloadBytes)
+  mdat.set(uint32Bytes(mdat.length), 0)
+  mdat.set(ascii("mdat"), 4)
+  return append(avifHeader("avis"), mdat, isoBox("moov", isoBox("trak", isoBox("tkhd", trackHeader))))
 }
 
 function avifHeader(
@@ -351,6 +470,46 @@ describe("bounded image metadata", () => {
     expect(readBoundedImageMetadata(input)).toEqual({ width: 640, height: 480, mime })
   })
 
+  it("accepts a structurally complete animated WebP frame", () => {
+    expect(readBoundedImageMetadata(animatedWebp(640, 480, 640, 480))).toEqual({
+      width: 640,
+      height: 480,
+      mime: "image/webp",
+    })
+  })
+
+  it("rejects animation frames whose dimensions exceed their canvas or decode budget", () => {
+    expect(() => readBoundedImageMetadata(animatedWebp(1, 1, 2, 1))).toThrow(
+      expect.objectContaining({ code: "IMAGE_LIBRARY_INVALID" }),
+    )
+    expect(() => readBoundedImageMetadata(animatedWebp(1, 1, 16_385, 1))).toThrow(
+      expect.objectContaining({ code: "IMAGE_LIBRARY_TOO_LARGE" }),
+    )
+  })
+
+  it("rejects GIF frame rectangles beyond the logical screen or decode budget", () => {
+    expect(() => readBoundedImageMetadata(gifFrameDimensions(1, 1, 2, 1))).toThrow(
+      expect.objectContaining({ code: "IMAGE_LIBRARY_INVALID" }),
+    )
+    expect(() => readBoundedImageMetadata(gifFrameDimensions(1, 1, 65_535, 1))).toThrow(
+      expect.objectContaining({ code: "IMAGE_LIBRARY_TOO_LARGE" }),
+    )
+  })
+
+  it("validates APNG frame rectangles while allowing zero-length IDAT chunks", () => {
+    expect(readBoundedImageMetadata(apngDimensions(640, 480, 640, 480))).toEqual({
+      width: 640,
+      height: 480,
+      mime: "image/png",
+    })
+    expect(() => readBoundedImageMetadata(apngDimensions(1, 1, 2, 1))).toThrow(
+      expect.objectContaining({ code: "IMAGE_LIBRARY_INVALID" }),
+    )
+    expect(() => readBoundedImageMetadata(apngDimensions(1, 1, 16_385, 1))).toThrow(
+      expect.objectContaining({ code: "IMAGE_LIBRARY_TOO_LARGE" }),
+    )
+  })
+
   it("rejects a large-payload container whose declared boundary exceeds the input", () => {
     const malformedWebp = webpLossyDimensions(640, 480, 1_048_578).subarray(0, -1)
     const malformedAvif = avifWithLargeMediaData(640, 480, 1_048_578)
@@ -379,6 +538,14 @@ describe("bounded image metadata", () => {
     ["AVIF mdat", avifWithLargeMediaData(640, 480, 1_048_578), "image/avif"],
   ] as const)("reads %s metadata before a payload larger than the scan window", (_label, input, mime) => {
     expect(readBoundedImageMetadata(input)).toEqual({ width: 640, height: 480, mime })
+  })
+
+  it("finds avis track dimensions after a large leading mdat", () => {
+    expect(readBoundedImageMetadata(avisSequenceWithLargeLeadingMediaData(640, 480, 1_048_578))).toEqual({
+      width: 640,
+      height: 480,
+      mime: "image/avif",
+    })
   })
 
   it("rejects zero, over-dimension, truncated, and integer-overflow dimensions", () => {

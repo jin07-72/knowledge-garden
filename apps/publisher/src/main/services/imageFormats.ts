@@ -156,6 +156,17 @@ function boundedDimensions(
   return { width, height, mime }
 }
 
+function boundedFrame(
+  width: number,
+  height: number,
+  x: number,
+  y: number,
+  canvas: BoundedImageMetadata,
+): void {
+  const frame = boundedDimensions(width, height, canvas.mime)
+  if (x > canvas.width - frame.width || y > canvas.height - frame.height) throw invalidImage()
+}
+
 function pngMetadata(bytes: Uint8Array): BoundedImageMetadata {
   if (bytes.length < 33 || uint32(bytes, 8) !== 13 || !hasAscii(bytes, 12, "IHDR"))
     throw invalidImage()
@@ -170,9 +181,10 @@ function pngMetadata(bytes: Uint8Array): BoundedImageMetadata {
     const end = data + length
     if (!Number.isSafeInteger(end) || end + 4 > bytes.length) throw invalidImage()
     if (hasAscii(bytes, offset + 4, "IHDR") && (offset !== 8 || length !== 13)) throw invalidImage()
-    if (hasAscii(bytes, offset + 4, "IDAT")) {
-      if (length === 0) throw invalidImage()
-      hasImageData = true
+    if (hasAscii(bytes, offset + 4, "IDAT")) hasImageData ||= length > 0
+    if (hasAscii(bytes, offset + 4, "fcTL")) {
+      if (length !== 26) throw invalidImage()
+      boundedFrame(uint32(bytes, data + 4), uint32(bytes, data + 8), uint32(bytes, data + 12), uint32(bytes, data + 16), metadata)
     }
     if (hasAscii(bytes, offset + 4, "IEND")) {
       if (length !== 0 || !hasImageData || end + 4 !== bytes.length) throw invalidImage()
@@ -285,10 +297,12 @@ function gifMetadata(bytes: Uint8Array): BoundedImageMetadata {
       continue
     }
     if (block !== 0x2c || offset + 9 > bytes.length) throw invalidImage()
+    const imageLeft = uint16LittleEndian(bytes, offset)
+    const imageTop = uint16LittleEndian(bytes, offset + 2)
     const imageWidth = uint16LittleEndian(bytes, offset + 4)
     const imageHeight = uint16LittleEndian(bytes, offset + 6)
     const packed = bytes[offset + 8]
-    if (imageWidth === 0 || imageHeight === 0) throw invalidImage()
+    boundedFrame(imageWidth, imageHeight, imageLeft, imageTop, metadata)
     offset += 9
     if ((packed & 0x80) !== 0) offset += 3 * (1 << ((packed & 0x07) + 1))
     if (offset >= bytes.length || bytes[offset++] < 2) throw invalidImage()
@@ -298,54 +312,145 @@ function gifMetadata(bytes: Uint8Array): BoundedImageMetadata {
   throw invalidImage()
 }
 
+interface HeaderBudget {
+  inspected: number
+}
+
+function inspectHeader(budget: HeaderBudget, count: number): void {
+  if (!Number.isSafeInteger(count) || count < 0 || budget.inspected > IMAGE_METADATA_SCAN_BYTES - count)
+    throw invalidImage()
+  budget.inspected += count
+}
+
+function webpEnd(offset: number, size: number, end: number): number {
+  const value = offset + size
+  if (!Number.isSafeInteger(value) || value > end) throw invalidImage()
+  return value
+}
+
+function webpFramePayload(
+  bytes: Uint8Array,
+  typeOffset: number,
+  data: number,
+  size: number,
+  frame: BoundedImageMetadata,
+  budget: HeaderBudget,
+): void {
+  if (hasAscii(bytes, typeOffset, "VP8 ")) {
+    if (size < 10 || !startsWith(bytes.subarray(data + 3), [0x9d, 0x01, 0x2a])) throw invalidImage()
+    inspectHeader(budget, 10)
+    const width = uint16LittleEndian(bytes, data + 6) & 0x3fff
+    const height = uint16LittleEndian(bytes, data + 8) & 0x3fff
+    if (width !== frame.width || height !== frame.height) throw invalidImage()
+    return
+  }
+  if (hasAscii(bytes, typeOffset, "VP8L")) {
+    if (size < 5 || bytes[data] !== 0x2f) throw invalidImage()
+    inspectHeader(budget, 5)
+    const bits = uint32LittleEndian(bytes, data + 1)
+    const width = (bits & 0x3fff) + 1
+    const height = (Math.floor(bits / 0x4000) & 0x3fff) + 1
+    if (width !== frame.width || height !== frame.height) throw invalidImage()
+    return
+  }
+  throw invalidImage()
+}
+
+function webpAnimationFrame(
+  bytes: Uint8Array,
+  data: number,
+  end: number,
+  canvas: BoundedImageMetadata,
+  budget: HeaderBudget,
+): void {
+  if (end - data < 16) throw invalidImage()
+  inspectHeader(budget, 16)
+  const x = uint24LittleEndian(bytes, data) * 2
+  const y = uint24LittleEndian(bytes, data + 3) * 2
+  const width = uint24LittleEndian(bytes, data + 6) + 1
+  const height = uint24LittleEndian(bytes, data + 9) + 1
+  boundedFrame(width, height, x, y, canvas)
+  const frame = { width, height, mime: "image/webp" } as const
+  let offset = data + 16
+  let hasImage = false
+  while (offset < end) {
+    if (offset + 8 > end) throw invalidImage()
+    inspectHeader(budget, 8)
+    const size = uint32LittleEndian(bytes, offset + 4)
+    const payload = offset + 8
+    const payloadEnd = webpEnd(payload, size, end)
+    if (hasAscii(bytes, offset, "VP8 ") || hasAscii(bytes, offset, "VP8L")) {
+      if (hasImage) throw invalidImage()
+      webpFramePayload(bytes, offset, payload, size, frame, budget)
+      hasImage = true
+    } else if (hasAscii(bytes, offset, "ALPH") && size === 0) throw invalidImage()
+    offset = webpEnd(payloadEnd, size & 1, end)
+  }
+  if (!hasImage) throw invalidImage()
+}
+
 function webpMetadata(bytes: Uint8Array): BoundedImageMetadata {
   if (bytes.length < 20) throw invalidImage()
   const riffEnd = uint32LittleEndian(bytes, 4) + 8
   if (!Number.isSafeInteger(riffEnd) || riffEnd < 20 || riffEnd !== bytes.length) throw invalidImage()
-  const limit = Math.min(riffEnd, IMAGE_METADATA_SCAN_BYTES)
+  const budget: HeaderBudget = { inspected: 0 }
   let offset = 12
   let metadata: BoundedImageMetadata | undefined
-  let hasImageData = false
+  let animation = false
+  let animationHeader = false
+  let animationFrame = false
+  let hasStaticImage = false
   while (offset < riffEnd) {
     if (offset + 8 > riffEnd) throw invalidImage()
+    inspectHeader(budget, 8)
     const size = uint32LittleEndian(bytes, offset + 4)
     const data = offset + 8
-    const end = data + size
-    if (!Number.isSafeInteger(end) || end > riffEnd || end > bytes.length) throw invalidImage()
+    const end = webpEnd(data, size, riffEnd)
     if (hasAscii(bytes, offset, "VP8X")) {
-      if (size !== 10 || data + 10 > limit || metadata !== undefined) throw invalidImage()
+      if (size !== 10 || metadata !== undefined) throw invalidImage()
+      inspectHeader(budget, 10)
+      animation = (bytes[data] & 0x02) !== 0
       metadata = boundedDimensions(
         uint24LittleEndian(bytes, data + 4) + 1,
         uint24LittleEndian(bytes, data + 7) + 1,
         "image/webp",
       )
-    } else if (hasAscii(bytes, offset, "VP8 ")) {
-      if (
-        size < 10 ||
-        data + 10 > limit ||
-        !startsWith(bytes.subarray(data + 3), [0x9d, 0x01, 0x2a])
-      )
-        throw invalidImage()
-      metadata ??= boundedDimensions(
-        uint16LittleEndian(bytes, data + 6) & 0x3fff,
-        uint16LittleEndian(bytes, data + 8) & 0x3fff,
-        "image/webp",
-      )
-      hasImageData = true
-    } else if (hasAscii(bytes, offset, "VP8L")) {
-      if (size < 5 || data + 5 > limit || bytes[data] !== 0x2f) throw invalidImage()
-      const bits = uint32LittleEndian(bytes, data + 1)
-      metadata ??= boundedDimensions(
-        (bits & 0x3fff) + 1,
-        (Math.floor(bits / 0x4000) & 0x3fff) + 1,
-        "image/webp",
-      )
-      hasImageData = true
+    } else if (hasAscii(bytes, offset, "ANIM")) {
+      if (!animation || animationHeader || size !== 6) throw invalidImage()
+      inspectHeader(budget, 6)
+      animationHeader = true
+    } else if (hasAscii(bytes, offset, "ANMF")) {
+      if (!animation || metadata === undefined) throw invalidImage()
+      webpAnimationFrame(bytes, data, end, metadata, budget)
+      animationFrame = true
+    } else if (hasAscii(bytes, offset, "VP8 ") || hasAscii(bytes, offset, "VP8L")) {
+      if (animation || hasStaticImage) throw invalidImage()
+      if (hasAscii(bytes, offset, "VP8 ")) {
+        if (size < 10 || !startsWith(bytes.subarray(data + 3), [0x9d, 0x01, 0x2a])) throw invalidImage()
+        inspectHeader(budget, 10)
+        const width = uint16LittleEndian(bytes, data + 6) & 0x3fff
+        const height = uint16LittleEndian(bytes, data + 8) & 0x3fff
+        metadata ??= boundedDimensions(width, height, "image/webp")
+        if (metadata.width !== width || metadata.height !== height) throw invalidImage()
+      } else {
+        if (size < 5 || bytes[data] !== 0x2f) throw invalidImage()
+        inspectHeader(budget, 5)
+        const bits = uint32LittleEndian(bytes, data + 1)
+        const width = (bits & 0x3fff) + 1
+        const height = (Math.floor(bits / 0x4000) & 0x3fff) + 1
+        metadata ??= boundedDimensions(width, height, "image/webp")
+        if (metadata.width !== width || metadata.height !== height) throw invalidImage()
+      }
+      hasStaticImage = true
     }
-    offset = end + (size & 1)
-    if (offset > riffEnd) throw invalidImage()
+    offset = webpEnd(end, size & 1, riffEnd)
   }
-  if (offset !== riffEnd || metadata === undefined || !hasImageData) throw invalidImage()
+  if (
+    offset !== riffEnd ||
+    metadata === undefined ||
+    (animation ? !animationHeader || !animationFrame : !hasStaticImage)
+  )
+    throw invalidImage()
   return metadata
 }
 
@@ -355,23 +460,31 @@ interface IsoBox {
   readonly end: number
 }
 
-function isoBox(bytes: Uint8Array, offset: number, parentEnd: number): IsoBox {
+const ISO_MAX_BOXES = 8_192
+const ISO_MAX_NESTING = 16
+
+interface IsoWalkState extends HeaderBudget {
+  boxes: number
+  hasMediaData: boolean
+}
+
+function isoBox(bytes: Uint8Array, offset: number, parentEnd: number, state: IsoWalkState): IsoBox {
   if (offset + 8 > parentEnd || offset + 8 > bytes.length) throw invalidImage()
+  if (state.boxes >= ISO_MAX_BOXES) throw invalidImage()
+  state.boxes += 1
+  inspectHeader(state, 8)
   const shortSize = uint32(bytes, offset)
   let header = 8
   let size: number | undefined = shortSize
   if (shortSize === 1) {
     if (offset + 16 > parentEnd || offset + 16 > bytes.length) throw invalidImage()
     header = 16
+    inspectHeader(state, 8)
     size = uint64(bytes, offset + 8)
   } else if (shortSize === 0) size = parentEnd - offset
-  if (
-    size === undefined ||
-    !Number.isSafeInteger(size) ||
-    size < header ||
-    offset + size > parentEnd ||
-    offset + size > bytes.length
-  )
+  if (size === undefined || !Number.isSafeInteger(size) || size < header) throw invalidImage()
+  const boxEnd = offset + size
+  if (!Number.isSafeInteger(boxEnd) || boxEnd > parentEnd || boxEnd > bytes.length)
     throw invalidImage()
   return {
     type: String.fromCharCode(
@@ -381,7 +494,7 @@ function isoBox(bytes: Uint8Array, offset: number, parentEnd: number): IsoBox {
       bytes[offset + 7],
     ),
     data: offset + header,
-    end: offset + size,
+    end: boxEnd,
   }
 }
 
@@ -389,26 +502,40 @@ function collectAvifDimensions(
   bytes: Uint8Array,
   start: number,
   end: number,
-  metadataLimit: number,
-  container: "top" | "meta" | "iprp" | "ipco",
+  container: "top" | "meta" | "iprp" | "ipco" | "moov" | "trak",
   found: Array<{ width: number; height: number }>,
-  state: { hasMediaData: boolean },
+  state: IsoWalkState,
+  depth: number,
 ): void {
+  if (depth > ISO_MAX_NESTING) throw invalidImage()
   let offset = start
   while (offset < end) {
-    if (offset + 8 > metadataLimit) throw invalidImage()
-    const box = isoBox(bytes, offset, end)
+    const box = isoBox(bytes, offset, end, state)
     if (box.end <= offset) throw invalidImage()
     if (container === "top" && box.type === "meta") {
-      if (box.data + 4 > box.end || box.data + 4 > metadataLimit) throw invalidImage()
-      collectAvifDimensions(bytes, box.data + 4, box.end, metadataLimit, "meta", found, state)
+      if (box.data + 4 > box.end) throw invalidImage()
+      inspectHeader(state, 4)
+      collectAvifDimensions(bytes, box.data + 4, box.end, "meta", found, state, depth + 1)
     } else if (container === "meta" && box.type === "iprp") {
-      collectAvifDimensions(bytes, box.data, box.end, metadataLimit, "iprp", found, state)
+      collectAvifDimensions(bytes, box.data, box.end, "iprp", found, state, depth + 1)
     } else if (container === "iprp" && box.type === "ipco") {
-      collectAvifDimensions(bytes, box.data, box.end, metadataLimit, "ipco", found, state)
+      collectAvifDimensions(bytes, box.data, box.end, "ipco", found, state, depth + 1)
     } else if (container === "ipco" && box.type === "ispe") {
-      if (box.data + 12 !== box.end || box.data + 12 > metadataLimit) throw invalidImage()
+      if (box.data + 12 !== box.end) throw invalidImage()
+      inspectHeader(state, 12)
       found.push({ width: uint32(bytes, box.data + 4), height: uint32(bytes, box.data + 8) })
+    } else if (container === "top" && box.type === "moov") {
+      collectAvifDimensions(bytes, box.data, box.end, "moov", found, state, depth + 1)
+    } else if (container === "moov" && box.type === "trak") {
+      collectAvifDimensions(bytes, box.data, box.end, "trak", found, state, depth + 1)
+    } else if (container === "trak" && box.type === "tkhd") {
+      const payloadSize = box.end - box.data
+      if (payloadSize !== 84 && payloadSize !== 96) throw invalidImage()
+      inspectHeader(state, 12)
+      found.push({
+        width: Math.ceil(uint32(bytes, box.end - 8) / 0x1_0000),
+        height: Math.ceil(uint32(bytes, box.end - 4) / 0x1_0000),
+      })
     } else if (container === "top" && box.type === "mdat") {
       if (box.data === box.end) throw invalidImage()
       state.hasMediaData = true
@@ -419,10 +546,9 @@ function collectAvifDimensions(
 }
 
 function avifMetadata(bytes: Uint8Array): BoundedImageMetadata {
-  const limit = Math.min(bytes.length, IMAGE_METADATA_SCAN_BYTES)
   const found: Array<{ width: number; height: number }> = []
-  const state = { hasMediaData: false }
-  collectAvifDimensions(bytes, 0, bytes.length, limit, "top", found, state)
+  const state: IsoWalkState = { inspected: 0, boxes: 0, hasMediaData: false }
+  collectAvifDimensions(bytes, 0, bytes.length, "top", found, state, 0)
   if (found.length === 0 || !state.hasMediaData) throw invalidImage()
   let maximum = boundedDimensions(found[0].width, found[0].height, "image/avif")
   for (const dimensions of found.slice(1)) {

@@ -68,6 +68,39 @@ const pngDimensions = (width: number, height: number) =>
     0,
   ])
 
+const bytes = (...values: number[]) => Uint8Array.from(values)
+const ascii = (value: string) => Uint8Array.from(Buffer.from(value, "ascii"))
+const append = (...parts: readonly Uint8Array[]) => Uint8Array.from(parts.flatMap((part) => [...part]))
+const uint32LittleEndian = (value: number) =>
+  bytes(value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff)
+const uint24LittleEndian = (value: number) =>
+  bytes(value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff)
+
+function webpChunk(type: string, payload: Uint8Array): Uint8Array {
+  return append(ascii(type), uint32LittleEndian(payload.length), payload, payload.length & 1 ? bytes(0) : bytes())
+}
+
+function oversizedAnimatedWebp(): Uint8Array {
+  const frameHeader = append(
+    uint24LittleEndian(0),
+    uint24LittleEndian(0),
+    uint24LittleEndian(16_384),
+    uint24LittleEndian(0),
+    uint24LittleEndian(1),
+    bytes(0),
+  )
+  const body = append(
+    ascii("WEBP"),
+    webpChunk("VP8X", append(bytes(0x02, 0, 0, 0), uint24LittleEndian(0), uint24LittleEndian(0))),
+    webpChunk("ANIM", bytes(0, 0, 0, 0, 0, 0)),
+    webpChunk(
+      "ANMF",
+      append(frameHeader, webpChunk("VP8 ", bytes(0, 0, 0, 0x9d, 0x01, 0x2a, 1, 0, 1, 0))),
+    ),
+  )
+  return append(ascii("RIFF"), uint32LittleEndian(body.length), body)
+}
+
 const truncatedImageInputs = [
   ["PNG", pngHeader(640, 480)],
   [
@@ -263,6 +296,20 @@ describe("Electron image library adapter", () => {
     expect(createImageFromBuffer).not.toHaveBeenCalled()
     },
   )
+
+  it("rejects an oversized WebP animation frame before nativeImage receives any bytes", async () => {
+    const createImageFromBuffer = vi.fn(() => nativeImage())
+    const adapter = createElectronImageLibraryAdapter({
+      getWindow: () => undefined,
+      showOpenDialog: vi.fn(),
+      createImageFromBuffer,
+      writeClipboard: vi.fn(),
+    })
+    await expect(adapter.renderThumbnail(oversizedAnimatedWebp())).rejects.toMatchObject({
+      code: "IMAGE_LIBRARY_TOO_LARGE",
+    })
+    expect(createImageFromBuffer).not.toHaveBeenCalled()
+  })
 
   it("allows the exact pixel budget before native decode", async () => {
     const image = nativeImage()
