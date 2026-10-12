@@ -91,6 +91,24 @@ describe("image import transactions", () => {
     expect(JSON.stringify(selection)).not.toContain(fixture.root)
   })
 
+  it("preserves an allowlisted adapter size failure while importing", async () => {
+    const fixture = await setup()
+    const source = join(fixture.root, "photo.png")
+    await writeFile(source, PNG)
+    const renderThumbnail = vi.fn(async () =>
+      Promise.reject({ code: "IMAGE_LIBRARY_TOO_LARGE", message: "The image dimensions are too large." }),
+    )
+    const service = createImageLibraryService({
+      workspace: fixture.root,
+      adapter: { ...adapter([source]), renderThumbnail },
+    })
+
+    await expect(service.select({ path: "content/life/daily.md" })).rejects.toMatchObject({
+      code: "IMAGE_LIBRARY_TOO_LARGE",
+    })
+    expect(renderThumbnail).toHaveBeenCalledOnce()
+  })
+
   it("commits a batch, removes the marker, preserves note bytes, and consumes the token", async () => {
     const fixture = await setup()
     const source = join(fixture.root, "photo.png")

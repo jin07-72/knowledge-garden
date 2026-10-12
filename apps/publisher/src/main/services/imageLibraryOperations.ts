@@ -10,6 +10,7 @@ import {
 } from "../../shared/contracts"
 import { MAX_MARKDOWN_UTF8_BYTES } from "../../shared/ipcSchemas"
 import { detectImageFormat, imageDataUrl, markdownForImage, normalizeImageName } from "./imageFormats"
+import { imageAdapterErrorCode } from "./imageLibraryAdapterError"
 import { acquireInternalNotePathLease, type InternalNotePathLease } from "./noteFiles"
 import {
   createOwnedMarkerSource,
@@ -997,8 +998,15 @@ export function createImageLibraryOperations(options: {
         let dimensions: { width: number; height: number }
         try {
           dimensions = await options.adapter.readDimensions(image.bytes)
-        } catch {
-          throw failed("无法读取图片尺寸。")
+        } catch (error) {
+          switch (imageAdapterErrorCode(error)) {
+            case "IMAGE_LIBRARY_INVALID":
+              throw invalid("图片内容或元数据无效。")
+            case "IMAGE_LIBRARY_TOO_LARGE":
+              throw tooLarge()
+            default:
+              throw failed("无法读取图片尺寸。")
+          }
         }
         validDimensions(dimensions)
         await verifyFile(resolve(library.canonical, name), library.canonical, image.proof)

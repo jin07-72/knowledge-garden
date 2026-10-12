@@ -16,6 +16,7 @@ import {
   type NotePathRequest,
 } from "../../shared/contracts"
 import { detectImageFormat, markdownForImage, normalizeImageName } from "./imageFormats"
+import { imageAdapterErrorCode } from "./imageLibraryAdapterError"
 import { captureImportPathIdentity, removeImportArtifact } from "./imageLibraryImportFs"
 import { acquireInternalNotePathLease, type InternalNotePathLease } from "./noteFiles"
 import type { ImageLibraryAdapter, RenderedImage } from "./imageLibrary"
@@ -458,7 +459,18 @@ export function createImageImportManager(options: { workspace: string; adapter: 
         seenIdentities.add(identityKey)
         try { detectImageFormat(snapshot.bytes, name) } catch { throw invalid("图片扩展名与内容不匹配。") }
         let rendered: RenderedImage
-        try { rendered = await options.adapter.renderThumbnail(snapshot.bytes) } catch { throw failed("无法生成图片缩略图。") }
+        try {
+          rendered = await options.adapter.renderThumbnail(snapshot.bytes)
+        } catch (error) {
+          switch (imageAdapterErrorCode(error)) {
+            case "IMAGE_LIBRARY_INVALID":
+              throw invalid("所选图片的内容或元数据无效。")
+            case "IMAGE_LIBRARY_TOO_LARGE":
+              throw tooLarge()
+            default:
+              throw failed("无法生成图片缩略图。")
+          }
+        }
         validateThumbnail(rendered); thumbnails += rendered.dataUrl.length
         if (thumbnails > IMAGE_LIBRARY_MAX_SELECTION_THUMBNAIL_TOTAL_LENGTH) throw tooLarge()
         await verifyProof(sourcePath, snapshot)

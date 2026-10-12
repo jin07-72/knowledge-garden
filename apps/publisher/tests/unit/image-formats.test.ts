@@ -58,6 +58,27 @@ function webpDimensions(width: number, height: number): Uint8Array {
   )
 }
 
+function webpLossyDimensions(width: number, height: number, payloadBytes: number): Uint8Array {
+  const bytes = new Uint8Array(20 + payloadBytes)
+  bytes.set(ascii("RIFF"), 0)
+  bytes.set(uint32LittleEndian(12 + payloadBytes), 4)
+  bytes.set(ascii("WEBPVP8 "), 8)
+  bytes.set(uint32LittleEndian(payloadBytes), 16)
+  bytes.set([0, 0, 0, 0x9d, 0x01, 0x2a, width & 0xff, width >>> 8, height & 0xff, height >>> 8], 20)
+  return bytes
+}
+
+function webpLosslessDimensions(width: number, height: number, payloadBytes: number): Uint8Array {
+  const bytes = new Uint8Array(20 + payloadBytes)
+  const bits = width - 1 + (height - 1) * 0x4000
+  bytes.set(ascii("RIFF"), 0)
+  bytes.set(uint32LittleEndian(12 + payloadBytes), 4)
+  bytes.set(ascii("WEBPVP8L"), 8)
+  bytes.set(uint32LittleEndian(payloadBytes), 16)
+  bytes.set([0x2f, ...uint32LittleEndian(bits)], 20)
+  return bytes
+}
+
 function avifDimensions(width: number, height: number): Uint8Array {
   const ispe = append(
     uint32Bytes(20),
@@ -70,6 +91,15 @@ function avifDimensions(width: number, height: number): Uint8Array {
   const iprp = append(uint32Bytes(8 + ipco.length), ascii("iprp"), ipco)
   const meta = append(uint32Bytes(12 + iprp.length), ascii("meta"), bytes(0, 0, 0, 0), iprp)
   return append(avifHeader("avif"), meta)
+}
+
+function avifWithLargeMediaData(width: number, height: number, payloadBytes: number): Uint8Array {
+  const header = avifDimensions(width, height)
+  const bytes = new Uint8Array(header.length + 8 + payloadBytes)
+  bytes.set(header)
+  bytes.set(uint32Bytes(8 + payloadBytes), header.length)
+  bytes.set(ascii("mdat"), header.length + 4)
+  return bytes
 }
 
 function avifHeader(
@@ -265,6 +295,17 @@ describe("bounded image metadata", () => {
     expect(readBoundedImageMetadata(input)).toEqual({ width: 640, height: 480, mime })
   })
 
+  it("rejects a large-payload container whose declared boundary exceeds the input", () => {
+    const malformedWebp = webpLossyDimensions(640, 480, 1_048_578).subarray(0, -1)
+    const malformedAvif = avifWithLargeMediaData(640, 480, 1_048_578)
+    malformedAvif.set(uint32Bytes(malformedAvif.length + 1), avifDimensions(640, 480).length)
+
+    for (const input of [malformedWebp, malformedAvif])
+      expect(() => readBoundedImageMetadata(input)).toThrow(
+        expect.objectContaining({ code: "IMAGE_LIBRARY_INVALID" }),
+      )
+  })
+
   it("accepts the exact pixel budget and rejects the next pixel row", () => {
     expect(IMAGE_MAX_DECODED_PIXELS).toBe(40_000_000)
     expect(readBoundedImageMetadata(pngDimensions(10_000, 4_000))).toMatchObject({
@@ -274,6 +315,14 @@ describe("bounded image metadata", () => {
     expect(() => readBoundedImageMetadata(pngDimensions(10_000, 4_001))).toThrow(
       expect.objectContaining({ code: "IMAGE_LIBRARY_TOO_LARGE" }),
     )
+  })
+
+  it.each([
+    ["VP8", webpLossyDimensions(640, 480, 1_048_578), "image/webp"],
+    ["VP8L", webpLosslessDimensions(640, 480, 1_048_578), "image/webp"],
+    ["AVIF mdat", avifWithLargeMediaData(640, 480, 1_048_578), "image/avif"],
+  ] as const)("reads %s metadata before a payload larger than the scan window", (_label, input, mime) => {
+    expect(readBoundedImageMetadata(input)).toEqual({ width: 640, height: 480, mime })
   })
 
   it("rejects zero, over-dimension, truncated, and integer-overflow dimensions", () => {

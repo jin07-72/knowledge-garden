@@ -830,6 +830,23 @@ describe("note-scoped image library", () => {
     )
   })
 
+  it.each([
+    ["IMAGE_LIBRARY_INVALID", "The image is invalid."],
+    ["IMAGE_LIBRARY_TOO_LARGE", "The image dimensions are too large."],
+  ] as const)("preserves allowlisted adapter %s failures while listing images", async (code, message) => {
+    const setup = await fixture()
+    await mkdir(setup.libraryPath, { recursive: true })
+    await writeFile(join(setup.libraryPath, "photo.png"), PNG)
+    const renderThumbnail = vi.fn(async () => Promise.reject({ code, message }))
+    const service = createImageLibraryService({
+      workspace: setup.root,
+      adapter: adapter({ renderThumbnail }),
+    })
+
+    await expectCode(service.open({ path: "content/life/daily.md" }), code)
+    expect(renderThumbnail).toHaveBeenCalledOnce()
+  })
+
   it("never changes Markdown note bytes while creating or listing a library", async () => {
     const setup = await fixture()
     const beforeBytes = await readFile(setup.notePath)
@@ -885,6 +902,25 @@ describe("note-scoped image library", () => {
     })
     expect(readDimensions).toHaveBeenCalledTimes(1)
     expect(Buffer.from(readDimensions.mock.calls[0]![0])).toEqual(Buffer.from(JPEG))
+  })
+
+  it("preserves an allowlisted adapter size failure while previewing", async () => {
+    const setup = await fixture()
+    await mkdir(setup.libraryPath, { recursive: true })
+    await writeFile(join(setup.libraryPath, "photo.png"), PNG)
+    const readDimensions = vi.fn(async () =>
+      Promise.reject({ code: "IMAGE_LIBRARY_TOO_LARGE", message: "The image dimensions are too large." }),
+    )
+    const service = createImageLibraryService({
+      workspace: setup.root,
+      adapter: adapter({ readDimensions }),
+    })
+
+    await expectCode(
+      service.preview({ path: "content/life/daily.md", name: "photo.png" }),
+      "IMAGE_LIBRARY_TOO_LARGE",
+    )
+    expect(readDimensions).toHaveBeenCalledOnce()
   })
 
   it("rejects preview extension/signature mismatches and stale expected hashes", async () => {

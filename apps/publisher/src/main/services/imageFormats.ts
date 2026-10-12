@@ -204,9 +204,9 @@ function webpMetadata(bytes: Uint8Array): BoundedImageMetadata {
     const size = uint32LittleEndian(bytes, offset + 4)
     const data = offset + 8
     const end = data + size
-    if (!Number.isSafeInteger(end) || end > riffEnd || end > limit) throw invalidImage()
+    if (!Number.isSafeInteger(end) || end > riffEnd || end > bytes.length) throw invalidImage()
     if (hasAscii(bytes, offset, "VP8X")) {
-      if (size !== 10) throw invalidImage()
+      if (size !== 10 || data + 10 > limit) throw invalidImage()
       return boundedDimensions(
         uint24LittleEndian(bytes, data + 4) + 1,
         uint24LittleEndian(bytes, data + 7) + 1,
@@ -214,7 +214,11 @@ function webpMetadata(bytes: Uint8Array): BoundedImageMetadata {
       )
     }
     if (hasAscii(bytes, offset, "VP8 ")) {
-      if (size < 10 || !startsWith(bytes.subarray(data + 3), [0x9d, 0x01, 0x2a]))
+      if (
+        size < 10 ||
+        data + 10 > limit ||
+        !startsWith(bytes.subarray(data + 3), [0x9d, 0x01, 0x2a])
+      )
         throw invalidImage()
       return boundedDimensions(
         uint16LittleEndian(bytes, data + 6) & 0x3fff,
@@ -223,7 +227,7 @@ function webpMetadata(bytes: Uint8Array): BoundedImageMetadata {
       )
     }
     if (hasAscii(bytes, offset, "VP8L")) {
-      if (size < 5 || bytes[data] !== 0x2f) throw invalidImage()
+      if (size < 5 || data + 5 > limit || bytes[data] !== 0x2f) throw invalidImage()
       const bits = uint32LittleEndian(bytes, data + 1)
       return boundedDimensions(
         (bits & 0x3fff) + 1,
@@ -232,6 +236,7 @@ function webpMetadata(bytes: Uint8Array): BoundedImageMetadata {
       )
     }
     offset = end + (size & 1)
+    if (offset > riffEnd) throw invalidImage()
   }
   throw invalidImage()
 }
@@ -276,22 +281,24 @@ function collectAvifDimensions(
   bytes: Uint8Array,
   start: number,
   end: number,
+  metadataLimit: number,
   container: "top" | "meta" | "iprp" | "ipco",
   found: Array<{ width: number; height: number }>,
 ): void {
   let offset = start
   while (offset < end) {
+    if (offset + 8 > metadataLimit) throw invalidImage()
     const box = isoBox(bytes, offset, end)
     if (box.end <= offset) throw invalidImage()
     if (container === "top" && box.type === "meta") {
-      if (box.data + 4 > box.end) throw invalidImage()
-      collectAvifDimensions(bytes, box.data + 4, box.end, "meta", found)
+      if (box.data + 4 > box.end || box.data + 4 > metadataLimit) throw invalidImage()
+      collectAvifDimensions(bytes, box.data + 4, box.end, metadataLimit, "meta", found)
     } else if (container === "meta" && box.type === "iprp") {
-      collectAvifDimensions(bytes, box.data, box.end, "iprp", found)
+      collectAvifDimensions(bytes, box.data, box.end, metadataLimit, "iprp", found)
     } else if (container === "iprp" && box.type === "ipco") {
-      collectAvifDimensions(bytes, box.data, box.end, "ipco", found)
+      collectAvifDimensions(bytes, box.data, box.end, metadataLimit, "ipco", found)
     } else if (container === "ipco" && box.type === "ispe") {
-      if (box.data + 12 !== box.end) throw invalidImage()
+      if (box.data + 12 !== box.end || box.data + 12 > metadataLimit) throw invalidImage()
       found.push({ width: uint32(bytes, box.data + 4), height: uint32(bytes, box.data + 8) })
     }
     offset = box.end
@@ -302,7 +309,7 @@ function collectAvifDimensions(
 function avifMetadata(bytes: Uint8Array): BoundedImageMetadata {
   const limit = Math.min(bytes.length, IMAGE_METADATA_SCAN_BYTES)
   const found: Array<{ width: number; height: number }> = []
-  collectAvifDimensions(bytes, 0, limit, "top", found)
+  collectAvifDimensions(bytes, 0, bytes.length, limit, "top", found)
   if (found.length === 0) throw invalidImage()
   let maximum = boundedDimensions(found[0].width, found[0].height, "image/avif")
   for (const dimensions of found.slice(1)) {

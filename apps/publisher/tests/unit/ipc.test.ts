@@ -1172,6 +1172,36 @@ describe("secure publisher IPC", () => {
     expect(servicePorts.calls.imagesOpen).toHaveBeenCalledOnce()
   })
 
+  it("preserves allowlisted image validation codes from services without dispatching twice", async () => {
+    const { ipc, servicePorts } = setup()
+    servicePorts.calls.imagesOpen.mockRejectedValueOnce({
+      code: "IMAGE_LIBRARY_TOO_LARGE",
+      message: "The image dimensions are too large.",
+    })
+    servicePorts.calls.imagesPreview.mockRejectedValueOnce({
+      code: "IMAGE_LIBRARY_INVALID",
+      message: "The image is invalid.",
+    })
+
+    await expect(
+      ipc.invoke(IPC_CHANNELS.requests.imagesOpen, trustedEvent, { path: "content/life/daily.md" }),
+    ).resolves.toEqual({
+      ok: false,
+      error: { code: "IMAGE_LIBRARY_TOO_LARGE", message: "所选图片超过数量或大小限制。" },
+    })
+    await expect(
+      ipc.invoke(IPC_CHANNELS.requests.imagesPreview, trustedEvent, {
+        path: "content/life/daily.md",
+        name: "cover.png",
+      }),
+    ).resolves.toEqual({
+      ok: false,
+      error: { code: "IMAGE_LIBRARY_INVALID", message: "图片库请求无效，请刷新后重试。" },
+    })
+    expect(servicePorts.calls.imagesOpen).toHaveBeenCalledOnce()
+    expect(servicePorts.calls.imagesPreview).toHaveBeenCalledOnce()
+  })
+
   it("rejects untrusted or destroyed senders before dispatch", async () => {
     const { ipc, servicePorts } = setup()
     const result = await ipc.invoke(IPC_CHANNELS.requests.notesList, {

@@ -20,6 +20,7 @@ import {
 import { MAX_MARKDOWN_UTF8_BYTES } from "../../shared/ipcSchemas"
 import { detectImageFormat, markdownForImage } from "./imageFormats"
 import { createImageImportManager, isImageLibraryImportError } from "./imageLibraryImport"
+import { imageAdapterErrorCode } from "./imageLibraryAdapterError"
 import {
   createImageLibraryOperations,
   isImageLibraryOperationError,
@@ -706,7 +707,15 @@ async function readImage(
   let rendered: RenderedImage
   try {
     rendered = await adapter.renderThumbnail(bytes)
-  } catch {
+  } catch (error) {
+    switch (imageAdapterErrorCode(error)) {
+      case "IMAGE_LIBRARY_INVALID":
+        throw invalid("图片内容或元数据无效。")
+      case "IMAGE_LIBRARY_TOO_LARGE":
+        throw tooLarge("图片尺寸超过允许的安全限制。")
+      default:
+        break
+    }
     throw failed("无法生成图片缩略图。")
   }
   await adapter.afterPhase?.("thumbnail-rendered")
