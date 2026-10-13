@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { EditorView } from "@codemirror/view"
+import { undo } from "@codemirror/commands"
 import { createHash } from "node:crypto"
 import { StrictMode, createRef } from "react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -10,6 +11,8 @@ import {
   type MarkdownEditorHandle,
 } from "../../src/renderer/src/components/MarkdownEditor"
 import type {
+  GardenApi,
+  ImageLibraryItem,
   IpcResult,
   NoteDocument,
   NoteRecovery,
@@ -70,6 +73,20 @@ function receipt(markdown: string): NoteWriteReceipt {
   }
 }
 
+function imageApi(overrides: Partial<GardenApi["images"]> = {}): GardenApi["images"] {
+  return {
+    open: vi.fn(async ({ path }) => ok({ path, images: [] })),
+    select: vi.fn(async () =>
+      ok({ cancelled: true as const, images: [] as const, conflicts: [] as const }),
+    ),
+    commit: vi.fn(async ({ path }) => ok({ path, images: [] })),
+    preview: vi.fn(),
+    delete: vi.fn(async ({ path }) => ok({ path, images: [] })),
+    copyMarkdown: vi.fn(async () => ok(undefined)),
+    ...overrides,
+  }
+}
+
 function setup(
   options: {
     save?: (markdown: string) => Promise<IpcResult<NoteWriteReceipt>>
@@ -79,6 +96,7 @@ function setup(
     discardRecovery?: () => Promise<IpcResult<void>>
     document?: NoteDocument
     readOnly?: boolean
+    images?: GardenApi["images"]
   } = {},
 ) {
   const selectedDocument = options.document ?? document
@@ -87,15 +105,17 @@ function setup(
   const getRecovery = vi.fn(options.getRecovery ?? (async () => ok(options.recovery)))
   const writeRecovery = vi.fn(async () => ok({ contentHash: "c".repeat(64) }))
   const discardRecovery = vi.fn(options.discardRecovery ?? (async () => ok(undefined)))
+  const images = options.images ?? imageApi()
   const ref = createRef<MarkdownEditorHandle>()
-  const editor = (readOnly = options.readOnly) => (
+  const editor = (currentDocument = selectedDocument, readOnly = options.readOnly) => (
     <MarkdownEditor
       ref={ref}
-      document={selectedDocument}
+      document={currentDocument}
       notes={[publicNote, privateNote]}
       save={async (request) => save(request.markdown)}
       read={read}
       recovery={{ get: getRecovery, write: writeRecovery, discard: discardRecovery }}
+      images={images}
       readOnly={readOnly}
     />
   )
@@ -108,7 +128,9 @@ function setup(
     getRecovery,
     writeRecovery,
     discardRecovery,
-    rerenderReadOnly: (readOnly: boolean) => view.rerender(editor(readOnly)),
+    images,
+    rerenderReadOnly: (readOnly: boolean) => view.rerender(editor(selectedDocument, readOnly)),
+    rerenderDocument: (next: NoteDocument) => view.rerender(editor(next)),
   }
 }
 
@@ -152,6 +174,140 @@ beforeEach(() => {
 })
 
 describe("MarkdownEditor", () => {
+  it("opens the current note image library and keeps the editor state untouched through image actions", async () => {
+    const user = userEvent.setup()
+    const photo: ImageLibraryItem = {
+      name: "diagram.png",
+      sizeBytes: 1_536,
+      width: 640,
+      height: 480,
+      contentHash: "d".repeat(64),
+      thumbnailDataUrl: "data:image/png;base64,dGh1bWI=",
+      markdown: "![diagram](<../_assets/css-grid/diagram.png>)",
+    }
+    const images = imageApi({
+      select: vi.fn(async () =>
+        ok({
+          cancelled: false as const,
+          selectionId: "selection-editor",
+          images: [{ ...photo, conflict: false }] as const,
+          conflicts: [],
+        }),
+      ),
+      commit: vi.fn(async ({ path }) => ok({ path, images: [photo] })),
+      preview: vi.fn(async () => ok({ ...photo, dataUrl: "data:image/png;base64,ZnVsbA==" })),
+      copyMarkdown: vi.fn(async () => ok(undefined)),
+      delete: vi.fn(async ({ path }) => ok({ path, images: [] })),
+    })
+    const { save, writeRecovery, discardRecovery } = setup({ images })
+    await waitFor(() => expect(editorView().contentDOM).toHaveAttribute("contenteditable", "true"))
+    const view = editorView()
+    const before = {
+      doc: view.state.sliceDoc(),
+      selection: view.state.selection.toJSON(),
+      historyUndo: undo(view),
+      status: screen.getByRole("status", { name: "保存状态" }).textContent,
+    }
+    expect(before.historyUndo).toBe(false)
+
+    const trigger = screen.getByRole("button", { name: "图片库" })
+    await user.dblClick(trigger)
+    expect(await screen.findByRole("dialog", { name: "CSS Grid 图片库" })).toBeVisible()
+    expect(images.open).toHaveBeenCalledTimes(1)
+    expect(images.open).toHaveBeenCalledWith({ path: publicNote.path })
+
+    await user.click(screen.getByRole("button", { name: "添加图片" }))
+    await user.click(await screen.findByRole("button", { name: "确认添加 1 张图片" }))
+    expect(await screen.findByRole("button", { name: "预览 diagram.png" })).toBeVisible()
+    expect(images.commit).toHaveBeenCalledWith({
+      path: publicNote.path,
+      selectionId: "selection-editor",
+      include: ["diagram.png"],
+      overwrite: [],
+    })
+    await user.click(screen.getByRole("button", { name: "预览 diagram.png" }))
+    await user.click(await screen.findByRole("button", { name: "复制 Markdown 链接" }))
+    expect(images.copyMarkdown).toHaveBeenCalledWith({
+      path: publicNote.path,
+      name: photo.name,
+      expectedContentHash: photo.contentHash,
+    })
+    await user.click(screen.getByRole("button", { name: "删除图片" }))
+    await user.click(screen.getByRole("button", { name: "永久删除 diagram.png" }))
+    expect(await screen.findByText("暂无图片")).toBeVisible()
+    await user.click(screen.getByRole("button", { name: "关闭图片库" }))
+
+    expect(screen.queryByRole("dialog", { name: /图片库/ })).not.toBeInTheDocument()
+    expect(view.state.sliceDoc()).toBe(before.doc)
+    expect(view.state.selection.toJSON()).toEqual(before.selection)
+    expect(undo(view)).toBe(false)
+    expect(screen.getByRole("status", { name: "保存状态" })).toHaveTextContent(before.status ?? "")
+    expect(save).not.toHaveBeenCalled()
+    expect(writeRecovery).not.toHaveBeenCalled()
+    expect(discardRecovery).not.toHaveBeenCalled()
+  })
+
+  it("does not mutate the note when an image request fails and closes the library on read-only transition", async () => {
+    const user = userEvent.setup()
+    const pending = deferred<IpcResult<{ path: string; images: readonly ImageLibraryItem[] }>>()
+    const images = imageApi({
+      open: vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: false as const,
+          error: { code: "IMAGE_LIBRARY_FAILED" as const, message: "图片库读取失败" },
+        })
+        .mockReturnValueOnce(pending.promise),
+    })
+    const { rerenderReadOnly, save, writeRecovery, discardRecovery } = setup({ images })
+    await waitFor(() => expect(editorView().contentDOM).toHaveAttribute("contenteditable", "true"))
+    const before = editorView().state.sliceDoc()
+    await user.click(screen.getByRole("button", { name: "图片库" }))
+    expect(await screen.findByRole("alert")).toHaveTextContent("图片库读取失败")
+    expect(editorView().state.sliceDoc()).toBe(before)
+    expect(save).not.toHaveBeenCalled()
+    expect(writeRecovery).not.toHaveBeenCalled()
+    expect(discardRecovery).not.toHaveBeenCalled()
+    await user.click(screen.getByRole("button", { name: "关闭图片库" }))
+    await user.click(screen.getByRole("button", { name: "图片库" }))
+    expect(screen.getByRole("dialog", { name: "CSS Grid 图片库" })).toBeVisible()
+
+    rerenderReadOnly(true)
+    expect(screen.queryByRole("dialog", { name: /图片库/ })).not.toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "图片库" })).toBeDisabled()
+    pending.resolve(ok({ path: publicNote.path, images: [] }))
+    await act(async () => void (await pending.promise))
+    expect(screen.queryByText("暂无图片")).not.toBeInTheDocument()
+    expect(editorView().state.sliceDoc()).toBe(before)
+    expect(save).not.toHaveBeenCalled()
+    expect(writeRecovery).not.toHaveBeenCalled()
+    expect(discardRecovery).not.toHaveBeenCalled()
+  })
+
+  it("closes an open image library immediately when the document path changes and ignores its late result", async () => {
+    const user = userEvent.setup()
+    const pending = deferred<IpcResult<{ path: string; images: readonly ImageLibraryItem[] }>>()
+    const images = imageApi({ open: vi.fn(() => pending.promise) })
+    const { rerenderDocument } = setup({ images })
+    await waitFor(() => expect(editorView().contentDOM).toHaveAttribute("contenteditable", "true"))
+    await user.click(screen.getByRole("button", { name: "图片库" }))
+    expect(screen.getByRole("dialog", { name: "CSS Grid 图片库" })).toBeVisible()
+
+    const next: NoteDocument = {
+      path: "private/life/journal.md",
+      markdown: "# Journal",
+      mtimeMs: 22,
+      contentHash: "e".repeat(64),
+    }
+    rerenderDocument(next)
+    expect(screen.queryByRole("dialog", { name: /图片库/ })).not.toBeInTheDocument()
+    pending.resolve(ok({ path: publicNote.path, images: [] }))
+    await act(async () => void (await pending.promise))
+    expect(screen.queryByRole("dialog", { name: /图片库/ })).not.toBeInTheDocument()
+    expect(images.open).toHaveBeenCalledTimes(1)
+    expect(images.open).toHaveBeenCalledWith({ path: publicNote.path })
+  })
+
   it("blocks user and programmatic document changes while a switch barrier is active", async () => {
     const recovery: NoteRecovery = {
       path: publicNote.path,
@@ -207,6 +363,7 @@ describe("MarkdownEditor", () => {
     const { writeRecovery } = setup({ getRecovery: () => pending.promise })
     const view = editorView()
     expect(view.contentDOM).toHaveAttribute("contenteditable", "false")
+    expect(screen.getByRole("button", { name: "图片库" })).toBeDisabled()
 
     dispatchDoc(`${original}early input`)
     expect(view.state.sliceDoc()).toBe(original)
@@ -214,9 +371,12 @@ describe("MarkdownEditor", () => {
 
     pending.resolve(ok(recovery))
     const prompt = await screen.findByRole("dialog", { name: "恢复未保存内容" })
+    expect(view.contentDOM).toHaveAttribute("contenteditable", "true")
+    expect(screen.getByRole("button", { name: "图片库" })).toBeEnabled()
     expect(writeRecovery).not.toHaveBeenCalled()
     await userEvent.click(within(prompt).getByRole("button", { name: "永久删除恢复稿" }))
     await waitFor(() => expect(view.contentDOM).toHaveAttribute("contenteditable", "true"))
+    expect(screen.getByRole("button", { name: "图片库" })).toBeEnabled()
     await replaceDoc(`${original}ready input`)
     await waitFor(() => expect(writeRecovery).toHaveBeenCalledOnce())
   })
@@ -727,6 +887,7 @@ describe("MarkdownEditor", () => {
           write: mounted.writeRecovery,
           discard: mounted.discardRecovery,
         }}
+        images={mounted.images}
       />,
     )
     expect(editorView()).toBe(firstView)
@@ -764,6 +925,7 @@ describe("MarkdownEditor", () => {
             write: writeRecovery,
             discard: async () => ok(undefined),
           }}
+          images={imageApi()}
         />
       </StrictMode>,
     )

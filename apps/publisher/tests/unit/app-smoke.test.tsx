@@ -164,6 +164,39 @@ afterEach(() => {
 })
 
 describe("App blog orchestration", () => {
+  it("passes the image API to the loaded note editor and hides the entry while no document is loaded", async () => {
+    const user = userEvent.setup()
+    const api = gardenApi()
+    const note = {
+      path: "content/technology/images.md",
+      domain: "technology" as const,
+      slug: "images",
+      title: "Image Notes",
+      date: "2026-10-13",
+      description: "image integration",
+      visibility: "public" as const,
+      updatedAt: "2026-10-13T00:00:00.000Z",
+      tags: ["images"],
+    }
+    vi.mocked(api.notes.list).mockResolvedValue(ok([note]))
+    vi.mocked(api.notes.read).mockResolvedValue(
+      ok({ path: note.path, markdown: "# Images", mtimeMs: 7, contentHash: "7".repeat(64) }),
+    )
+    Object.defineProperty(window, "garden", { configurable: true, value: api })
+    render(<App />)
+
+    expect(screen.queryByRole("button", { name: "图片库" })).not.toBeInTheDocument()
+    await user.click(await screen.findByRole("button", { name: /Image Notes/ }))
+    const imageButton = await screen.findByRole("button", { name: "图片库" })
+    await user.click(imageButton)
+
+    expect(await screen.findByRole("dialog", { name: "Image Notes 图片库" })).toBeVisible()
+    expect(api.images.open).toHaveBeenCalledWith({ path: note.path })
+    expect(api.notes.save).not.toHaveBeenCalled()
+    expect(api.notes.recovery.write).not.toHaveBeenCalled()
+    expect(api.notes.recovery.discard).not.toHaveBeenCalled()
+  })
+
   it("recovers an unavailable blog chooser after StrictMode error cleanup", async () => {
     const user = userEvent.setup()
     const api = gardenApi()

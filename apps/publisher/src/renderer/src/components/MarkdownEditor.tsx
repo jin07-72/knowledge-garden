@@ -18,6 +18,7 @@ import {
   useState,
 } from "react"
 import type {
+  GardenApi,
   IpcResult,
   DomainSummary,
   NoteDocument,
@@ -32,6 +33,7 @@ import type {
 import { wikiCompletion } from "../editor/wikiCompletion"
 import { useAutosave } from "../hooks/useAutosave"
 import { ModalShell } from "./ModalShell"
+import { ImageLibrary } from "./ImageLibrary"
 
 const programmaticReplace = Annotation.define<boolean>()
 const compareMaximumBytes = 64 * 1024
@@ -145,6 +147,7 @@ export const MarkdownEditor = forwardRef<
     readonly save: (request: NoteSaveRequest) => Promise<IpcResult<NoteWriteReceipt>>
     readonly read: () => Promise<IpcResult<NoteDocument>>
     readonly recovery: RecoveryPort
+    readonly images: GardenApi["images"]
     readonly readOnly?: boolean
     readonly onSaved?: (receipt: NoteWriteReceipt) => void
     readonly onSaveStateChange?: (label: string) => void
@@ -157,6 +160,7 @@ export const MarkdownEditor = forwardRef<
     save,
     read,
     recovery,
+    images,
     readOnly = false,
     onSaved,
     onSaveStateChange,
@@ -186,6 +190,8 @@ export const MarkdownEditor = forwardRef<
   const [confirmStaleRecovery, setConfirmStaleRecovery] = useState(false)
   const [readError, setReadError] = useState<string>()
   const [recoveryActionError, setRecoveryActionError] = useState<string>()
+  const [imageLibraryPath, setImageLibraryPath] = useState<string>()
+  const [editorWritable, setEditorWritable] = useState(false)
   const autosave = useAutosave({
     document,
     save,
@@ -271,6 +277,7 @@ export const MarkdownEditor = forwardRef<
     const updateWritable = (): void => {
       if (!active) return
       const writable = recoveryReady.current && !reloadPending.current && !switchReadOnly.current
+      setEditorWritable(writable)
       view.dispatch({
         effects: editing.current.reconfigure([
           EditorState.readOnly.of(!writable),
@@ -333,6 +340,10 @@ export const MarkdownEditor = forwardRef<
   useLayoutEffect(() => {
     refreshWritable.current()
   }, [readOnly])
+
+  useEffect(() => {
+    setImageLibraryPath(undefined)
+  }, [document.path, editorWritable])
 
   useEffect(() => {
     const view = editor.current
@@ -460,6 +471,14 @@ export const MarkdownEditor = forwardRef<
         >
           搜索
         </button>
+        <button
+          type="button"
+          disabled={!editorWritable}
+          onClick={() => setImageLibraryPath(document.path)}
+          aria-label="图片库"
+        >
+          图片库
+        </button>
       </div>
       {readOnly ? (
         <p role="status" aria-label="编辑器切换状态" className="save-state">
@@ -521,6 +540,15 @@ export const MarkdownEditor = forwardRef<
             重试清理
           </button>
         </div>
+      ) : null}
+
+      {editorWritable && imageLibraryPath === document.path ? (
+        <ImageLibrary
+          path={document.path}
+          title={notes.find((note) => note.path === document.path)?.title ?? document.path}
+          api={images}
+          onClose={() => setImageLibraryPath(undefined)}
+        />
       ) : null}
 
       {recoveryPrompt ? (

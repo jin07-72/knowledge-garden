@@ -1011,6 +1011,7 @@ export function PublisherApp({
                     write: api.notes.recovery.write,
                     discard: api.notes.recovery.discard,
                   }}
+                  images={api.images}
                   readOnly={switchPreparing}
                   onSaved={(receipt) => {
                     setDocument((current) =>
