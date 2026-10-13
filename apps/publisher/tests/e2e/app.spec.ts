@@ -641,9 +641,6 @@ test("manages a note image library", async () => {
   const notePath = join(garden.root, ...garden.notePath.split("/"))
   const libraryPath = join(garden.root, "content", "_assets", "fixture")
   let application: ElectronApplication | undefined
-  let clipboardSnapshotInstalled = false
-  let clipboardSafeToMutate = false
-  let clipboardSkipReason: string | undefined
   let chooserInstallationAttempted = false
   let primaryFailure: unknown
   try {
@@ -665,95 +662,73 @@ test("manages a note image library", async () => {
       GARDEN_PUBLISHER_E2E_RUNTIME: await createE2eRuntime(stateRoot),
       GARDEN_PUBLISHER_E2E_REGISTRY: join(stateRoot, "blogs.json"),
     })
-    const clipboardSnapshot = await snapshotClipboard(application)
-    clipboardSnapshotInstalled = true
-    clipboardSafeToMutate = clipboardSnapshot.safeToMutate
-    if (!clipboardSnapshot.safeToMutate) {
-      clipboardSkipReason =
-        "The legacy clipboard contains a format that cannot be restored atomically; leaving it untouched."
-    } else {
-      await verifyClipboardItemRoundTrip(application)
-      chooserInstallationAttempted = true
-      await installImageChooser(application, [[alpha, beta, removed], [replacementAlpha]])
-      const page = await application.firstWindow()
-      await expect(page.locator('main[data-workspace-diagnostics="ready"]')).toBeVisible()
-      await page.getByRole("button", { name: "Image Note，公开" }).click()
+    chooserInstallationAttempted = true
+    await installImageChooser(application, [[alpha, beta, removed], [replacementAlpha]])
+    const page = await application.firstWindow()
+    await expect(page.locator('main[data-workspace-diagnostics="ready"]')).toBeVisible()
+    await page.getByRole("button", { name: "Image Note，公开" }).click()
 
-      await page.getByRole("button", { name: "图片库" }).click()
-      const library = page.getByRole("dialog", { name: "Image Note 图片库" })
-      await expect(library).toBeVisible()
-      await expect(library.getByText("暂无图片")).toBeVisible()
-      await expect.poll(async () => exists(join(libraryPath, ".gitkeep"))).toBe(true)
+    await page.getByRole("button", { name: "图片库" }).click()
+    const library = page.getByRole("dialog", { name: "Image Note 图片库" })
+    await expect(library).toBeVisible()
+    await expect(library.getByText("暂无图片")).toBeVisible()
+    await expect.poll(async () => exists(join(libraryPath, ".gitkeep"))).toBe(true)
 
-      await library.getByRole("button", { name: "添加图片" }).click()
-      const candidates = page.getByRole("dialog", { name: "确认添加图片" })
-      await expect(candidates.getByText("alpha.png")).toBeVisible()
-      await expect(candidates.getByText("beta.png")).toBeVisible()
-      await expect(candidates.getByText("removed.png")).toBeVisible()
-      for (const name of ["alpha.png", "beta.png", "removed.png"]) {
-        await expectDecodedImage(candidates.locator("li", { hasText: name }).locator("img"))
-      }
-      await candidates.getByRole("button", { name: "移除 removed.png" }).click()
-      await expect(candidates.getByText("removed.png")).toHaveCount(0)
-      await candidates.getByRole("button", { name: "确认添加 2 张图片" }).click()
-      for (const name of ["alpha.png", "beta.png"]) {
-        const thumbnail = page.getByRole("button", { name: `预览 ${name}` })
-        await expect(thumbnail).toBeVisible()
-        await expectDecodedImage(thumbnail.locator("img"))
-      }
-      expect(await exists(join(libraryPath, ".gitkeep"))).toBe(false)
-      expect(await readFile(join(libraryPath, "alpha.png"))).toEqual(originalAlpha)
-      expect(await readFile(join(libraryPath, "beta.png"))).toEqual(betaBytes)
-      expect(await exists(join(libraryPath, "removed.png"))).toBe(false)
-      expect(await exists(removed)).toBe(true)
-      expect(await readFile(removed)).toEqual(removedBytes)
-
-      await page.getByRole("button", { name: "添加图片" }).click()
-      await page.getByRole("button", { name: "继续" }).click()
-      const overwrite = page.getByRole("dialog", { name: "确认覆盖同名图片" })
-      await expect(overwrite.getByText("alpha.png")).toBeVisible()
-      await overwrite.getByRole("button", { name: "覆盖并继续" }).click()
-      await expect(page.getByRole("button", { name: "预览 alpha.png" })).toBeVisible()
-      expect(await readFile(join(libraryPath, "alpha.png"))).toEqual(overwrittenAlpha)
-
-      await page.getByRole("button", { name: "预览 alpha.png" }).click()
-      const preview = page.getByRole("dialog", { name: "alpha.png" })
-      await expect(preview.getByRole("img", { name: "alpha.png" })).toBeVisible()
-      await expect(preview.getByText("1 × 1 像素")).toBeVisible()
-      await expect(preview.getByText(`${overwrittenAlpha.length} B`)).toBeVisible()
-      await preview.getByRole("button", { name: "复制 Markdown 链接" }).click()
-      await expect(preview.getByRole("status")).toHaveText("已复制 Markdown 链接")
-      const clipboard = await application.evaluate(({ clipboard }) => clipboard.readText())
-      expect(clipboard).toBe("![alpha](<../_assets/fixture/alpha.png>)")
-      expect(await readFile(notePath)).toEqual(noteBefore)
-
-      await preview.getByRole("button", { name: "删除图片" }).click()
-      await page.getByRole("button", { name: "永久删除 alpha.png" }).click()
-      await expect(page.getByRole("button", { name: "预览 alpha.png" })).toHaveCount(0)
-      await page.getByRole("button", { name: "预览 beta.png" }).click()
-      await page.getByRole("button", { name: "删除图片" }).click()
-      await page.getByRole("button", { name: "永久删除 beta.png" }).click()
-      await expect(page.getByText("暂无图片")).toBeVisible()
-      expect(await exists(join(libraryPath, "alpha.png"))).toBe(false)
-      expect(await exists(join(libraryPath, "beta.png"))).toBe(false)
-      expect(await exists(join(libraryPath, ".gitkeep"))).toBe(true)
-      expect(await readFile(notePath)).toEqual(noteBefore)
-      expect(await readdir(join(garden.root, ".garden-publisher", "image-import"))).toEqual([])
+    await library.getByRole("button", { name: "添加图片" }).click()
+    const candidates = page.getByRole("dialog", { name: "确认添加图片" })
+    await expect(candidates.getByText("alpha.png")).toBeVisible()
+    await expect(candidates.getByText("beta.png")).toBeVisible()
+    await expect(candidates.getByText("removed.png")).toBeVisible()
+    for (const name of ["alpha.png", "beta.png", "removed.png"]) {
+      await expectDecodedImage(candidates.locator("li", { hasText: name }).locator("img"))
     }
+    await candidates.getByRole("button", { name: "移除 removed.png" }).click()
+    await expect(candidates.getByText("removed.png")).toHaveCount(0)
+    await candidates.getByRole("button", { name: "确认添加 2 张图片" }).click()
+    for (const name of ["alpha.png", "beta.png"]) {
+      const thumbnail = page.getByRole("button", { name: `预览 ${name}` })
+      await expect(thumbnail).toBeVisible()
+      await expectDecodedImage(thumbnail.locator("img"))
+    }
+    expect(await exists(join(libraryPath, ".gitkeep"))).toBe(false)
+    expect(await readFile(join(libraryPath, "alpha.png"))).toEqual(originalAlpha)
+    expect(await readFile(join(libraryPath, "beta.png"))).toEqual(betaBytes)
+    expect(await exists(join(libraryPath, "removed.png"))).toBe(false)
+    expect(await exists(removed)).toBe(true)
+    expect(await readFile(removed)).toEqual(removedBytes)
+
+    await page.getByRole("button", { name: "添加图片" }).click()
+    await page.getByRole("button", { name: "继续" }).click()
+    const overwrite = page.getByRole("dialog", { name: "确认覆盖同名图片" })
+    await expect(overwrite.getByText("alpha.png")).toBeVisible()
+    await overwrite.getByRole("button", { name: "覆盖并继续" }).click()
+    await expect(page.getByRole("button", { name: "预览 alpha.png" })).toBeVisible()
+    expect(await readFile(join(libraryPath, "alpha.png"))).toEqual(overwrittenAlpha)
+
+    await page.getByRole("button", { name: "预览 alpha.png" }).click()
+    const preview = page.getByRole("dialog", { name: "alpha.png" })
+    await expect(preview.getByRole("img", { name: "alpha.png" })).toBeVisible()
+    await expect(preview.getByText("1 × 1 像素")).toBeVisible()
+    await expect(preview.getByText(`${overwrittenAlpha.length} B`)).toBeVisible()
+    expect(await readFile(notePath)).toEqual(noteBefore)
+
+    await preview.getByRole("button", { name: "删除图片" }).click()
+    await page.getByRole("button", { name: "永久删除 alpha.png" }).click()
+    await expect(page.getByRole("button", { name: "预览 alpha.png" })).toHaveCount(0)
+    await page.getByRole("button", { name: "预览 beta.png" }).click()
+    await page.getByRole("button", { name: "删除图片" }).click()
+    await page.getByRole("button", { name: "永久删除 beta.png" }).click()
+    await expect(page.getByText("暂无图片")).toBeVisible()
+    expect(await exists(join(libraryPath, "alpha.png"))).toBe(false)
+    expect(await exists(join(libraryPath, "beta.png"))).toBe(false)
+    expect(await exists(join(libraryPath, ".gitkeep"))).toBe(true)
+    expect(await readFile(notePath)).toEqual(noteBefore)
+    expect(await readdir(join(garden.root, ".garden-publisher", "image-import"))).toEqual([])
   } catch (failure) {
     primaryFailure = failure
   }
 
   const cleanupFailures: unknown[] = []
-  if (clipboardSnapshotInstalled) {
-    try {
-      expect(await restoreClipboard(application)).toBe(
-        clipboardSafeToMutate ? "restored" : "unmodified",
-      )
-    } catch (failure) {
-      cleanupFailures.push(failure)
-    }
-  }
   if (chooserInstallationAttempted) {
     try {
       expect(await restoreImageChooser(application)).toBe(true)
@@ -784,6 +759,94 @@ test("manages a note image library", async () => {
       primaryFailure === undefined
         ? "The image library E2E cleanup failed."
         : "The image library E2E flow failed; cleanup results are attached.",
+    )
+  }
+})
+
+test("copies image Markdown without changing the note", async () => {
+  const garden = await createQuartzGardenFixture({
+    directoryName: "Clipboard Image Garden",
+    noteTitle: "Clipboard Image Note",
+    noteBody: "the markdown must remain byte-for-byte unchanged",
+  })
+  const stateRoot = await createTemporaryDirectory("garden-publisher-e2e-clipboard-")
+  const notePath = join(garden.root, ...garden.notePath.split("/"))
+  const libraryPath = join(garden.root, "content", "_assets", "fixture")
+  const imagePath = join(libraryPath, "alpha.png")
+  let application: ElectronApplication | undefined
+  let clipboardSnapshotInstalled = false
+  let clipboardSafeToMutate = false
+  let clipboardSkipReason: string | undefined
+  let primaryFailure: unknown
+  try {
+    await mkdir(libraryPath, { recursive: true })
+    await writeFile(imagePath, onePixelPng(255, 0, 0))
+    const noteBefore = await readFile(notePath)
+    application = await launchApplication(stateRoot, {
+      ...process.env,
+      GARDEN_PUBLISHER_E2E: "1",
+      GARDEN_PUBLISHER_E2E_WORKSPACE: garden.root,
+      GARDEN_PUBLISHER_E2E_RUNTIME: await createE2eRuntime(stateRoot),
+      GARDEN_PUBLISHER_E2E_REGISTRY: join(stateRoot, "blogs.json"),
+    })
+    const clipboardSnapshot = await snapshotClipboard(application)
+    clipboardSnapshotInstalled = true
+    clipboardSafeToMutate = clipboardSnapshot.safeToMutate
+    if (!clipboardSnapshot.safeToMutate) {
+      clipboardSkipReason =
+        "The legacy clipboard contains a format that cannot be restored atomically; leaving it untouched."
+    } else {
+      await verifyClipboardItemRoundTrip(application)
+      const page = await application.firstWindow()
+      await expect(page.locator('main[data-workspace-diagnostics="ready"]')).toBeVisible()
+      await page.getByRole("button", { name: "Clipboard Image Note，公开" }).click()
+      await page.getByRole("button", { name: "图片库" }).click()
+      await page.getByRole("button", { name: "预览 alpha.png" }).click()
+      const preview = page.getByRole("dialog", { name: "alpha.png" })
+      await preview.getByRole("button", { name: "复制 Markdown 链接" }).click()
+      await expect(preview.getByRole("status")).toHaveText("已复制 Markdown 链接")
+      expect(await application.evaluate(({ clipboard }) => clipboard.readText())).toBe(
+        "![alpha](<../_assets/fixture/alpha.png>)",
+      )
+      expect(await readFile(notePath)).toEqual(noteBefore)
+    }
+  } catch (failure) {
+    primaryFailure = failure
+  }
+
+  const cleanupFailures: unknown[] = []
+  if (clipboardSnapshotInstalled) {
+    try {
+      expect(await restoreClipboard(application)).toBe(
+        clipboardSafeToMutate ? "restored" : "unmodified",
+      )
+    } catch (failure) {
+      cleanupFailures.push(failure)
+    }
+  }
+  try {
+    await closeApplication(application)
+  } catch (failure) {
+    cleanupFailures.push(failure)
+  }
+  try {
+    await garden.cleanup()
+  } catch (failure) {
+    cleanupFailures.push(failure)
+  }
+  try {
+    await removeTemporaryDirectory(stateRoot)
+  } catch (failure) {
+    cleanupFailures.push(failure)
+  }
+
+  if (primaryFailure !== undefined && cleanupFailures.length === 0) throw primaryFailure
+  if (primaryFailure !== undefined || cleanupFailures.length > 0) {
+    throw new AggregateError(
+      primaryFailure === undefined ? cleanupFailures : [primaryFailure, ...cleanupFailures],
+      primaryFailure === undefined
+        ? "The clipboard E2E cleanup failed."
+        : "The clipboard E2E flow failed; cleanup results are attached.",
     )
   }
   if (clipboardSkipReason) test.skip(true, clipboardSkipReason)
