@@ -1219,6 +1219,17 @@ describe("publisher main layout", () => {
     expect(newNote).toHaveFocus()
   })
 
+  it("opens the selected note image library without changing the editor document", async () => {
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(await screen.findByRole("button", { name: "打开图片库" }))
+    const dialog = await screen.findByRole("dialog", { name: "CSS Grid 布局 图片库" })
+    expect(dialog).toHaveTextContent(notes[0].path)
+    expect(dialog).toHaveTextContent("不会修改当前 Markdown 笔记")
+    expect(garden.images.open).toHaveBeenCalledWith({ path: notes[0].path })
+  })
+
   it("attributes a late visibility failure to its original note", async () => {
     const user = userEvent.setup()
     let resolveVisibility: ((value: IpcResult<NoteTransactionReceipt>) => void) | undefined

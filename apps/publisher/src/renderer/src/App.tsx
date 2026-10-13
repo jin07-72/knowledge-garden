@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { flushSync } from "react-dom"
-import { BookOpen, Check, Eye, GitBranch, LoaderCircle, Trash2, TriangleAlert } from "lucide-react"
+import { BookOpen, Check, Eye, GitBranch, Images, LoaderCircle, Trash2, TriangleAlert } from "lucide-react"
 import type {
   AppError,
   BlogAddLocalRequest,
@@ -35,6 +35,7 @@ import { DeleteNoteDialog } from "./components/DeleteNoteDialog"
 import { BlogSwitcher } from "./components/BlogSwitcher"
 import { BlogManager, type BlogImportUiState } from "./components/BlogManager"
 import { DomainManager } from "./components/DomainManager"
+import { ImageLibrary } from "./components/ImageLibrary"
 import "./app.css"
 
 type LoadState = "loading" | "ready" | "error"
@@ -214,6 +215,7 @@ export function PublisherApp({
     messages: readonly string[]
   }>()
   const [pendingDelete, setPendingDelete] = useState<NoteSummary>()
+  const [imageLibraryOpen, setImageLibraryOpen] = useState(false)
   const [trashNotice, setTrashNotice] = useState<string>()
   const [workspaceWidth, setWorkspaceWidth] = useState(window.innerWidth || 1440)
   const initialPaneSizes = useRef(storedPaneSizes(workspaceWidth))
@@ -977,6 +979,14 @@ export function PublisherApp({
                 />
                 <button
                   type="button"
+                  className="icon-button"
+                  aria-label="打开图片库"
+                  onClick={() => setImageLibraryOpen(true)}
+                >
+                  <Images size={17} aria-hidden="true" />
+                </button>
+                <button
+                  type="button"
                   className="icon-button danger-icon-button"
                   aria-label="删除当前笔记"
                   onClick={() => setPendingDelete(selectedNote)}
@@ -1165,6 +1175,14 @@ export function PublisherApp({
             setPendingDelete(undefined)
             requestAnimationFrame(() => postDeleteFocus.current?.focus())
           }}
+        />
+      ) : null}
+      {imageLibraryOpen && selectedNote ? (
+        <ImageLibrary
+          path={selectedNote.path}
+          title={selectedNote.title}
+          api={api.images}
+          onClose={() => setImageLibraryOpen(false)}
         />
       ) : null}
       {domainManagerOpen ? (
