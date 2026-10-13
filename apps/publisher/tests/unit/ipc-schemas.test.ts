@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 import {
+  type AppError,
   IMAGE_LIBRARY_MAX_GALLERY_THUMBNAIL_TOTAL_LENGTH,
   IMAGE_LIBRARY_MAX_ITEMS,
   IMAGE_LIBRARY_MAX_NAME_LENGTH,
@@ -35,6 +36,19 @@ import {
 } from "../../src/shared/ipcSchemas"
 
 const privateField = { privateSource: "must-not-cross" }
+
+const publishBranchRepairErrors = [
+  { code: "PUBLISH_BRANCH_REPAIR_REQUIRED", message: "Branch repair is required." },
+  { code: "PUBLISH_BRANCH_REPAIR_BLOCKED", message: "Branch repair is blocked." },
+  { code: "PUBLISH_BRANCH_REPAIR_FAILED", message: "Branch repair failed." },
+  { code: "PUBLISH_BRANCH_REPAIR_UNCERTAIN", message: "Branch repair is uncertain." },
+] as const satisfies readonly AppError[]
+
+describe("publish branch repair failures", () => {
+  it.each(publishBranchRepairErrors)("accepts $code as a public application error", (failure) => {
+    expect(appErrorSchema.safeParse(failure).success).toBe(true)
+  })
+})
 
 describe("public domain failures", () => {
   it.each([
@@ -225,6 +239,12 @@ const validByChannel: Record<string, unknown> = {
     ...privateField,
   },
   [IPC_CHANNELS.requests.publishStart]: { operationId: "publish-1", ...privateField },
+  [IPC_CHANNELS.requests.publishRepairBranch]: {
+    branch: "main",
+    upstream: "origin/main",
+    head: "a".repeat(40),
+    ...privateField,
+  },
   [IPC_CHANNELS.requests.publishCancel]: undefined,
   [IPC_CHANNELS.requests.historyGit]: [
     {
@@ -716,6 +736,54 @@ describe("image library IPC schemas", () => {
 })
 
 describe("IPC success schemas", () => {
+  it("defines the publish branch repair request channel", () => {
+    expect(IPC_CHANNELS.requests.publishRepairBranch).toBe("garden:publish:repair-branch")
+  })
+
+  it("strips extra fields from a valid publish branch repair receipt", () => {
+    const entry = Object.entries(IPC_SUCCESS_SCHEMAS).find(
+      ([channel]) => channel === "garden:publish:repair-branch",
+    )
+    expect(entry, "publish branch repair schema").toBeDefined()
+    if (entry === undefined) return
+
+    expect(
+      entry[1].safeParse({
+        branch: "main",
+        upstream: "origin/main",
+        head: "a".repeat(40),
+        privateSource: "must-not-cross",
+      }),
+    ).toEqual({
+      success: true,
+      data: { branch: "main", upstream: "origin/main", head: "a".repeat(40) },
+    })
+  })
+
+  it("rejects master and invalid upstreams in publish branch repair receipts", () => {
+    const entry = Object.entries(IPC_SUCCESS_SCHEMAS).find(
+      ([channel]) => channel === "garden:publish:repair-branch",
+    )
+    expect(entry, "publish branch repair schema").toBeDefined()
+    if (entry === undefined) return
+    const receipt = { branch: "main", upstream: "origin/main", head: "a".repeat(40) }
+
+    expect(entry[1].safeParse({ ...receipt, branch: "master" }).success).toBe(false)
+    expect(entry[1].safeParse({ ...receipt, upstream: "origin/master" }).success).toBe(false)
+  })
+
+  it("rejects invalid publish branch repair commit hashes", () => {
+    const entry = Object.entries(IPC_SUCCESS_SCHEMAS).find(
+      ([channel]) => channel === "garden:publish:repair-branch",
+    )
+    expect(entry, "publish branch repair schema").toBeDefined()
+    if (entry === undefined) return
+    const receipt = { branch: "main", upstream: "origin/main", head: "a".repeat(40) }
+
+    for (const head of ["a".repeat(39), "a".repeat(65), "A".repeat(40), "g".repeat(40)])
+      expect(entry[1].safeParse({ ...receipt, head }).success, head).toBe(false)
+  })
+
   it("validates dynamic domain contracts and rejects unsafe requests", () => {
     expect(IPC_SUCCESS_SCHEMAS[IPC_CHANNELS.requests.domainsList].parse([customDomain])).toEqual([
       customDomain,

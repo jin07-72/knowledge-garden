@@ -63,6 +63,10 @@ export const APP_ERROR_CODES = [
   "DEPENDENCIES_INVALID",
   "PREVIEW_PORT_UNAVAILABLE",
   "REPAIR_FAILED",
+  "PUBLISH_BRANCH_REPAIR_REQUIRED",
+  "PUBLISH_BRANCH_REPAIR_BLOCKED",
+  "PUBLISH_BRANCH_REPAIR_FAILED",
+  "PUBLISH_BRANCH_REPAIR_UNCERTAIN",
   "CHANGE_SCAN_INVALID",
   "CHANGE_SCAN_LIMIT",
   "CHANGE_SCAN_CANCELLED",
@@ -455,6 +459,7 @@ export const IPC_CHANNELS = {
     changesList: "garden:changes:list",
     changesCancel: "garden:changes:cancel",
     publishStart: "garden:publish:start",
+    publishRepairBranch: "garden:publish:repair-branch",
     publishCancel: "garden:publish:cancel",
     historyGit: "garden:history:git",
     historyDeployments: "garden:history:deployments",
@@ -647,6 +652,12 @@ export interface PublishStartReceipt {
   readonly operationId: string
 }
 
+export interface PublishBranchRepairReceipt {
+  readonly branch: "main"
+  readonly upstream: "origin/main"
+  readonly head: string
+}
+
 export interface HistoryRequest {
   readonly limit?: number
   readonly requestId?: string
@@ -732,6 +743,7 @@ export interface GardenApi {
   }
   readonly publish: {
     start(request: PublishRequest): Promise<IpcResult<PublishStartReceipt>>
+    repairBranch(): Promise<IpcResult<PublishBranchRepairReceipt>>
     cancel(request: PublishCancelRequest): Promise<IpcResult<void>>
     onProgress(listener: (progress: PublishProgress) => void): Unsubscribe
   }

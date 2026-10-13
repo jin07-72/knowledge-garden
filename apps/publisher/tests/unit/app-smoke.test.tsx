@@ -136,7 +136,12 @@ function gardenApi(): GardenApi {
       })),
       cancel: vi.fn(async () => ok(undefined)),
     },
-    publish: { start: vi.fn(), cancel: vi.fn(), onProgress: vi.fn(() => () => undefined) },
+    publish: {
+      start: vi.fn(),
+      repairBranch: vi.fn(),
+      cancel: vi.fn(),
+      onProgress: vi.fn(() => () => undefined),
+    },
     history: {
       git: vi.fn(),
       deployments: vi.fn(),

@@ -613,6 +613,13 @@ const changeReviewSchema = z
   .strip()
   .refine((value) => utf8ByteLength(JSON.stringify(value)) <= 512 * 1024)
 const publishStartReceiptSchema = z.object({ operationId: z.string().min(1).max(128) }).strip()
+const publishBranchRepairReceiptSchema = z
+  .object({
+    branch: z.literal("main"),
+    upstream: z.literal("origin/main"),
+    head: z.string().regex(/^[a-f0-9]{40,64}$/),
+  })
+  .strip()
 const gitCommitSchema = z
   .object({
     id: z.string().min(1).max(128),
@@ -752,6 +759,7 @@ export const IPC_SUCCESS_SCHEMAS = {
   [IPC_CHANNELS.requests.changesList]: changeReviewSchema,
   [IPC_CHANNELS.requests.changesCancel]: z.undefined(),
   [IPC_CHANNELS.requests.publishStart]: publishStartReceiptSchema,
+  [IPC_CHANNELS.requests.publishRepairBranch]: publishBranchRepairReceiptSchema,
   [IPC_CHANNELS.requests.publishCancel]: z.undefined(),
   [IPC_CHANNELS.requests.historyGit]: z.array(gitCommitSchema).max(500),
   [IPC_CHANNELS.requests.historyDeployments]: deploymentHistorySchema,

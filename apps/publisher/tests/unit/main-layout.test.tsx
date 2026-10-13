@@ -234,6 +234,7 @@ function createGardenMock(): GardenApi {
     },
     publish: {
       start: vi.fn(),
+      repairBranch: vi.fn(),
       cancel: vi.fn(),
       onProgress: vi.fn(() => () => undefined),
     },
