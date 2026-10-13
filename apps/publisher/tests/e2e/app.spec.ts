@@ -1,4 +1,4 @@
-import { _electron as electron, expect, test } from "@playwright/test"
+import { _electron as electron, expect, test, type Locator } from "@playwright/test"
 import type { ChildProcess } from "node:child_process"
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises"
 import { basename, dirname, join, resolve } from "node:path"
@@ -47,6 +47,18 @@ function onePixelPng(red: number, green: number, blue: number): Buffer {
     pngChunk("IDAT", deflateSync(Buffer.from([0, red, green, blue, 255]))),
     pngChunk("IEND", Buffer.alloc(0)),
   ])
+}
+
+async function expectDecodedImage(image: Locator): Promise<void> {
+  await expect(image).toBeVisible()
+  await expect
+    .poll(() =>
+      image.evaluate((element) => {
+        const decoded = element as HTMLImageElement
+        return decoded.complete && decoded.naturalWidth > 0 && decoded.naturalHeight > 0
+      }),
+    )
+    .toBe(true)
 }
 
 function childHasExited(child: ChildProcess): boolean {
@@ -167,16 +179,20 @@ async function installImageChooser(
   }, selections)
 }
 
-async function restoreImageChooser(application: ElectronApplication | undefined): Promise<void> {
-  if (!application) return
-  await application.evaluate(({ dialog }) => {
+async function restoreImageChooser(application: ElectronApplication | undefined): Promise<boolean> {
+  if (!application) return false
+  return application.evaluate(({ dialog }) => {
     const state = dialog as typeof dialog & {
       __gardenImageDialog?: typeof dialog.showOpenDialog
       __gardenImageSelections?: string[][]
     }
-    if (state.__gardenImageDialog) dialog.showOpenDialog = state.__gardenImageDialog
+    const original = state.__gardenImageDialog
+    if (!original) return false
+    dialog.showOpenDialog = original
+    const restored = dialog.showOpenDialog === original
     delete state.__gardenImageDialog
     delete state.__gardenImageSelections
+    return restored
   })
 }
 
@@ -289,9 +305,13 @@ test("manages a note image library", async () => {
   const originalAlpha = onePixelPng(255, 0, 0)
   const overwrittenAlpha = onePixelPng(0, 255, 0)
   const betaBytes = onePixelPng(0, 0, 255)
+  const removedBytes = onePixelPng(255, 255, 0)
   const notePath = join(garden.root, ...garden.notePath.split("/"))
   const libraryPath = join(garden.root, "content", "_assets", "fixture")
   let application: ElectronApplication | undefined
+  let originalClipboard: string | undefined
+  let chooserInstallationAttempted = false
+  let primaryFailure: unknown
   try {
     await Promise.all([
       mkdir(sources, { recursive: true }),
@@ -300,7 +320,7 @@ test("manages a note image library", async () => {
     await Promise.all([
       writeFile(alpha, originalAlpha),
       writeFile(beta, betaBytes),
-      writeFile(removed, onePixelPng(255, 255, 0)),
+      writeFile(removed, removedBytes),
       writeFile(replacementAlpha, overwrittenAlpha),
     ])
     const noteBefore = await readFile(notePath)
@@ -311,6 +331,8 @@ test("manages a note image library", async () => {
       GARDEN_PUBLISHER_E2E_RUNTIME: await createE2eRuntime(stateRoot),
       GARDEN_PUBLISHER_E2E_REGISTRY: join(stateRoot, "blogs.json"),
     })
+    originalClipboard = await application.evaluate(({ clipboard }) => clipboard.readText())
+    chooserInstallationAttempted = true
     await installImageChooser(application, [[alpha, beta, removed], [replacementAlpha]])
     const page = await application.firstWindow()
     await expect(page.locator('main[data-workspace-diagnostics="ready"]')).toBeVisible()
@@ -327,14 +349,23 @@ test("manages a note image library", async () => {
     await expect(candidates.getByText("alpha.png")).toBeVisible()
     await expect(candidates.getByText("beta.png")).toBeVisible()
     await expect(candidates.getByText("removed.png")).toBeVisible()
+    for (const name of ["alpha.png", "beta.png", "removed.png"]) {
+      await expectDecodedImage(candidates.locator("li", { hasText: name }).locator("img"))
+    }
     await candidates.getByRole("button", { name: "移除 removed.png" }).click()
     await expect(candidates.getByText("removed.png")).toHaveCount(0)
     await candidates.getByRole("button", { name: "确认添加 2 张图片" }).click()
-    await expect(page.getByRole("button", { name: "预览 alpha.png" })).toBeVisible()
-    await expect(page.getByRole("button", { name: "预览 beta.png" })).toBeVisible()
+    for (const name of ["alpha.png", "beta.png"]) {
+      const thumbnail = page.getByRole("button", { name: `预览 ${name}` })
+      await expect(thumbnail).toBeVisible()
+      await expectDecodedImage(thumbnail.locator("img"))
+    }
     expect(await exists(join(libraryPath, ".gitkeep"))).toBe(false)
     expect(await readFile(join(libraryPath, "alpha.png"))).toEqual(originalAlpha)
     expect(await readFile(join(libraryPath, "beta.png"))).toEqual(betaBytes)
+    expect(await exists(join(libraryPath, "removed.png"))).toBe(false)
+    expect(await exists(removed)).toBe(true)
+    expect(await readFile(removed)).toEqual(removedBytes)
 
     await page.getByRole("button", { name: "添加图片" }).click()
     await page.getByRole("button", { name: "继续" }).click()
@@ -367,11 +398,51 @@ test("manages a note image library", async () => {
     expect(await exists(join(libraryPath, ".gitkeep"))).toBe(true)
     expect(await readFile(notePath)).toEqual(noteBefore)
     expect(await readdir(join(garden.root, ".garden-publisher", "image-import"))).toEqual([])
-  } finally {
-    await restoreImageChooser(application).catch(() => undefined)
+  } catch (failure) {
+    primaryFailure = failure
+  }
+
+  const cleanupFailures: unknown[] = []
+  if (application && originalClipboard !== undefined) {
+    try {
+      await application.evaluate(({ clipboard }, text) => clipboard.writeText(text), originalClipboard)
+      const restoredClipboard = await application.evaluate(({ clipboard }) => clipboard.readText())
+      expect(restoredClipboard).toBe(originalClipboard)
+    } catch (failure) {
+      cleanupFailures.push(failure)
+    }
+  }
+  if (chooserInstallationAttempted) {
+    try {
+      expect(await restoreImageChooser(application)).toBe(true)
+    } catch (failure) {
+      cleanupFailures.push(failure)
+    }
+  }
+  try {
     await closeApplication(application)
+  } catch (failure) {
+    cleanupFailures.push(failure)
+  }
+  try {
     await garden.cleanup()
+  } catch (failure) {
+    cleanupFailures.push(failure)
+  }
+  try {
     await removeTemporaryDirectory(stateRoot)
+  } catch (failure) {
+    cleanupFailures.push(failure)
+  }
+
+  if (primaryFailure !== undefined && cleanupFailures.length === 0) throw primaryFailure
+  if (primaryFailure !== undefined || cleanupFailures.length > 0) {
+    throw new AggregateError(
+      primaryFailure === undefined ? cleanupFailures : [primaryFailure, ...cleanupFailures],
+      primaryFailure === undefined
+        ? "The image library E2E cleanup failed."
+        : "The image library E2E flow failed; cleanup results are attached.",
+    )
   }
 })
 
