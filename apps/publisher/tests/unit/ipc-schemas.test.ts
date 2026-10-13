@@ -451,6 +451,8 @@ describe("image library IPC schemas", () => {
     expect(commit.safeParse({ ...valid, overwrite: ["hero.png", "hero.png"] }).success).toBe(
       false,
     )
+    expect(commit.safeParse({ ...valid, include: ["hero.png"], overwrite: ["HERO.PNG"] }).success).toBe(true)
+    expect(commit.safeParse({ ...valid, overwrite: ["missing.png"] }).success).toBe(false)
     expect(
       commit.safeParse({ ...valid, overwrite: Array.from({ length: 51 }, (_, i) => `${i}.png`) })
         .success,

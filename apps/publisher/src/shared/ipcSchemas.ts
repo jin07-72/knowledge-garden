@@ -333,6 +333,13 @@ export const imageLibraryCommitRequestSchema = z
     { path: ["include"] },
   )
   .refine(({ overwrite }) => uniqueImageNames(overwrite), { path: ["overwrite"] })
+  .refine(
+    ({ include, overwrite }) => {
+      const included = new Set(include.map((name) => name.toLowerCase()))
+      return overwrite.every((name) => included.has(name.toLowerCase()))
+    },
+    { path: ["overwrite"] },
+  )
 
 const imageLibraryItemSchema = z
   .object({

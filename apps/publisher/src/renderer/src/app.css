@@ -2072,7 +2072,6 @@ button {
   min-height: 260px;
   max-height: 52vh;
   place-items: center;
-  overflow: auto;
   padding: 12px;
   border: 1px solid #313943;
   border-radius: 9px;

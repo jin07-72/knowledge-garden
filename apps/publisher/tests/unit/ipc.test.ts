@@ -1040,6 +1040,16 @@ describe("secure publisher IPC", () => {
         "imagesCommit",
       ],
       [
+        IPC_CHANNELS.requests.imagesCommit,
+        {
+          path: "content/life/daily.md",
+          selectionId: "11111111-1111-4111-8111-111111111111",
+          include: ["cover.png"],
+          overwrite: ["other.png"],
+        },
+        "imagesCommit",
+      ],
+      [
         IPC_CHANNELS.requests.imagesPreview,
         { path: "content/life/daily.md", name: "../secret.png" },
         "imagesPreview",

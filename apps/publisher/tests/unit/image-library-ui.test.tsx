@@ -119,6 +119,105 @@ describe("ImageLibrary", () => {
     expect(await screen.findByRole("button", { name: "预览 two.png" })).toBeVisible()
   })
 
+  it("clears a failed commit token, refreshes the gallery, and only permits a new selection", async () => {
+    const user = userEvent.setup()
+    const first: ImageLibrarySelection = {
+      cancelled: false,
+      selectionId: "selection-old",
+      images: [{ ...item("old.png"), conflict: false }],
+      conflicts: [],
+    }
+    const second: ImageLibrarySelection = {
+      cancelled: false,
+      selectionId: "selection-new",
+      images: [{ ...item("new.png"), conflict: false }],
+      conflicts: [],
+    }
+    const open = vi.fn().mockResolvedValue(ok(view())).mockResolvedValue(ok(view()))
+    const select = vi.fn().mockResolvedValueOnce(ok(first)).mockResolvedValueOnce(ok(second))
+    const commit = vi.fn().mockResolvedValueOnce(rejected<ImageLibraryView>("导入结果未知")).mockResolvedValueOnce(ok(view(item("new.png"))))
+    const images = api({ open, select, commit })
+    render(<ImageLibrary path={path} title="Daily" api={images} onClose={vi.fn()} />)
+    await screen.findByText("暂无图片")
+
+    await user.click(screen.getByRole("button", { name: "添加图片" }))
+    await user.click(await screen.findByRole("button", { name: "确认添加 1 张图片" }))
+    expect(await screen.findByRole("alert")).toHaveTextContent("导入结果未知")
+    expect(screen.getByRole("alert")).toHaveTextContent("请重新选择图片")
+    expect(screen.getByRole("button", { name: "添加图片" })).toBeVisible()
+    expect(open).toHaveBeenCalledTimes(2)
+    expect(commit).toHaveBeenCalledTimes(1)
+    expect(commit).toHaveBeenLastCalledWith(expect.objectContaining({ selectionId: "selection-old" }))
+
+    await user.click(screen.getByRole("button", { name: "添加图片" }))
+    await user.click(await screen.findByRole("button", { name: "确认添加 1 张图片" }))
+    await waitFor(() =>
+      expect(commit).toHaveBeenLastCalledWith(expect.objectContaining({ selectionId: "selection-new" })),
+    )
+    expect(commit).toHaveBeenCalledTimes(2)
+  })
+
+  it("keeps a usable gallery error when the post-failure refresh is unavailable", async () => {
+    const user = userEvent.setup()
+    const selection: ImageLibrarySelection = {
+      cancelled: false,
+      selectionId: "selection-refresh-failure",
+      images: [{ ...item("photo.png"), conflict: false }],
+      conflicts: [],
+    }
+    const images = api({
+      open: vi.fn().mockResolvedValueOnce(ok(view())).mockResolvedValueOnce(rejected<ImageLibraryView>("图库连接断开")),
+      select: vi.fn(async () => ok(selection)),
+      commit: vi.fn(async () => rejected<ImageLibraryView>("导入状态未知")),
+    })
+    render(<ImageLibrary path={path} title="Daily" api={images} onClose={vi.fn()} />)
+    await screen.findByText("暂无图片")
+    await user.click(screen.getByRole("button", { name: "添加图片" }))
+    await user.click(await screen.findByRole("button", { name: "确认添加 1 张图片" }))
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("导入状态未知")
+    expect(screen.getByRole("alert")).toHaveTextContent("请重新选择图片")
+    expect(screen.getByRole("alert")).toHaveTextContent("无法刷新图片库")
+    expect(screen.getByRole("button", { name: "添加图片" })).toBeEnabled()
+    expect(screen.getByRole("button", { name: "重试" })).toBeEnabled()
+  })
+
+  it("moves focus to stable controls through selection, gallery, preview, and deletion views", async () => {
+    const user = userEvent.setup()
+    const selection: ImageLibrarySelection = {
+      cancelled: false,
+      selectionId: "selection-focus",
+      images: [{ ...item("one.png"), conflict: false }, { ...item("two.png"), conflict: false }],
+      conflicts: [],
+    }
+    const photo = item("photo.png")
+    const images = api({
+      open: vi.fn(async () => ok(view(photo))),
+      select: vi.fn(async () => ok(selection)),
+    })
+    render(<ImageLibrary path={path} title="Daily" api={images} onClose={vi.fn()} />)
+    await screen.findByRole("button", { name: "预览 photo.png" })
+
+    await user.click(screen.getByRole("button", { name: "添加图片" }))
+    expect(await screen.findByRole("button", { name: "移除 one.png" })).toHaveFocus()
+    await user.click(screen.getByRole("button", { name: "移除 one.png" }))
+    expect(screen.getByRole("button", { name: "移除 two.png" })).toHaveFocus()
+    await user.click(screen.getByRole("button", { name: "移除 two.png" }))
+    expect(screen.getByRole("button", { name: "取消" })).toHaveFocus()
+    expect(screen.getByRole("button", { name: /确认添加/ })).toBeDisabled()
+    await user.click(screen.getByRole("button", { name: "取消" }))
+    expect(screen.getByRole("button", { name: "关闭图片库" })).toHaveFocus()
+
+    await user.click(screen.getByRole("button", { name: "预览 photo.png" }))
+    expect(await screen.findByRole("button", { name: "返回图片库" })).toHaveFocus()
+    await user.click(screen.getByRole("button", { name: "删除图片" }))
+    const dialog = screen.getByRole("dialog")
+    expect(screen.getByRole("button", { name: "取消删除" })).toHaveFocus()
+    await user.tab()
+    await user.tab()
+    expect(dialog.contains(document.activeElement)).toBe(true)
+  })
+
   it("summarizes all conflicts and requires explicit overwrite approval", async () => {
     const user = userEvent.setup()
     const selection: ImageLibrarySelection = {

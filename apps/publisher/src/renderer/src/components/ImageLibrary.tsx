@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { Copy, ImagePlus, Trash2, X } from "lucide-react"
 import type {
   GardenApi,
@@ -84,7 +84,7 @@ export function ImageLibrary({ path, title, api, onClose }: ImageLibraryProps): 
     setFailedAction(action)
   }, [isCurrent])
 
-  const loadLibrary = useCallback(async (): Promise<void> => {
+  const loadLibrary = useCallback(async (postRefreshError?: string): Promise<void> => {
     const token = beginRequest("open")
     if (token === undefined) return
     try {
@@ -94,9 +94,16 @@ export function ImageLibrary({ path, title, api, onClose }: ImageLibraryProps): 
       setScreen({ kind: "gallery" })
       setPreview(undefined)
       setCopyFeedback("")
+      if (postRefreshError) {
+        setError(postRefreshError)
+        setFailedAction(undefined)
+      }
       finishRequest(token)
     } catch (failure) {
-      failRequest(token, "open", failure, "无法读取图片库，请重试。")
+      const fallback = postRefreshError
+        ? `${postRefreshError} 无法刷新图片库，请重试。`
+        : "无法读取图片库，请重试。"
+      failRequest(token, "open", postRefreshError ? new Error(fallback) : failure, fallback)
     }
   }, [api, beginRequest, failRequest, finishRequest, isCurrent, path])
 
@@ -128,10 +135,9 @@ export function ImageLibrary({ path, title, api, onClose }: ImageLibraryProps): 
     }
   }, [loadLibrary])
 
-  useEffect(() => {
-    if (screen.kind === "gallery") return
-    viewFocus.current?.focus()
-  }, [confirmOverwrite, screen.kind])
+  useLayoutEffect(() => {
+    ;(screen.kind === "gallery" ? closeButton : viewFocus).current?.focus()
+  }, [busy, confirmOverwrite, screen.kind, selectedNames.length])
 
   const close = (): void => {
     if (busy === "commit" || busy === "delete") return
@@ -193,7 +199,16 @@ export function ImageLibrary({ path, title, api, onClose }: ImageLibraryProps): 
       setConfirmOverwrite(false)
       finishRequest(token)
     } catch (failure) {
-      failRequest(token, "commit", failure, "无法添加图片，请重试。")
+      if (!isCurrent(token)) return
+      actionLock.current = undefined
+      setBusy(undefined)
+      setScreen({ kind: "gallery" })
+      setSelectedNames([])
+      setConfirmOverwrite(false)
+      setPreview(undefined)
+      setCopyFeedback("")
+      const message = `${messageFor(failure, "无法添加图片。")} 请重新选择图片。`
+      void loadLibrary(message)
     }
   }
 
