@@ -1007,7 +1007,7 @@ describe("secure publisher IPC", () => {
       [IPC_CHANNELS.requests.imagesSelect, { path }, "imagesSelect"],
       [
         IPC_CHANNELS.requests.imagesCommit,
-        { path, selectionId, overwrite: ["cover.png"] },
+        { path, selectionId, include: ["cover.png"], overwrite: ["cover.png"] },
         "imagesCommit",
       ],
       [IPC_CHANNELS.requests.imagesPreview, { path, name: "cover.png" }, "imagesPreview"],
@@ -1036,7 +1036,7 @@ describe("secure publisher IPC", () => {
       [IPC_CHANNELS.requests.imagesSelect, { path: "../daily.md" }, "imagesSelect"],
       [
         IPC_CHANNELS.requests.imagesCommit,
-        { path: "content/life/daily.md", selectionId: "token", overwrite: [] },
+        { path: "content/life/daily.md", selectionId: "token", include: ["cover.png"], overwrite: [] },
         "imagesCommit",
       ],
       [
@@ -1570,6 +1570,7 @@ describe("preload garden API", () => {
       commit: {
         path: "content/life/a.md",
         selectionId: "11111111-1111-4111-8111-111111111111",
+        include: ["hero.png"],
         overwrite: ["hero.png"],
       },
       preview: { path: "content/life/a.md", name: "hero.png" },
@@ -1663,6 +1664,7 @@ describe("preload garden API", () => {
     await api.images.commit({
       path: "content/life/a.md",
       selectionId: "11111111-1111-4111-8111-111111111111",
+      include: ["hero.png"],
       overwrite: ["hero.png"],
     })
     await api.images.preview({ path: "content/life/a.md", name: "hero.png" })

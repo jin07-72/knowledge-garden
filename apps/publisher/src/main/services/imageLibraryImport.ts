@@ -494,9 +494,20 @@ export function createImageImportManager(options: { workspace: string; adapter: 
       sessions.delete(request.selectionId)
       if (session === undefined || session.path !== request.path || now() - session.created >= TTL_MS) throw changed("图片选择已失效，请重新选择。")
       await this.inspect()
+      const sourceByName = new Map(session.sources.map((source) => [key(source.item.name), source]))
+      const includeKeys = request.include.map(key)
+      if (
+        request.include.length === 0 ||
+        new Set(includeKeys).size !== includeKeys.length ||
+        includeKeys.some((name) => !sourceByName.has(name))
+      ) throw invalid("提交候选与预检图片不一致。")
+      const includedSources = includeKeys.map((name) => sourceByName.get(name)!)
+      const includedConflictKeys = includedSources
+        .filter((source) => session.conflicts.some((conflict) => key(conflict) === key(source.item.name)))
+        .map((source) => key(source.item.name))
       const overwriteKeys = request.overwrite.map(key)
-      if (new Set(overwriteKeys).size !== overwriteKeys.length || overwriteKeys.some((name) => !session.conflicts.some((conflict) => key(conflict) === name)) || session.conflicts.some((name) => !overwriteKeys.includes(key(name)))) throw invalid("覆盖授权与预检冲突不一致。")
-      for (const source of session.sources) await exactFile(source.path, source)
+      if (new Set(overwriteKeys).size !== overwriteKeys.length || overwriteKeys.some((name) => !includedConflictKeys.includes(name)) || includedConflictKeys.some((name) => !overwriteKeys.includes(name))) throw invalid("覆盖授权与预检冲突不一致。")
+      for (const source of includedSources) await exactFile(source.path, source)
       const notePath = join(options.workspace, ...request.path.split("/"))
       const currentNote = await sourceSnapshot(notePath)
       if (!sameIdentity(currentNote.identity, session.note.identity) || currentNote.hash !== session.note.hash) throw changed("笔记已发生变化，请重新选择图片。")
@@ -505,11 +516,11 @@ export function createImageImportManager(options: { workspace: string; adapter: 
       if (!sameLibraryManifest(commitManifest, session.library)) throw changed("图片库自选择后已发生变化。")
       const currentNames = commitManifest.filter(({ name }) => name !== ".gitkeep").map(({ name }) => name)
       const current = new Map(currentNames.map((name) => [key(name), name]))
-      for (const source of session.sources) if (current.has(key(source.item.name)) && !overwriteKeys.includes(key(source.item.name))) throw changed("图片库出现未授权的新冲突。")
-      const additions = session.sources.filter(({ item }) => !current.has(key(item.name))).length
+      for (const source of includedSources) if (current.has(key(source.item.name)) && !overwriteKeys.includes(key(source.item.name))) throw changed("图片库出现未授权的新冲突。")
+      const additions = includedSources.filter(({ item }) => !current.has(key(item.name))).length
       if (currentNames.length + additions > IMAGE_LIBRARY_MAX_ITEMS) throw tooLarge()
       const targetProofs = new Map<string, FileProof>()
-      for (const source of session.sources) {
+      for (const source of includedSources) {
         const existingName = current.get(key(source.item.name))
         if (existingName !== undefined) {
           const snapshot = await sourceSnapshot(join(targetRoot, existingName))
@@ -535,7 +546,7 @@ export function createImageImportManager(options: { workspace: string; adapter: 
         selectionId: session.id, createdAt: now(), phase: "created",
         preState: {
           marker: markerProof === null ? null : serializedProof(markerProof),
-          targets: Object.fromEntries(session.sources.map((source) => {
+          targets: Object.fromEntries(includedSources.map((source) => {
             const proof = targetProofs.get(key(source.item.name))
             return [source.item.name, proof === undefined ? null : serializedProof(proof)]
           })),
@@ -551,7 +562,7 @@ export function createImageImportManager(options: { workspace: string; adapter: 
         stageLedger = { root: { path: stageRoot, proof: stageProof }, directories: [{ path: staged, proof: stagedProof }, { path: backups, proof: backupsProof }], files: new Map() }
         manifestWriter = await createManifestWriter(manifestPath, stageRoot, stageProof, manifest)
         stageLedger.files.set(manifestPath, manifestWriter.proof)
-        for (const source of session.sources) {
+        for (const source of includedSources) {
           const bytes = await exactFile(source.path, source)
           const handle = await open(join(staged, source.item.name), "wx", 0o600)
           try { await handle.writeFile(bytes); await handle.sync() } finally { await handle.close() }
@@ -564,7 +575,7 @@ export function createImageImportManager(options: { workspace: string; adapter: 
         await options.adapter.afterPhase?.("import-staged")
         if (!sameLibraryManifest(await readLibraryManifest(targetRoot, session.libraryDirectory), session.library)) throw changed("图片库在暂存期间发生变化。")
         let expectedWorking = [...session.library]
-        for (const source of session.sources) {
+        for (const source of includedSources) {
           await exactFile(source.path, source)
           const existingName = current.get(key(source.item.name)); const target = join(targetRoot, source.item.name)
           if (existingName !== undefined) {

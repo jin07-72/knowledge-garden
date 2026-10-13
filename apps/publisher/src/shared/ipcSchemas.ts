@@ -7,6 +7,7 @@ import {
   IMAGE_LIBRARY_MAX_PREVIEW_DATA_URL_LENGTH,
   IMAGE_LIBRARY_MAX_PREVIEW_DECODED_BYTES,
   IMAGE_LIBRARY_MAX_SELECTION_ITEMS,
+  IMAGE_LIBRARY_MAX_SELECTION_NAME_TOTAL_LENGTH,
   IMAGE_LIBRARY_MAX_SELECTION_THUMBNAIL_TOTAL_LENGTH,
   IMAGE_LIBRARY_MAX_THUMBNAIL_DATA_URL_LENGTH,
   IMAGE_LIBRARY_MAX_THUMBNAIL_DECODED_BYTES,
@@ -322,9 +323,15 @@ export const imageLibraryCommitRequestSchema = z
   .object({
     path: managedNotePathSchema,
     selectionId: z.string().uuid(),
+    include: z.array(imageNameSchema).min(1).max(IMAGE_LIBRARY_MAX_SELECTION_ITEMS),
     overwrite: z.array(imageNameSchema).max(IMAGE_LIBRARY_MAX_SELECTION_ITEMS),
   })
   .strict()
+  .refine(({ include }) => uniqueImageNames(include), { path: ["include"] })
+  .refine(
+    ({ include }) => include.reduce((total, name) => total + utf8ByteLength(name), 0) <= IMAGE_LIBRARY_MAX_SELECTION_NAME_TOTAL_LENGTH,
+    { path: ["include"] },
+  )
   .refine(({ overwrite }) => uniqueImageNames(overwrite), { path: ["overwrite"] })
 
 const imageLibraryItemSchema = z

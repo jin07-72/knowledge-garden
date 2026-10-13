@@ -494,6 +494,7 @@ export interface NotePathRequest {
 export const IMAGE_LIBRARY_MAX_NAME_LENGTH = 255
 export const IMAGE_LIBRARY_MAX_ITEMS = 500
 export const IMAGE_LIBRARY_MAX_SELECTION_ITEMS = 50
+export const IMAGE_LIBRARY_MAX_SELECTION_NAME_TOTAL_LENGTH = 8 * 1024
 export const IMAGE_LIBRARY_MAX_THUMBNAIL_DATA_URL_LENGTH = 512 * 1024
 export const IMAGE_LIBRARY_MAX_PREVIEW_DATA_URL_LENGTH = 36 * 1024 * 1024
 export const IMAGE_LIBRARY_MAX_THUMBNAIL_DECODED_BYTES = 512 * 1024
@@ -538,6 +539,7 @@ export interface ImageLibraryPreview extends Omit<ImageLibraryItem, "thumbnailDa
 
 export interface ImageLibraryCommitRequest extends NotePathRequest {
   readonly selectionId: string
+  readonly include: readonly string[]
   readonly overwrite: readonly string[]
 }
 

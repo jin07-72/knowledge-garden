@@ -427,16 +427,27 @@ describe("image library IPC schemas", () => {
     )
   })
 
-  it("requires UUID selections and a bounded, duplicate-free overwrite list", () => {
+  it("requires UUID selections and bounded, duplicate-free safe include and overwrite lists", () => {
     const commit = imageLibraryCommitRequestSchema
 
     const valid = {
       path: "content/life/daily.md",
       selectionId: "11111111-1111-4111-8111-111111111111",
+      include: ["hero.png", "diagram.avif"],
       overwrite: ["hero.png", "diagram.avif"],
     }
     expect(commit.safeParse(valid).success).toBe(true)
     expect(commit.safeParse({ ...valid, selectionId: "selection-1" }).success).toBe(false)
+    expect(commit.safeParse({ ...valid, include: [] }).success).toBe(false)
+    expect(commit.safeParse({ ...valid, include: ["hero.png", "HERO.PNG"] }).success).toBe(false)
+    expect(commit.safeParse({ ...valid, include: ["../hero.png"] }).success).toBe(false)
+    expect(commit.safeParse({ ...valid, include: Array.from({ length: 51 }, (_, i) => `${i}.png`) }).success).toBe(false)
+    expect(commit.safeParse({
+      ...valid,
+      include: Array.from({ length: 50 }, (_, index) => `${String(index).padStart(3, "0")}-${"a".repeat(247)}.png`),
+    }).success).toBe(false)
+    const { include: _include, ...withoutInclude } = valid
+    expect(commit.safeParse(withoutInclude).success).toBe(false)
     expect(commit.safeParse({ ...valid, overwrite: ["hero.png", "hero.png"] }).success).toBe(
       false,
     )

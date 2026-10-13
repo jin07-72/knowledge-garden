@@ -63,6 +63,54 @@ afterEach(async () => {
 })
 
 describe("image import transactions", () => {
+  it("commits only included candidates and neither reads nor imports removed conflicts", async () => {
+    const fixture = await setup()
+    const removed = join(fixture.root, "one.png")
+    const included = join(fixture.root, "two.png")
+    const existing = Uint8Array.from([...PNG, 7])
+    await writeFile(removed, Uint8Array.from([...PNG, 1]))
+    await writeFile(included, Uint8Array.from([...PNG, 2]))
+    await mkdir(fixture.library, { recursive: true })
+    await writeFile(join(fixture.library, "one.png"), existing)
+    const service = createImageLibraryService({
+      workspace: fixture.root,
+      adapter: adapter([removed, included]),
+    })
+    const selected = await service.select({ path: "content/life/daily.md" })
+    if (selected.cancelled) throw new Error("unexpected cancellation")
+    await rm(removed)
+
+    await expect(service.commit({
+      path: "content/life/daily.md",
+      selectionId: selected.selectionId,
+      include: ["two.png"],
+      overwrite: [],
+    })).resolves.toMatchObject({ images: [{ name: "one.png" }, { name: "two.png" }] })
+    expect(await readFile(join(fixture.library, "one.png"))).toEqual(Buffer.from(existing))
+    expect(await readFile(join(fixture.library, "two.png"))).toEqual(Buffer.from([...PNG, 2]))
+  })
+
+  it.each([
+    [] as string[],
+    ["photo.png", "photo.png"],
+    ["PHOTO.PNG", "photo.png"],
+    ["missing.png"],
+    ["../photo.png"],
+  ].map((include) => [include] as const))("rejects an invalid included candidate set %j", async (include) => {
+    const fixture = await setup()
+    const source = join(fixture.root, "photo.png")
+    await writeFile(source, PNG)
+    const service = createImageLibraryService({ workspace: fixture.root, adapter: adapter([source]) })
+    const selected = await service.select({ path: "content/life/daily.md" })
+    if (selected.cancelled) throw new Error("unexpected cancellation")
+    await expect(service.commit({
+      path: "content/life/daily.md",
+      selectionId: selected.selectionId,
+      include,
+      overwrite: [],
+    })).rejects.toMatchObject({ code: "IMAGE_LIBRARY_INVALID" })
+  })
+
   it("returns the exact cancellation shape without touching the filesystem", async () => {
     const fixture = await setup()
     const service = createImageLibraryService({ workspace: fixture.root, adapter: adapter(undefined) })
@@ -120,6 +168,7 @@ describe("image import transactions", () => {
     const view = await service.commit({
       path: "content/life/daily.md",
       selectionId: selection.selectionId,
+      include: selection.images.map(({ name }) => name),
       overwrite: [],
     })
     expect(view.images.map(({ name }) => name)).toEqual(["photo.png"])
@@ -127,7 +176,7 @@ describe("image import transactions", () => {
     await expect(readFile(join(fixture.library, ".gitkeep"))).rejects.toMatchObject({ code: "ENOENT" })
     expect(await readFile(fixture.note)).toEqual(before)
     await expect(
-      service.commit({ path: "content/life/daily.md", selectionId: selection.selectionId, overwrite: [] }),
+      service.commit({ path: "content/life/daily.md", selectionId: selection.selectionId, include: selection.images.map(({ name }) => name), overwrite: [] }),
     ).rejects.toMatchObject({ code: "IMAGE_LIBRARY_CHANGED" } satisfies Partial<AppError>)
   })
 
@@ -139,7 +188,7 @@ describe("image import transactions", () => {
     }
     const service = createImageLibraryService({ workspace: fixture.root, adapter: configured })
     const selected = await service.select({ path: "content/life/daily.md" }); if (selected.cancelled) throw new Error("cancelled")
-    await expect(service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, overwrite: [] })).rejects.toMatchObject({
+    await expect(service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, include: ["photo.png"], overwrite: [] })).rejects.toMatchObject({
       code: "IMAGE_LIBRARY_FAILED",
       details: { cleanupWarnings: expect.any(Array) },
     })
@@ -154,7 +203,7 @@ describe("image import transactions", () => {
     const selected = await service.select({ path: "content/life/daily.md" }); if (selected.cancelled) throw new Error("cancelled")
     const stageRoot = join(fixture.root, ".garden-publisher", "image-import", selected.selectionId)
     cleanupFault.path = join(stageRoot, "manifest.json")
-    await expect(service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, overwrite: ["photo.png"] })).rejects.toMatchObject({
+    await expect(service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, include: ["photo.png"], overwrite: ["photo.png"] })).rejects.toMatchObject({
       code: "IMAGE_LIBRARY_FAILED",
       details: { cleanupWarnings: expect.any(Array) },
     })
@@ -168,7 +217,7 @@ describe("image import transactions", () => {
     const service = createImageLibraryService({ workspace: fixture.root, adapter: adapter([source]) })
     const selected = await service.select({ path: "content/life/daily.md" }); if (selected.cancelled) throw new Error("cancelled")
     importFault.path = join(fixture.library, "photo.png")
-    await expect(service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, overwrite: [] })).rejects.toMatchObject({ code: "IMAGE_LIBRARY_INVALID" })
+    await expect(service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, include: ["photo.png"], overwrite: [] })).rejects.toMatchObject({ code: "IMAGE_LIBRARY_INVALID" })
     await expect(readFile(join(fixture.library, "photo.png"))).rejects.toMatchObject({ code: "ENOENT" })
     expect(await readFile(join(fixture.library, ".gitkeep"))).toEqual(Buffer.alloc(0))
     expect(await readdir(join(fixture.root, ".garden-publisher", "image-import"))).toEqual([])
@@ -180,7 +229,7 @@ describe("image import transactions", () => {
     const selected = await service.select({ path: "content/life/daily.md" }); if (selected.cancelled) throw new Error("cancelled")
     const target = join(fixture.library, "photo.png")
     importFault.path = target; importFault.replacement = PNG
-    const caught = await service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, overwrite: [] }).catch((error) => error as AppError)
+    const caught = await service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, include: ["photo.png"], overwrite: [] }).catch((error) => error as AppError)
     expect(caught).toMatchObject({ code: "IMAGE_LIBRARY_FAILED", details: { cleanupWarnings: expect.any(Array) } })
     expect((await lstat(target, { bigint: true })).ino).toBe(importFault.replacementIdentity)
     expect(await readFile(target)).toEqual(Buffer.from(PNG))
@@ -197,7 +246,7 @@ describe("image import transactions", () => {
     }
     const service = createImageLibraryService({ workspace: fixture.root, adapter: configured })
     const selected = await service.select({ path: "content/life/daily.md" }); if (selected.cancelled) throw new Error("cancelled")
-    const committing = service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, overwrite: [] })
+    const committing = service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, include: ["photo.png"], overwrite: [] })
     await started
     const disposing = service.dispose()
     const externalOpen = service.open({ path: "content/life/daily.md" })
@@ -227,7 +276,7 @@ describe("image import transactions", () => {
     expect(selection.cancelled).toBe(false)
     await disposing
     if (selection.cancelled) throw new Error("unexpected cancellation")
-    await expect(service.commit({ path: "content/life/daily.md", selectionId: selection.selectionId, overwrite: [] }))
+    await expect(service.commit({ path: "content/life/daily.md", selectionId: selection.selectionId, include: ["photo.png"], overwrite: [] }))
       .rejects.toMatchObject({ code: "IMAGE_LIBRARY_FAILED" })
   })
 
@@ -242,7 +291,7 @@ describe("image import transactions", () => {
     if (selection.cancelled) throw new Error("unexpected cancellation")
     try { await symlink(outside, join(fixture.root, ".garden-publisher", "image-import"), process.platform === "win32" ? "junction" : "dir") }
     catch (error) { if (["EPERM", "EACCES"].includes((error as NodeJS.ErrnoException).code ?? "")) skip(); throw error }
-    await expect(service.commit({ path: "content/life/daily.md", selectionId: selection.selectionId, overwrite: [] }))
+    await expect(service.commit({ path: "content/life/daily.md", selectionId: selection.selectionId, include: ["photo.png"], overwrite: [] }))
       .rejects.toMatchObject({ code: expect.stringMatching(/^IMAGE_LIBRARY_/) })
     expect(await readdir(outside)).toEqual([])
   })
@@ -262,7 +311,7 @@ describe("image import transactions", () => {
     const service = createImageLibraryService({ workspace: fixture.root, adapter: configured })
     const selection = await service.select({ path: "content/life/daily.md" })
     if (selection.cancelled) throw new Error("unexpected cancellation")
-    await expect(service.commit({ path: "content/life/daily.md", selectionId: selection.selectionId, overwrite: ["photo.png"] }))
+    await expect(service.commit({ path: "content/life/daily.md", selectionId: selection.selectionId, include: ["photo.png"], overwrite: ["photo.png"] }))
       .rejects.toMatchObject({ code: "IMAGE_LIBRARY_CHANGED" })
     expect((await lstat(target, { bigint: true })).ino).toBe(replacementIdentity)
   })
@@ -282,7 +331,7 @@ describe("image import transactions", () => {
     const service = createImageLibraryService({ workspace: fixture.root, adapter: configured })
     const selection = await service.select({ path: "content/life/daily.md" })
     if (selection.cancelled) throw new Error("unexpected cancellation")
-    const caught = await service.commit({ path: "content/life/daily.md", selectionId: selection.selectionId, overwrite: [] }).catch((error) => error as AppError)
+    const caught = await service.commit({ path: "content/life/daily.md", selectionId: selection.selectionId, include: ["photo.png"], overwrite: [] }).catch((error) => error as AppError)
     expect(caught).toMatchObject({ code: "IMAGE_LIBRARY_FAILED", details: { cleanupWarnings: expect.any(Array) } })
     expect((await lstat(join(fixture.library, "photo.png"), { bigint: true })).ino).toBe(replacementIdentity)
   })
@@ -377,7 +426,7 @@ describe("image import transactions", () => {
     }
     const service = createImageLibraryService({ workspace: fixture.root, adapter: configured })
     const selected = await service.select({ path: "content/life/daily.md" }); if (selected.cancelled) throw new Error("cancelled")
-    await expect(service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, overwrite: [] })).rejects.toMatchObject({ code: "IMAGE_LIBRARY_CHANGED" })
+    await expect(service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, include: ["photo.png"], overwrite: [] })).rejects.toMatchObject({ code: "IMAGE_LIBRARY_CHANGED" })
     expect(await readFile(join(fixture.library, "unrelated.png"))).toEqual(Buffer.from(PNG))
     await expect(readFile(join(fixture.library, "photo.png"))).rejects.toMatchObject({ code: "ENOENT" })
   })
@@ -390,7 +439,7 @@ describe("image import transactions", () => {
     await rm(target)
     if (mutation === "change-hash") await writeFile(target, Uint8Array.from([...PNG, 99]))
     if (mutation === "change-type") await mkdir(target)
-    await expect(service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, overwrite: ["photo.png"] })).rejects.toMatchObject({ code: "IMAGE_LIBRARY_CHANGED" })
+    await expect(service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, include: ["photo.png"], overwrite: ["photo.png"] })).rejects.toMatchObject({ code: "IMAGE_LIBRARY_CHANGED" })
   })
 
   it("preserves a late exact-name target and reports changed", async () => {
@@ -400,7 +449,7 @@ describe("image import transactions", () => {
     }
     const service = createImageLibraryService({ workspace: fixture.root, adapter: configured })
     const selected = await service.select({ path: "content/life/daily.md" }); if (selected.cancelled) throw new Error("cancelled")
-    await expect(service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, overwrite: [] })).rejects.toMatchObject({ code: "IMAGE_LIBRARY_CHANGED" })
+    await expect(service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, include: ["photo.png"], overwrite: [] })).rejects.toMatchObject({ code: "IMAGE_LIBRARY_CHANGED" })
     expect(await readFile(join(fixture.library, "photo.png"))).toEqual(Buffer.from(external))
   })
 
@@ -414,7 +463,7 @@ describe("image import transactions", () => {
       }
     }
     const service = createImageLibraryService({ workspace: fixture.root, adapter: configured }); const selected = await service.select({ path: "content/life/daily.md" }); if (selected.cancelled) throw new Error("cancelled"); selectionId = selected.selectionId
-    const caught = await service.commit({ path: "content/life/daily.md", selectionId, overwrite: [] }).catch((error) => error as AppError)
+    const caught = await service.commit({ path: "content/life/daily.md", selectionId, include: ["photo.png"], overwrite: [] }).catch((error) => error as AppError)
     expect(caught).toMatchObject({ code: "IMAGE_LIBRARY_FAILED", details: { cleanupWarnings: expect.any(Array) } })
     const staged = join(fixture.root, ".garden-publisher", "image-import", selectionId, "new", "photo.png")
     expect((await lstat(staged, { bigint: true })).ino).toBe(stagedReplacementIdentity)
@@ -432,7 +481,7 @@ describe("image import transactions", () => {
     }
     const service = createImageLibraryService({ workspace: fixture.root, adapter: configured })
     const selected = await service.select({ path: "content/life/daily.md" }); if (selected.cancelled) throw new Error("cancelled")
-    await expect(service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, overwrite: [] })).rejects.toMatchObject({ code: "IMAGE_LIBRARY_CHANGED" })
+    await expect(service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, include: ["photo.png"], overwrite: [] })).rejects.toMatchObject({ code: "IMAGE_LIBRARY_CHANGED" })
     expect((await lstat(join(fixture.library, ".gitkeep"), { bigint: true })).ino).toBe(replacementIdentity)
   })
 
@@ -448,7 +497,7 @@ describe("image import transactions", () => {
     }
     const service = createImageLibraryService({ workspace: fixture.root, adapter: configured })
     const selected = await service.select({ path: "content/life/daily.md" }); if (selected.cancelled) throw new Error("cancelled"); selectionId = selected.selectionId
-    await expect(service.commit({ path: "content/life/daily.md", selectionId, overwrite: [] })).rejects.toMatchObject({ code: "IMAGE_LIBRARY_FAILED" })
+    await expect(service.commit({ path: "content/life/daily.md", selectionId, include: ["photo.png"], overwrite: [] })).rejects.toMatchObject({ code: "IMAGE_LIBRARY_FAILED" })
     expect(await readFile(outside, "utf8")).toBe("external")
   })
 
@@ -462,7 +511,7 @@ describe("image import transactions", () => {
     }
     const service = createImageLibraryService({ workspace: fixture.root, adapter: configured })
     const selected = await service.select({ path: "content/life/daily.md" }); if (selected.cancelled) throw new Error("cancelled"); selectionId = selected.selectionId
-    const caught = await service.commit({ path: "content/life/daily.md", selectionId, overwrite: [] }).catch((error) => error as AppError)
+    const caught = await service.commit({ path: "content/life/daily.md", selectionId, include: ["photo.png"], overwrite: [] }).catch((error) => error as AppError)
     expect(caught).toMatchObject({ code: "IMAGE_LIBRARY_FAILED", details: { cleanupWarnings: expect.any(Array) } })
     expect(await readFile(join(fixture.root, ".garden-publisher", "image-import", selectionId, "manifest.json"), "utf8")).toBe("external replacement")
   })
@@ -479,7 +528,7 @@ describe("image import transactions", () => {
     }
     const service = createImageLibraryService({ workspace: fixture.root, adapter: configured })
     const selected = await service.select({ path: "content/life/daily.md" }); if (selected.cancelled) throw new Error("cancelled"); selectionId = selected.selectionId
-    const caught = await service.commit({ path: "content/life/daily.md", selectionId, overwrite: [] }).catch((error) => error as AppError)
+    const caught = await service.commit({ path: "content/life/daily.md", selectionId, include: ["photo.png"], overwrite: [] }).catch((error) => error as AppError)
     expect(caught).toMatchObject({ code: "IMAGE_LIBRARY_FAILED", details: { cleanupWarnings: expect.any(Array) } })
     expect((await lstat(join(fixture.root, ".garden-publisher", "image-import", selectionId))).isDirectory()).toBe(true)
   })
@@ -491,7 +540,7 @@ describe("image import transactions", () => {
     const selected = await service.select({ path: "content/life/daily.md" }); if (selected.cancelled) throw new Error("cancelled")
     const backup = join(fixture.root, ".garden-publisher", "image-import", selected.selectionId, "backup", "photo.png")
     importFault.path = backup
-    const caught = await service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, overwrite: ["photo.png"] }).catch((error) => error as AppError)
+    const caught = await service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, include: ["photo.png"], overwrite: ["photo.png"] }).catch((error) => error as AppError)
     expect(caught).toMatchObject({ code: "IMAGE_LIBRARY_FAILED" })
     expect(await readFile(join(fixture.library, "photo.png"))).toEqual(Buffer.from(PNG))
     await expect(readFile(backup)).rejects.toMatchObject({ code: "ENOENT" })
@@ -502,7 +551,7 @@ describe("image import transactions", () => {
     const service = createImageLibraryService({ workspace: fixture.root, adapter: adapter([source]) }); const selected = await service.select({ path: "content/life/daily.md" }); if (selected.cancelled) throw new Error("cancelled")
     const marker = join(fixture.library, ".gitkeep"); const originalIdentity = (await lstat(marker, { bigint: true })).ino
     importFault.path = join(fixture.root, ".garden-publisher", "image-import", selected.selectionId, "backup", ".gitkeep")
-    await expect(service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, overwrite: [] })).rejects.toMatchObject({ code: "IMAGE_LIBRARY_FAILED" })
+    await expect(service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, include: ["photo.png"], overwrite: [] })).rejects.toMatchObject({ code: "IMAGE_LIBRARY_FAILED" })
     expect((await lstat(marker, { bigint: true })).ino).toBe(originalIdentity)
   })
 
@@ -516,7 +565,7 @@ describe("image import transactions", () => {
       }
     }
     const service = createImageLibraryService({ workspace: fixture.root, adapter: configured }); const selected = await service.select({ path: "content/life/daily.md" }); if (selected.cancelled) throw new Error("cancelled"); selectionId = selected.selectionId
-    const caught: AppError = await service.commit({ path: "content/life/daily.md", selectionId, overwrite: kind === "image" ? ["photo.png"] : [] }).then(
+    const caught: AppError = await service.commit({ path: "content/life/daily.md", selectionId, include: ["photo.png"], overwrite: kind === "image" ? ["photo.png"] : [] }).then(
       () => { throw new Error("expected commit to fail") },
       (error) => error as AppError,
     )
@@ -547,7 +596,7 @@ describe("image import transactions", () => {
       }
     }
     const service = createImageLibraryService({ workspace: fixture.root, adapter: configured }); const selected = await service.select({ path: "content/life/daily.md" }); if (selected.cancelled) throw new Error("cancelled"); selectionId = selected.selectionId
-    const caught = await service.commit({ path: "content/life/daily.md", selectionId, overwrite: ["photo.png"] }).catch((error) => error as AppError)
+    const caught = await service.commit({ path: "content/life/daily.md", selectionId, include: ["photo.png"], overwrite: ["photo.png"] }).catch((error) => error as AppError)
     expect(caught).toMatchObject({ code: "IMAGE_LIBRARY_FAILED", details: { cleanupWarnings: expect.any(Array) } })
     const backup = join(fixture.root, ".garden-publisher", "image-import", selectionId, "backup", "photo.png")
     expect((await lstat(backup, { bigint: true })).ino).toBe(replacementIdentity)
@@ -565,9 +614,9 @@ describe("image import transactions", () => {
       const selected = await service.select({ path: "content/life/daily.md" }); if (selected.cancelled) throw new Error("cancelled")
       ids.push(selected.selectionId)
     }
-    await expect(service.commit({ path: "content/life/daily.md", selectionId: ids[0]!, overwrite: [] })).rejects.toMatchObject({ code: "IMAGE_LIBRARY_CHANGED" })
+    await expect(service.commit({ path: "content/life/daily.md", selectionId: ids[0]!, include: ["photo.png"], overwrite: [] })).rejects.toMatchObject({ code: "IMAGE_LIBRARY_CHANGED" })
     clock = 8 + 5 * 60 * 1000
-    await expect(service.commit({ path: "content/life/daily.md", selectionId: ids[8]!, overwrite: [] })).rejects.toMatchObject({ code: "IMAGE_LIBRARY_CHANGED" })
+    await expect(service.commit({ path: "content/life/daily.md", selectionId: ids[8]!, include: ["photo.png"], overwrite: [] })).rejects.toMatchObject({ code: "IMAGE_LIBRARY_CHANGED" })
   })
 
   it("accepts a token one millisecond before five minutes", async () => {
@@ -576,7 +625,7 @@ describe("image import transactions", () => {
     const service = createImageLibraryService({ workspace: fixture.root, adapter: configured })
     const selected = await service.select({ path: "content/life/daily.md" }); if (selected.cancelled) throw new Error("cancelled")
     clock = 5 * 60 * 1000 - 1
-    await expect(service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, overwrite: [] })).resolves.toMatchObject({ images: [{ name: "photo.png" }] })
+    await expect(service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, include: ["photo.png"], overwrite: [] })).resolves.toMatchObject({ images: [{ name: "photo.png" }] })
   })
 
   it("rejects two names that resolve to the same source file identity", async () => {
@@ -599,13 +648,13 @@ describe("image import transactions", () => {
       const source = join(fixture.root, "photo.png"); await writeFile(source, Uint8Array.from([...PNG, 7])); await writeFile(join(fixture.library, "PHOTO.PNG"), PNG)
       const service = createImageLibraryService({ workspace: fixture.root, adapter: adapter([source]) })
       const selected = await service.select({ path: "content/life/daily.md" }); if (selected.cancelled) throw new Error("cancelled")
-      await expect(service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, overwrite })).rejects.toMatchObject({ code: "IMAGE_LIBRARY_INVALID" })
+      await expect(service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, include: ["photo.png"], overwrite })).rejects.toMatchObject({ code: "IMAGE_LIBRARY_INVALID" })
     }
     const fixture = await setup(); await mkdir(fixture.library, { recursive: true })
     const source = join(fixture.root, "photo.png"); const replacement = Uint8Array.from([...PNG, 8]); await writeFile(source, replacement); await writeFile(join(fixture.library, "PHOTO.PNG"), PNG)
     const service = createImageLibraryService({ workspace: fixture.root, adapter: adapter([source]) })
     const selected = await service.select({ path: "content/life/daily.md" }); if (selected.cancelled) throw new Error("cancelled")
-    await expect(service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, overwrite: ["PHOTO.PNG"] })).resolves.toMatchObject({ images: [{ name: "photo.png" }] })
+    await expect(service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, include: ["photo.png"], overwrite: ["PHOTO.PNG"] })).resolves.toMatchObject({ images: [{ name: "photo.png" }] })
     expect(await readFile(join(fixture.library, "photo.png"))).toEqual(Buffer.from(replacement))
   })
 
@@ -614,7 +663,7 @@ describe("image import transactions", () => {
     const service = createImageLibraryService({ workspace: fixture.root, adapter: adapter([source]) })
     const selected = await service.select({ path: "content/life/daily.md" }); if (selected.cancelled) throw new Error("cancelled")
     await writeFile(join(fixture.library, "PHOTO.PNG"), PNG)
-    await expect(service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, overwrite: [] })).rejects.toMatchObject({ code: "IMAGE_LIBRARY_CHANGED" })
+    await expect(service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, include: ["photo.png"], overwrite: [] })).rejects.toMatchObject({ code: "IMAGE_LIBRARY_CHANGED" })
   })
 
   it.each(["import-staged", "import-backed-up", "import-published", "import-marker-removed"] as const)("rolls back exactly after %s failure", async (phase) => {
@@ -626,7 +675,7 @@ describe("image import transactions", () => {
     const service = createImageLibraryService({ workspace: fixture.root, adapter: configured })
     const selected = await service.select({ path: "content/life/daily.md" }); if (selected.cancelled) throw new Error("cancelled")
     const markerIdentity = phase === "import-backed-up" ? undefined : (await lstat(join(fixture.library, ".gitkeep"), { bigint: true })).ino
-    await expect(service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, overwrite: phase === "import-backed-up" ? ["photo.png"] : [] })).rejects.toMatchObject({ code: "IMAGE_LIBRARY_FAILED" })
+    await expect(service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, include: ["photo.png"], overwrite: phase === "import-backed-up" ? ["photo.png"] : [] })).rejects.toMatchObject({ code: "IMAGE_LIBRARY_FAILED" })
     if (phase === "import-backed-up") expect(await readFile(join(fixture.library, "photo.png"))).toEqual(Buffer.from(old))
     else await expect(readFile(join(fixture.library, "photo.png"))).rejects.toMatchObject({ code: "ENOENT" })
     if (phase === "import-backed-up") await expect(readFile(join(fixture.library, ".gitkeep"))).rejects.toMatchObject({ code: "ENOENT" })
@@ -641,7 +690,7 @@ describe("image import transactions", () => {
     let published = 0; const configured = adapter(sources); configured.afterPhase = (phase) => { if (phase === "import-published" && ++published === failAt) throw new Error("injected") }
     const service = createImageLibraryService({ workspace: fixture.root, adapter: configured })
     const selected = await service.select({ path: "content/life/daily.md" }); if (selected.cancelled) throw new Error("cancelled")
-    await expect(service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, overwrite: [] })).rejects.toMatchObject({ code: "IMAGE_LIBRARY_FAILED" })
+    await expect(service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, include: ["one.png", "two.png"], overwrite: [] })).rejects.toMatchObject({ code: "IMAGE_LIBRARY_FAILED" })
     for (const name of ["one.png", "two.png"]) await expect(readFile(join(fixture.library, name))).rejects.toMatchObject({ code: "ENOENT" })
     expect(await readFile(join(fixture.library, ".gitkeep"))).toEqual(Buffer.alloc(0))
   })
@@ -652,11 +701,11 @@ describe("image import transactions", () => {
     const configured = adapter([source]); configured.afterPhase = async (phase) => { if (phase === "import-staged") await gate }
     const service = createImageLibraryService({ workspace: fixture.root, adapter: configured })
     const selected = await service.select({ path: "content/life/daily.md" }); if (selected.cancelled) throw new Error("cancelled")
-    const committing = service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, overwrite: [] })
+    const committing = service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, include: ["photo.png"], overwrite: [] })
     let disposed = false; const disposing = service.dispose().then(() => { disposed = true })
     await Promise.resolve(); expect(disposed).toBe(false); release()
     await expect(committing).resolves.toMatchObject({ images: [{ name: "photo.png" }] }); await disposing
-    await expect(service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, overwrite: [] })).rejects.toMatchObject({ code: "IMAGE_LIBRARY_FAILED" })
+    await expect(service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, include: ["photo.png"], overwrite: [] })).rejects.toMatchObject({ code: "IMAGE_LIBRARY_FAILED" })
   })
 
   it("accepts 50 sources and rejects 51", async () => {
@@ -684,8 +733,8 @@ describe("image import transactions", () => {
     await mkdir(join(fixture.root, "content", "work")); await writeFile(join(fixture.root, "content", "work", "other.md"), "# other\n")
     const service = createImageLibraryService({ workspace: fixture.root, adapter: adapter([source]) })
     const selected = await service.select({ path: "content/life/daily.md" }); if (selected.cancelled) throw new Error("cancelled")
-    await expect(service.commit({ path: "content/work/other.md", selectionId: selected.selectionId, overwrite: [] })).rejects.toMatchObject({ code: "IMAGE_LIBRARY_CHANGED" })
-    await expect(service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, overwrite: [] })).rejects.toMatchObject({ code: "IMAGE_LIBRARY_CHANGED" })
+    await expect(service.commit({ path: "content/work/other.md", selectionId: selected.selectionId, include: ["photo.png"], overwrite: [] })).rejects.toMatchObject({ code: "IMAGE_LIBRARY_CHANGED" })
+    await expect(service.commit({ path: "content/life/daily.md", selectionId: selected.selectionId, include: ["photo.png"], overwrite: [] })).rejects.toMatchObject({ code: "IMAGE_LIBRARY_CHANGED" })
   })
 
   it("rejects nonregular and linked image sources", async ({ skip }) => {
