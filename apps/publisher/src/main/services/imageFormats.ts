@@ -92,7 +92,7 @@ function uint64(bytes: Uint8Array, offset: number): number | undefined {
   return high * 0x1_0000_0000 + uint32(bytes, offset + 4)
 }
 
-function isAvif(bytes: Uint8Array): boolean {
+function hasAvifBrand(bytes: Uint8Array, brand: "avif" | "avis"): boolean {
   if (bytes.length < 16 || !hasAscii(bytes, 4, "ftyp")) return false
   const shortSize = uint32(bytes, 0)
   const extended = shortSize === 1
@@ -109,14 +109,17 @@ function isAvif(bytes: Uint8Array): boolean {
   )
     return false
   if (
-    hasAscii(bytes, majorBrandOffset, "avif") ||
-    hasAscii(bytes, majorBrandOffset, "avis")
+    hasAscii(bytes, majorBrandOffset, brand)
   )
     return true
   for (let offset = compatibleBrandsOffset; offset < boxSize; offset += 4) {
-    if (hasAscii(bytes, offset, "avif") || hasAscii(bytes, offset, "avis")) return true
+    if (hasAscii(bytes, offset, brand)) return true
   }
   return false
+}
+
+function isAvif(bytes: Uint8Array): boolean {
+  return hasAvifBrand(bytes, "avif") || hasAvifBrand(bytes, "avis")
 }
 
 function matchesSignature(bytes: Uint8Array, signature: Signature): boolean {
@@ -466,6 +469,8 @@ const ISO_MAX_NESTING = 16
 interface IsoWalkState extends HeaderBudget {
   boxes: number
   hasMediaData: boolean
+  av01Entries: number
+  requiresAv01Sample: boolean
 }
 
 function isoBox(bytes: Uint8Array, offset: number, parentEnd: number, state: IsoWalkState): IsoBox {
@@ -498,17 +503,73 @@ function isoBox(bytes: Uint8Array, offset: number, parentEnd: number, state: Iso
   }
 }
 
+function av1SampleEntry(
+  bytes: Uint8Array,
+  entry: IsoBox,
+  found: Array<{ width: number; height: number }>,
+  state: IsoWalkState,
+): void {
+  const visualSampleEntryBytes = 78
+  if (entry.end - entry.data < visualSampleEntryBytes) throw invalidImage()
+  inspectHeader(state, visualSampleEntryBytes)
+  const width = uint16(bytes, entry.data + 24)
+  const height = uint16(bytes, entry.data + 26)
+  boundedDimensions(width, height, "image/avif")
+  found.push({ width, height })
+  let offset = entry.data + visualSampleEntryBytes
+  let configurationBoxes = 0
+  while (offset < entry.end) {
+    const child = isoBox(bytes, offset, entry.end, state)
+    if (child.type === "av1C") {
+      if (configurationBoxes !== 0 || child.end - child.data < 4) throw invalidImage()
+      inspectHeader(state, 4)
+      if (bytes[child.data] !== 0x81) throw invalidImage()
+      configurationBoxes += 1
+    }
+    offset = child.end
+  }
+  if (offset !== entry.end || configurationBoxes !== 1) throw invalidImage()
+  state.av01Entries += 1
+}
+
+function sampleDescriptionBox(
+  bytes: Uint8Array,
+  box: IsoBox,
+  found: Array<{ width: number; height: number }>,
+  state: IsoWalkState,
+): void {
+  if (box.end - box.data < 8) throw invalidImage()
+  inspectHeader(state, 8)
+  if (bytes[box.data] !== 0 || bytes[box.data + 1] !== 0 || bytes[box.data + 2] !== 0 || bytes[box.data + 3] !== 0)
+    throw invalidImage()
+  const entryCount = uint32(bytes, box.data + 4)
+  if (entryCount === 0 || entryCount > ISO_MAX_BOXES) throw invalidImage()
+  let offset = box.data + 8
+  for (let entryIndex = 0; entryIndex < entryCount; entryIndex += 1) {
+    const entry = isoBox(bytes, offset, box.end, state)
+    if (entry.type !== "av01") throw invalidImage()
+    av1SampleEntry(bytes, entry, found, state)
+    offset = entry.end
+  }
+  if (offset !== box.end) throw invalidImage()
+}
+
 function collectAvifDimensions(
   bytes: Uint8Array,
   start: number,
   end: number,
-  container: "top" | "meta" | "iprp" | "ipco" | "moov" | "trak",
+  container: "top" | "meta" | "iprp" | "ipco" | "moov" | "trak" | "mdia" | "minf" | "stbl",
   found: Array<{ width: number; height: number }>,
   state: IsoWalkState,
   depth: number,
 ): void {
   if (depth > ISO_MAX_NESTING) throw invalidImage()
   let offset = start
+  let hasTrackHeader = false
+  let hasMedia = false
+  let hasMediaInformation = false
+  let hasSampleTable = false
+  let hasSampleDescription = false
   while (offset < end) {
     const box = isoBox(bytes, offset, end, state)
     if (box.end <= offset) throw invalidImage()
@@ -524,18 +585,32 @@ function collectAvifDimensions(
       if (box.data + 12 !== box.end) throw invalidImage()
       inspectHeader(state, 12)
       found.push({ width: uint32(bytes, box.data + 4), height: uint32(bytes, box.data + 8) })
-    } else if (container === "top" && box.type === "moov") {
+    } else if (container === "top" && box.type === "moov" && state.requiresAv01Sample) {
       collectAvifDimensions(bytes, box.data, box.end, "moov", found, state, depth + 1)
     } else if (container === "moov" && box.type === "trak") {
       collectAvifDimensions(bytes, box.data, box.end, "trak", found, state, depth + 1)
     } else if (container === "trak" && box.type === "tkhd") {
+      if (hasTrackHeader || hasMedia) throw invalidImage()
       const payloadSize = box.end - box.data
       if (payloadSize !== 84 && payloadSize !== 96) throw invalidImage()
       inspectHeader(state, 12)
-      found.push({
-        width: Math.ceil(uint32(bytes, box.end - 8) / 0x1_0000),
-        height: Math.ceil(uint32(bytes, box.end - 4) / 0x1_0000),
-      })
+      hasTrackHeader = true
+    } else if (container === "trak" && box.type === "mdia") {
+      if (!hasTrackHeader || hasMedia) throw invalidImage()
+      collectAvifDimensions(bytes, box.data, box.end, "mdia", found, state, depth + 1)
+      hasMedia = true
+    } else if (container === "mdia" && box.type === "minf") {
+      if (hasMediaInformation) throw invalidImage()
+      collectAvifDimensions(bytes, box.data, box.end, "minf", found, state, depth + 1)
+      hasMediaInformation = true
+    } else if (container === "minf" && box.type === "stbl") {
+      if (hasSampleTable) throw invalidImage()
+      collectAvifDimensions(bytes, box.data, box.end, "stbl", found, state, depth + 1)
+      hasSampleTable = true
+    } else if (container === "stbl" && box.type === "stsd") {
+      if (hasSampleDescription) throw invalidImage()
+      sampleDescriptionBox(bytes, box, found, state)
+      hasSampleDescription = true
     } else if (container === "top" && box.type === "mdat") {
       if (box.data === box.end) throw invalidImage()
       state.hasMediaData = true
@@ -543,13 +618,32 @@ function collectAvifDimensions(
     offset = box.end
   }
   if (offset !== end) throw invalidImage()
+  if (
+    (container === "trak" && (!hasTrackHeader || !hasMedia)) ||
+    (container === "mdia" && !hasMediaInformation) ||
+    (container === "minf" && !hasSampleTable) ||
+    (container === "stbl" && !hasSampleDescription)
+  )
+    throw invalidImage()
 }
 
 function avifMetadata(bytes: Uint8Array): BoundedImageMetadata {
   const found: Array<{ width: number; height: number }> = []
-  const state: IsoWalkState = { inspected: 0, boxes: 0, hasMediaData: false }
+  const requiresAv01Sample = hasAvifBrand(bytes, "avis")
+  const state: IsoWalkState = {
+    inspected: 0,
+    boxes: 0,
+    hasMediaData: false,
+    av01Entries: 0,
+    requiresAv01Sample,
+  }
   collectAvifDimensions(bytes, 0, bytes.length, "top", found, state, 0)
-  if (found.length === 0 || !state.hasMediaData) throw invalidImage()
+  if (
+    found.length === 0 ||
+    !state.hasMediaData ||
+    (requiresAv01Sample && state.av01Entries === 0)
+  )
+    throw invalidImage()
   let maximum = boundedDimensions(found[0].width, found[0].height, "image/avif")
   for (const dimensions of found.slice(1)) {
     const candidate = boundedDimensions(dimensions.width, dimensions.height, "image/avif")

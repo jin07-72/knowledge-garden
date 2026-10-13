@@ -22,6 +22,7 @@ const uint32Bytes = (value: number) =>
   bytes((value >>> 24) & 0xff, (value >>> 16) & 0xff, (value >>> 8) & 0xff, value & 0xff)
 const uint32LittleEndian = (value: number) =>
   bytes(value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff)
+const uint16Bytes = (value: number) => bytes((value >>> 8) & 0xff, value & 0xff)
 
 function pngHeader(width: number, height: number): Uint8Array {
   return append(
@@ -255,14 +256,42 @@ function isoBox(type: string, payload: Uint8Array): Uint8Array {
   return append(uint32Bytes(8 + payload.length), ascii(type), payload)
 }
 
-function avisSequenceWithLargeLeadingMediaData(width: number, height: number, payloadBytes: number): Uint8Array {
+function av1Configuration(markerVersion = 0x81): Uint8Array {
+  return isoBox("av1C", bytes(markerVersion, 0, 0, 0))
+}
+
+function av1SampleEntry(width: number, height: number, markerVersion = 0x81): Uint8Array {
+  const visualSampleEntry = new Uint8Array(78)
+  visualSampleEntry.set(uint16Bytes(width), 24)
+  visualSampleEntry.set(uint16Bytes(height), 26)
+  return isoBox("av01", append(visualSampleEntry, av1Configuration(markerVersion)))
+}
+
+function avisSequenceWithLargeLeadingMediaData(
+  displayWidth: number,
+  displayHeight: number,
+  entries: readonly Uint8Array[],
+  payloadBytes: number,
+  reorderTrackBoxes = false,
+): Uint8Array {
   const trackHeader = new Uint8Array(84)
-  trackHeader.set(uint32Bytes(width * 0x1_0000), 76)
-  trackHeader.set(uint32Bytes(height * 0x1_0000), 80)
+  trackHeader.set(uint32Bytes(displayWidth * 0x1_0000), 76)
+  trackHeader.set(uint32Bytes(displayHeight * 0x1_0000), 80)
   const mdat = new Uint8Array(8 + payloadBytes)
   mdat.set(uint32Bytes(mdat.length), 0)
   mdat.set(ascii("mdat"), 4)
-  return append(avifHeader("avis"), mdat, isoBox("moov", isoBox("trak", isoBox("tkhd", trackHeader))))
+  const stsd = isoBox("stsd", append(bytes(0, 0, 0, 0), uint32Bytes(entries.length), ...entries))
+  const stbl = isoBox("stbl", stsd)
+  const minf = isoBox("minf", stbl)
+  const mdia = isoBox("mdia", minf)
+  const trackChildren = append(
+    ...(reorderTrackBoxes ? [mdia, isoBox("tkhd", trackHeader)] : [isoBox("tkhd", trackHeader), mdia]),
+  )
+  return append(
+    avifHeader("avis"),
+    mdat,
+    isoBox("moov", isoBox("trak", trackChildren)),
+  )
 }
 
 function avifHeader(
@@ -541,11 +570,65 @@ describe("bounded image metadata", () => {
   })
 
   it("finds avis track dimensions after a large leading mdat", () => {
-    expect(readBoundedImageMetadata(avisSequenceWithLargeLeadingMediaData(640, 480, 1_048_578))).toEqual({
-      width: 640,
-      height: 480,
-      mime: "image/avif",
-    })
+    expect(
+      readBoundedImageMetadata(
+        avisSequenceWithLargeLeadingMediaData(640, 480, [av1SampleEntry(640, 480)], 1_048_578),
+      ),
+    ).toEqual({ width: 640, height: 480, mime: "image/avif" })
+  })
+
+  it("uses every avis av01 sample entry rather than the smaller track header", () => {
+    const smallerTrack = avisSequenceWithLargeLeadingMediaData(
+      1,
+      1,
+      [av1SampleEntry(16_385, 1)],
+      1,
+    )
+    expect(() => readBoundedImageMetadata(smallerTrack)).toThrow(
+      expect.objectContaining({ code: "IMAGE_LIBRARY_TOO_LARGE" }),
+    )
+  })
+
+  it("accepts the avis pixel boundary and rejects any oversized av01 entry", () => {
+    expect(
+      readBoundedImageMetadata(
+        avisSequenceWithLargeLeadingMediaData(1, 1, [av1SampleEntry(10_000, 4_000)], 1),
+      ),
+    ).toMatchObject({ width: 10_000, height: 4_000, mime: "image/avif" })
+    expect(() =>
+      readBoundedImageMetadata(
+        avisSequenceWithLargeLeadingMediaData(
+          1,
+          1,
+          [av1SampleEntry(640, 480), av1SampleEntry(16_385, 1)],
+          1,
+        ),
+      ),
+    ).toThrow(expect.objectContaining({ code: "IMAGE_LIBRARY_TOO_LARGE" }))
+  })
+
+  it("fails closed for avis sample-description counts, sizes, and configuration records", () => {
+    const valid = avisSequenceWithLargeLeadingMediaData(640, 480, [av1SampleEntry(640, 480)], 1)
+    const malformedCount = valid.slice()
+    const stsd = Buffer.from("stsd", "ascii")
+    const stsdOffset = malformedCount.findIndex(
+      (value, index) => value === stsd[0] && malformedCount[index + 1] === stsd[1] && malformedCount[index + 2] === stsd[2] && malformedCount[index + 3] === stsd[3],
+    )
+    malformedCount.set(uint32Bytes(2), stsdOffset + 8 + 4)
+    const malformedFullBox = valid.slice()
+    malformedFullBox[stsdOffset + 4] = 1
+    const malformedAv1C = avisSequenceWithLargeLeadingMediaData(640, 480, [av1SampleEntry(640, 480, 0x80)], 1)
+
+    const reorderedTrack = avisSequenceWithLargeLeadingMediaData(
+      640,
+      480,
+      [av1SampleEntry(640, 480)],
+      1,
+      true,
+    )
+
+    for (const input of [malformedCount, malformedFullBox, valid.subarray(0, -1), malformedAv1C, reorderedTrack])
+      expectInvalid(() => readBoundedImageMetadata(input))
   })
 
   it("rejects zero, over-dimension, truncated, and integer-overflow dimensions", () => {

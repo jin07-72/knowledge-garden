@@ -75,6 +75,9 @@ const uint32LittleEndian = (value: number) =>
   bytes(value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff)
 const uint24LittleEndian = (value: number) =>
   bytes(value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff)
+const uint32Bytes = (value: number) =>
+  bytes((value >>> 24) & 0xff, (value >>> 16) & 0xff, (value >>> 8) & 0xff, value & 0xff)
+const uint16Bytes = (value: number) => bytes((value >>> 8) & 0xff, value & 0xff)
 
 function webpChunk(type: string, payload: Uint8Array): Uint8Array {
   return append(ascii(type), uint32LittleEndian(payload.length), payload, payload.length & 1 ? bytes(0) : bytes())
@@ -99,6 +102,33 @@ function oversizedAnimatedWebp(): Uint8Array {
     ),
   )
   return append(ascii("RIFF"), uint32LittleEndian(body.length), body)
+}
+
+function isoBox(type: string, payload: Uint8Array): Uint8Array {
+  return append(uint32Bytes(8 + payload.length), ascii(type), payload)
+}
+
+function oversizedAvisSequence(): Uint8Array {
+  const trackHeader = new Uint8Array(84)
+  trackHeader.set(uint32Bytes(0x1_0000), 76)
+  trackHeader.set(uint32Bytes(0x1_0000), 80)
+  const visualSampleEntry = new Uint8Array(78)
+  visualSampleEntry.set(uint16Bytes(16_385), 24)
+  visualSampleEntry.set(uint16Bytes(1), 26)
+  const av1Entry = isoBox("av01", append(visualSampleEntry, isoBox("av1C", bytes(0x81, 0, 0, 0))))
+  const stsd = isoBox("stsd", append(bytes(0, 0, 0, 0), uint32Bytes(1), av1Entry))
+  const track = isoBox(
+    "trak",
+    append(isoBox("tkhd", trackHeader), isoBox("mdia", isoBox("minf", isoBox("stbl", stsd)))),
+  )
+  return append(
+    uint32Bytes(16),
+    ascii("ftyp"),
+    ascii("avis"),
+    bytes(0, 0, 0, 0),
+    isoBox("mdat", bytes(0)),
+    isoBox("moov", track),
+  )
 }
 
 const truncatedImageInputs = [
@@ -306,6 +336,21 @@ describe("Electron image library adapter", () => {
       writeClipboard: vi.fn(),
     })
     await expect(adapter.renderThumbnail(oversizedAnimatedWebp())).rejects.toMatchObject({
+      code: "IMAGE_LIBRARY_TOO_LARGE",
+    })
+    expect(createImageFromBuffer).not.toHaveBeenCalled()
+  })
+
+  it("rejects an oversized avis av01 sample entry before nativeImage receives any bytes", async () => {
+    const createImageFromBuffer = vi.fn(() => nativeImage())
+    const adapter = createElectronImageLibraryAdapter({
+      getWindow: () => undefined,
+      showOpenDialog: vi.fn(),
+      createImageFromBuffer,
+      writeClipboard: vi.fn(),
+    })
+
+    await expect(adapter.renderThumbnail(oversizedAvisSequence())).rejects.toMatchObject({
       code: "IMAGE_LIBRARY_TOO_LARGE",
     })
     expect(createImageFromBuffer).not.toHaveBeenCalled()
