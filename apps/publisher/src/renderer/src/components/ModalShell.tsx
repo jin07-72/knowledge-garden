@@ -112,7 +112,10 @@ export function ModalShell({
           }
           const first = items[0]!
           const last = items.at(-1)!
-          if (event.shiftKey && document.activeElement === first) {
+          if (document.activeElement === event.currentTarget) {
+            event.preventDefault()
+            ;(event.shiftKey ? last : first).focus()
+          } else if (event.shiftKey && document.activeElement === first) {
             event.preventDefault()
             last.focus()
           } else if (!event.shiftKey && document.activeElement === last) {
