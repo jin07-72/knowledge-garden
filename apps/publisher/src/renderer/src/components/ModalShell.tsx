@@ -1,10 +1,11 @@
-import { useEffect, useRef } from "react"
+import { useCallback, useEffect, useRef } from "react"
 import { createPortal } from "react-dom"
 
 interface ModalShellProps {
   readonly labelId: string
   readonly className: string
   readonly initialFocus?: React.RefObject<HTMLElement | null>
+  readonly onDialogElement?: (element: HTMLElement | null) => void
   readonly onClose: () => void
   readonly closeDisabled?: boolean
   readonly children: React.ReactNode
@@ -23,6 +24,7 @@ export function ModalShell({
   labelId,
   className,
   initialFocus,
+  onDialogElement,
   onClose,
   closeDisabled = false,
   children,
@@ -38,6 +40,10 @@ export function ModalShell({
       }
     | undefined
   >(undefined)
+  const setDialogElement = useCallback((element: HTMLElement | null): void => {
+    dialog.current = element
+    onDialogElement?.(element)
+  }, [onDialogElement])
 
   useEffect(() => {
     const generation = ++effectGeneration.current
@@ -84,9 +90,10 @@ export function ModalShell({
       }}
     >
       <section
-        ref={dialog}
+        ref={setDialogElement}
         className={className}
         role="dialog"
+        tabIndex={-1}
         aria-modal="true"
         aria-labelledby={labelId}
         onKeyDown={(event) => {

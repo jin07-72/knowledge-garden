@@ -25,6 +25,7 @@ type Screen =
 
 type FailedAction = "open" | "select" | "commit" | "preview" | "copy" | "delete"
 type BusyAction = FailedAction | undefined
+type FocusIntent = "close" | "view" | "dialog"
 
 const collator = new Intl.Collator("zh-Hans-CN", { numeric: true, sensitivity: "base" })
 
@@ -58,6 +59,16 @@ export function ImageLibrary({ path, title, api, onClose }: ImageLibraryProps): 
   const actionLock = useRef<BusyAction>(undefined)
   const closeButton = useRef<HTMLButtonElement>(null)
   const viewFocus = useRef<HTMLButtonElement>(null)
+  const dialogContainer = useRef<HTMLElement>(null)
+  const focusIntent = useRef<FocusIntent | undefined>(undefined)
+  const [focusVersion, setFocusVersion] = useState(0)
+  const requestFocus = useCallback((intent: FocusIntent): void => {
+    focusIntent.current = intent
+    setFocusVersion((version) => version + 1)
+  }, [])
+  const setDialogElement = useCallback((element: HTMLElement | null): void => {
+    dialogContainer.current = element
+  }, [])
 
   const beginRequest = useCallback((action: FailedAction): number | undefined => {
     if (actionLock.current) return undefined
@@ -99,13 +110,14 @@ export function ImageLibrary({ path, title, api, onClose }: ImageLibraryProps): 
         setFailedAction(undefined)
       }
       finishRequest(token)
+      requestFocus("close")
     } catch (failure) {
       const fallback = postRefreshError
         ? `${postRefreshError} 无法刷新图片库，请重试。`
         : "无法读取图片库，请重试。"
       failRequest(token, "open", postRefreshError ? new Error(fallback) : failure, fallback)
     }
-  }, [api, beginRequest, failRequest, finishRequest, isCurrent, path])
+  }, [api, beginRequest, failRequest, finishRequest, isCurrent, path, requestFocus])
 
   useEffect(() => {
     mounted.current = true
@@ -136,8 +148,17 @@ export function ImageLibrary({ path, title, api, onClose }: ImageLibraryProps): 
   }, [loadLibrary])
 
   useLayoutEffect(() => {
-    ;(screen.kind === "gallery" ? closeButton : viewFocus).current?.focus()
-  }, [busy, confirmOverwrite, screen.kind, selectedNames.length])
+    const intent = focusIntent.current
+    if (!intent) return
+    focusIntent.current = undefined
+    const target = intent === "dialog"
+      ? dialogContainer.current
+      : intent === "close"
+        ? closeButton.current
+        : viewFocus.current
+    if (target?.isConnected && !target.matches(":disabled")) target.focus()
+    else dialogContainer.current?.focus()
+  }, [focusVersion])
 
   const close = (): void => {
     if (busy === "commit" || busy === "delete") return
@@ -161,6 +182,7 @@ export function ImageLibrary({ path, title, api, onClose }: ImageLibraryProps): 
         setConfirmOverwrite(false)
       }
       finishRequest(token)
+      if (!selection.cancelled) requestFocus("view")
     } catch (failure) {
       failRequest(token, "select", failure, "无法选择图片，请重试。")
     }
@@ -181,10 +203,12 @@ export function ImageLibrary({ path, title, api, onClose }: ImageLibraryProps): 
       setConfirmOverwrite(true)
       setError("")
       setFailedAction(undefined)
+      requestFocus("view")
       return
     }
     const token = beginRequest("commit")
     if (token === undefined) return
+    requestFocus("dialog")
     try {
       const next = unwrap(await api.commit({
         path,
@@ -198,6 +222,7 @@ export function ImageLibrary({ path, title, api, onClose }: ImageLibraryProps): 
       setSelectedNames([])
       setConfirmOverwrite(false)
       finishRequest(token)
+      requestFocus("close")
     } catch (failure) {
       if (!isCurrent(token)) return
       actionLock.current = undefined
@@ -208,6 +233,7 @@ export function ImageLibrary({ path, title, api, onClose }: ImageLibraryProps): 
       setPreview(undefined)
       setCopyFeedback("")
       const message = `${messageFor(failure, "无法添加图片。")} 请重新选择图片。`
+      requestFocus("close")
       void loadLibrary(message)
     }
   }
@@ -218,6 +244,7 @@ export function ImageLibrary({ path, title, api, onClose }: ImageLibraryProps): 
     setCopyFeedback("")
     const token = beginRequest("preview")
     if (token === undefined) return
+    requestFocus("dialog")
     try {
       const next = unwrap(await api.preview({
         path,
@@ -227,8 +254,10 @@ export function ImageLibrary({ path, title, api, onClose }: ImageLibraryProps): 
       if (!isCurrent(token)) return
       setPreview(next)
       finishRequest(token)
+      requestFocus("view")
     } catch (failure) {
       failRequest(token, "preview", failure, "无法加载图片预览，请重试。")
+      requestFocus("view")
     }
   }
 
@@ -257,6 +286,7 @@ export function ImageLibrary({ path, title, api, onClose }: ImageLibraryProps): 
     const current = screen.preview
     const token = beginRequest("delete")
     if (token === undefined) return
+    requestFocus("dialog")
     try {
       const next = unwrap(await api.delete({
         path,
@@ -268,8 +298,10 @@ export function ImageLibrary({ path, title, api, onClose }: ImageLibraryProps): 
       setScreen({ kind: "gallery" })
       setPreview(undefined)
       finishRequest(token)
+      requestFocus("close")
     } catch (failure) {
       failRequest(token, "delete", failure, "无法永久删除图片，请重试。")
+      requestFocus("view")
     }
   }
 
@@ -300,6 +332,7 @@ export function ImageLibrary({ path, title, api, onClose }: ImageLibraryProps): 
       labelId="image-library-title"
       className="image-library-dialog"
       initialFocus={closeButton}
+      onDialogElement={setDialogElement}
       closeDisabled={closeDisabled}
       onClose={close}
     >
@@ -352,7 +385,10 @@ export function ImageLibrary({ path, title, api, onClose }: ImageLibraryProps): 
                   type="button"
                   className="secondary-button"
                   disabled={busy !== undefined}
-                  onClick={() => setConfirmOverwrite(false)}
+                  onClick={() => {
+                    setConfirmOverwrite(false)
+                    requestFocus("view")
+                  }}
                 >
                   返回修改选择
                 </button>
@@ -382,7 +418,10 @@ export function ImageLibrary({ path, title, api, onClose }: ImageLibraryProps): 
                         className="secondary-button"
                         disabled={busy !== undefined}
                         aria-label={`移除 ${candidate.name}`}
-                        onClick={() => setSelectedNames((names) => names.filter((name) => name !== candidate.name))}
+                        onClick={() => {
+                          setSelectedNames((names) => names.filter((name) => name !== candidate.name))
+                          requestFocus("view")
+                        }}
                       >
                         移除
                       </button>
@@ -400,6 +439,7 @@ export function ImageLibrary({ path, title, api, onClose }: ImageLibraryProps): 
                     setScreen({ kind: "gallery" })
                     setError("")
                     setFailedAction(undefined)
+                    requestFocus("close")
                   }}
                 >
                   取消
@@ -435,6 +475,7 @@ export function ImageLibrary({ path, title, api, onClose }: ImageLibraryProps): 
                 setCopyFeedback("")
                 setPreview(undefined)
                 setScreen({ kind: "gallery" })
+                requestFocus("close")
               }}
             >
               返回图片库
@@ -460,7 +501,10 @@ export function ImageLibrary({ path, title, api, onClose }: ImageLibraryProps): 
                     type="button"
                     className="secondary-button image-library-delete"
                     disabled={busy !== undefined}
-                    onClick={() => setScreen({ kind: "delete-confirm", item: screen.item, preview })}
+                    onClick={() => {
+                      setScreen({ kind: "delete-confirm", item: screen.item, preview })
+                      requestFocus("view")
+                    }}
                   >
                     <Trash2 size={16} aria-hidden="true" />
                     删除图片
@@ -483,6 +527,7 @@ export function ImageLibrary({ path, title, api, onClose }: ImageLibraryProps): 
                   setError("")
                   setFailedAction(undefined)
                   setScreen({ kind: "preview", item: screen.item })
+                  requestFocus("view")
                 }}
               >
                 取消删除

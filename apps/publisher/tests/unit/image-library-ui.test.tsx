@@ -409,6 +409,95 @@ describe("ImageLibrary", () => {
     expect(onClose).not.toHaveBeenCalled()
   })
 
+  it("keeps focus in the dialog while a preview is pending and still permits Escape", async () => {
+    const user = userEvent.setup()
+    const pendingPreview = deferred<IpcResult<ImageLibraryPreview>>()
+    const onClose = vi.fn()
+    const photo = item("pending.png")
+    const images = api({ open: vi.fn(async () => ok(view(photo))), preview: vi.fn(() => pendingPreview.promise) })
+    render(<ImageLibrary path={path} title="Daily" api={images} onClose={onClose} />)
+    await user.click(await screen.findByRole("button", { name: "预览 pending.png" }))
+    await screen.findByText(/正在加载完整预览/)
+    const dialog = screen.getByRole("dialog")
+    expect(dialog.contains(document.activeElement)).toBe(true)
+    await user.tab()
+    expect(dialog.contains(document.activeElement)).toBe(true)
+    await user.keyboard("{Escape}")
+    expect(onClose).toHaveBeenCalledOnce()
+  })
+
+  it("keeps focus in the dialog during commit, then restores a stable gallery target", async () => {
+    const user = userEvent.setup()
+    const pendingCommit = deferred<IpcResult<ImageLibraryView>>()
+    const selection: ImageLibrarySelection = {
+      cancelled: false,
+      selectionId: "selection-pending",
+      images: [{ ...item("new.png"), conflict: false }],
+      conflicts: [],
+    }
+    const onClose = vi.fn()
+    const images = api({ select: vi.fn(async () => ok(selection)), commit: vi.fn(() => pendingCommit.promise) })
+    render(<ImageLibrary path={path} title="Daily" api={images} onClose={onClose} />)
+    await screen.findByText("暂无图片")
+    await user.click(screen.getByRole("button", { name: "添加图片" }))
+    await user.click(await screen.findByRole("button", { name: "确认添加 1 张图片" }))
+    const dialog = screen.getByRole("dialog")
+    expect(dialog).toHaveFocus()
+    await user.keyboard("{Escape}")
+    expect(onClose).not.toHaveBeenCalled()
+    pendingCommit.resolve(ok(view()))
+    expect(await screen.findByText("暂无图片")).toBeVisible()
+    expect(screen.getByRole("button", { name: "关闭图片库" })).toHaveFocus()
+  })
+
+  it("keeps focus in the dialog during deletion and restores the gallery target", async () => {
+    const user = userEvent.setup()
+    const pendingDelete = deferred<IpcResult<ImageLibraryView>>()
+    const onClose = vi.fn()
+    const photo = item("delete-pending.png")
+    const images = api({
+      open: vi.fn(async () => ok(view(photo))),
+      delete: vi.fn(() => pendingDelete.promise),
+    })
+    render(<ImageLibrary path={path} title="Daily" api={images} onClose={onClose} />)
+    await user.click(await screen.findByRole("button", { name: "预览 delete-pending.png" }))
+    await user.click(await screen.findByRole("button", { name: "删除图片" }))
+    await user.click(screen.getByRole("button", { name: "永久删除 delete-pending.png" }))
+    const dialog = screen.getByRole("dialog")
+    expect(dialog).toHaveFocus()
+    await user.keyboard("{Escape}")
+    expect(onClose).not.toHaveBeenCalled()
+    pendingDelete.resolve(ok(view()))
+    expect(await screen.findByText("暂无图片")).toBeVisible()
+    expect(screen.getByRole("button", { name: "关闭图片库" })).toHaveFocus()
+  })
+
+  it("does not move focus away from the control that started a copy or cancelled selection", async () => {
+    const user = userEvent.setup()
+    const pendingCopy = deferred<IpcResult<void>>()
+    const select = deferred<IpcResult<ImageLibrarySelection>>()
+    const photo = item("focus.png")
+    const images = api({
+      open: vi.fn(async () => ok(view(photo))),
+      select: vi.fn(() => select.promise),
+      copyMarkdown: vi.fn(() => pendingCopy.promise),
+    })
+    render(<ImageLibrary path={path} title="Daily" api={images} onClose={vi.fn()} />)
+    const add = await screen.findByRole("button", { name: "添加图片" })
+    await user.click(add)
+    expect(add).toHaveFocus()
+    select.resolve(ok({ cancelled: true, images: [], conflicts: [] }))
+    await waitFor(() => expect(add).toBeEnabled())
+    expect(add).toHaveFocus()
+
+    await user.click(screen.getByRole("button", { name: "预览 focus.png" }))
+    const copy = await screen.findByRole("button", { name: "复制 Markdown 链接" })
+    await user.click(copy)
+    pendingCopy.resolve(ok(undefined))
+    await waitFor(() => expect(copy).toBeEnabled())
+    expect(copy).toHaveFocus()
+  })
+
   it("closes with Escape while idle and exposes one labelled modal", async () => {
     const user = userEvent.setup()
     const onClose = vi.fn()
