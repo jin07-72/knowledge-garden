@@ -161,6 +161,274 @@ async function captureTrashTargets(
   }, receipt)
 }
 
+async function snapshotClipboard(application: ElectronApplication): Promise<void> {
+  await application.evaluate(async ({ clipboard, nativeImage }) => {
+    type CommonClipboardSnapshot = {
+      readonly formats: string[]
+      readonly text?: string
+      readonly html?: string
+      readonly rtf?: string
+      readonly bookmark?: { readonly title: string; readonly url: string }
+      readonly imagePng?: Buffer
+      readonly legacy: boolean
+    }
+    type LegacyClipboard = {
+      availableFormats(): string[]
+      readText(): string
+      readHTML(): string
+      readRTF(): string
+      readBookmark(): { title: string; url: string }
+      readImage(): { isEmpty(): boolean; toPNG(): Buffer }
+    }
+    const key = Symbol.for("garden-publisher.e2e.clipboard-snapshot")
+    const store = globalThis as typeof globalThis & { [key]?: CommonClipboardSnapshot }
+    if (store[key]) throw new Error("An E2E clipboard snapshot is already installed.")
+    const normalizedKind = (format: string): "text" | "html" | "rtf" | "bookmark" | "image" | undefined => {
+      const compact = format.toLocaleLowerCase("en-US").replace(/[^a-z0-9]/g, "")
+      if (compact.includes("bookmark") || compact.includes("urilist") || compact === "url") {
+        return "bookmark"
+      }
+      if (compact.includes("html")) return "html"
+      if (compact.includes("rtf") || compact.includes("richtext")) return "rtf"
+      if (
+        compact.includes("image") ||
+        compact.includes("png") ||
+        compact.includes("bitmap") ||
+        compact.endsWith("dib")
+      ) return "image"
+      if (
+        compact === "text" ||
+        compact.includes("textplain") ||
+        compact.includes("unicodetext") ||
+        compact.includes("utf8plaintext") ||
+        compact.includes("utf16plaintext")
+      ) return "text"
+      return undefined
+    }
+    const legacy = clipboard as unknown as Partial<LegacyClipboard>
+    if (typeof legacy.availableFormats === "function") {
+      const formats = legacy.availableFormats()
+      const kinds = new Set(formats.map(normalizedKind).filter((kind) => kind !== undefined))
+      const text = legacy.readText?.() ?? ""
+      const html = legacy.readHTML?.() ?? ""
+      const rtf = legacy.readRTF?.() ?? ""
+      const bookmark = legacy.readBookmark?.() ?? { title: "", url: "" }
+      const image = legacy.readImage?.()
+      const imagePng = image && !image.isEmpty() ? image.toPNG() : Buffer.alloc(0)
+      store[key] = {
+        formats,
+        ...(kinds.has("text") || text !== "" ? { text } : {}),
+        ...(kinds.has("html") || html !== "" ? { html } : {}),
+        ...(kinds.has("rtf") || rtf !== "" ? { rtf } : {}),
+        ...(kinds.has("bookmark") || bookmark.title !== "" || bookmark.url !== ""
+          ? { bookmark }
+          : {}),
+        ...(kinds.has("image") || imagePng.length > 0 ? { imagePng } : {}),
+        legacy: true,
+      }
+      return
+    }
+
+    const items = await clipboard.read()
+    const snapshot: {
+      formats: string[]
+      text?: string
+      html?: string
+      rtf?: string
+      bookmark?: { title: string; url: string }
+      imagePng?: Buffer
+      legacy: false
+    } = { formats: [], legacy: false }
+    for (const item of items) {
+      for (const format of item.types) {
+        snapshot.formats.push(format)
+        const kind = normalizedKind(format)
+        if (!kind || snapshot[kind === "image" ? "imagePng" : kind] !== undefined) continue
+        const payload = await item.getType(format)
+        if (kind === "bookmark") {
+          if (!(payload instanceof Blob)) snapshot.bookmark = payload
+        } else if (payload instanceof Blob) {
+          if (kind === "image") {
+            const encoded = Buffer.from(await payload.arrayBuffer())
+            const decoded = nativeImage.createFromBuffer(encoded)
+            if (!decoded.isEmpty()) snapshot.imagePng = decoded.toPNG()
+          }
+          else snapshot[kind] = await payload.text()
+        }
+      }
+    }
+    store[key] = snapshot
+  })
+}
+
+async function restoreClipboard(application: ElectronApplication | undefined): Promise<boolean> {
+  if (!application) return false
+  return application.evaluate(async ({ clipboard, ClipboardItem, nativeImage }) => {
+    type CommonClipboardSnapshot = {
+      readonly formats: string[]
+      readonly text?: string
+      readonly html?: string
+      readonly rtf?: string
+      readonly bookmark?: { readonly title: string; readonly url: string }
+      readonly imagePng?: Buffer
+      readonly legacy: boolean
+    }
+    type LegacyClipboard = {
+      availableFormats(): string[]
+      readText(): string
+      readHTML(): string
+      readRTF(): string
+      readBookmark(): { title: string; url: string }
+      readImage(): { isEmpty(): boolean; toPNG(): Buffer }
+      write(data: {
+        text?: string
+        html?: string
+        rtf?: string
+        bookmark?: string
+        image?: ReturnType<typeof nativeImage.createFromBuffer>
+      }): void
+    }
+    const key = Symbol.for("garden-publisher.e2e.clipboard-snapshot")
+    const store = globalThis as typeof globalThis & { [key]?: CommonClipboardSnapshot }
+    const snapshot = store[key]
+    if (!snapshot) return false
+    const commonKind = (format: string): "text" | "html" | "rtf" | "bookmark" | "image" | undefined => {
+      const compact = format.toLocaleLowerCase("en-US").replace(/[^a-z0-9]/g, "")
+      if (compact.includes("bookmark") || compact.includes("urilist") || compact === "url") {
+        return "bookmark"
+      }
+      if (compact.includes("html")) return "html"
+      if (compact.includes("rtf") || compact.includes("richtext")) return "rtf"
+      if (
+        compact.includes("image") ||
+        compact.includes("png") ||
+        compact.includes("bitmap") ||
+        compact.endsWith("dib")
+      ) return "image"
+      if (
+        compact === "text" ||
+        compact.includes("textplain") ||
+        compact.includes("unicodetext") ||
+        compact.includes("utf8plaintext") ||
+        compact.includes("utf16plaintext")
+      ) return "text"
+      return undefined
+    }
+    const hasCommonPayload =
+      snapshot.text !== undefined ||
+      snapshot.html !== undefined ||
+      snapshot.rtf !== undefined ||
+      snapshot.bookmark !== undefined ||
+      snapshot.imagePng !== undefined
+    try {
+      if (!hasCommonPayload) {
+        clipboard.clear()
+        if (snapshot.legacy) {
+          const formats = (clipboard as unknown as LegacyClipboard).availableFormats()
+          return formats.every((format) => commonKind(format) === undefined)
+        }
+        const items = await clipboard.read()
+        return items.every((item) => item.types.every((format) => commonKind(format) === undefined))
+      } else if (snapshot.legacy) {
+        const legacy = clipboard as unknown as LegacyClipboard
+        legacy.write({
+          ...(snapshot.text !== undefined
+            ? { text: snapshot.text }
+            : snapshot.bookmark
+              ? { text: snapshot.bookmark.url }
+              : {}),
+          ...(snapshot.html !== undefined ? { html: snapshot.html } : {}),
+          ...(snapshot.rtf !== undefined ? { rtf: snapshot.rtf } : {}),
+          ...(snapshot.bookmark ? { bookmark: snapshot.bookmark.title } : {}),
+          ...(snapshot.imagePng
+            ? { image: nativeImage.createFromBuffer(snapshot.imagePng) }
+            : {}),
+        })
+        const restoredKinds = new Set(legacy.availableFormats().map(commonKind))
+        const restoredBookmark = legacy.readBookmark()
+        const restoredImage = legacy.readImage()
+        if (
+          snapshot.text !== undefined &&
+          (!restoredKinds.has("text") || legacy.readText() !== snapshot.text)
+        ) return false
+        if (
+          snapshot.html !== undefined &&
+          (!restoredKinds.has("html") || legacy.readHTML() !== snapshot.html)
+        ) return false
+        if (
+          snapshot.rtf !== undefined &&
+          (!restoredKinds.has("rtf") || legacy.readRTF() !== snapshot.rtf)
+        ) return false
+        if (
+          snapshot.bookmark &&
+          (!restoredKinds.has("bookmark") ||
+            restoredBookmark.title !== snapshot.bookmark.title ||
+            restoredBookmark.url !== snapshot.bookmark.url)
+        ) return false
+        if (
+          snapshot.imagePng &&
+          (!restoredKinds.has("image") ||
+            restoredImage.isEmpty() ||
+            !restoredImage.toPNG().equals(snapshot.imagePng))
+        ) return false
+      } else {
+        const data: Record<
+          string,
+          string | Electron.ClipboardBookmark | Blob | Promise<Blob | string>
+        > = {}
+        if (snapshot.text !== undefined) data["text/plain"] = snapshot.text
+        if (snapshot.html !== undefined) data["text/html"] = snapshot.html
+        if (snapshot.rtf !== undefined) data["text/rtf"] = snapshot.rtf
+        if (snapshot.bookmark !== undefined) {
+          data["electron application/bookmark"] = { ...snapshot.bookmark }
+        }
+        if (snapshot.imagePng !== undefined) {
+          data["image/png"] = new Blob([Uint8Array.from(snapshot.imagePng)], { type: "image/png" })
+        }
+        await clipboard.write([new ClipboardItem(data)])
+        const restored = await clipboard.read()
+        const restoredPayloads = new Map<string, string | Electron.ClipboardBookmark | Buffer>()
+        for (const item of restored) {
+          for (const format of item.types) {
+            const kind = commonKind(format)
+            const payload = await item.getType(format)
+            if (kind === "bookmark" && !(payload instanceof Blob)) {
+              restoredPayloads.set("bookmark", payload)
+            } else if (payload instanceof Blob) {
+              if (kind === "image") {
+                restoredPayloads.set("image", Buffer.from(await payload.arrayBuffer()))
+              } else if (kind) restoredPayloads.set(kind, await payload.text())
+            }
+          }
+        }
+        if (snapshot.text !== undefined && restoredPayloads.get("text") !== snapshot.text) return false
+        if (snapshot.html !== undefined && restoredPayloads.get("html") !== snapshot.html) return false
+        if (snapshot.rtf !== undefined && restoredPayloads.get("rtf") !== snapshot.rtf) return false
+        const restoredBookmark = restoredPayloads.get("bookmark")
+        if (snapshot.bookmark) {
+          if (
+            restoredBookmark === undefined ||
+            typeof restoredBookmark === "string" ||
+            Buffer.isBuffer(restoredBookmark)
+          ) return false
+          if (
+            restoredBookmark.title !== snapshot.bookmark.title ||
+            restoredBookmark.url !== snapshot.bookmark.url
+          ) return false
+        }
+        const restoredImage = restoredPayloads.get("image")
+        if (
+          snapshot.imagePng &&
+          (!(restoredImage instanceof Buffer) || !restoredImage.equals(snapshot.imagePng))
+        ) return false
+      }
+      return true
+    } finally {
+      delete store[key]
+    }
+  })
+}
+
 async function installImageChooser(
   application: ElectronApplication,
   selections: readonly (readonly string[])[],
@@ -309,7 +577,7 @@ test("manages a note image library", async () => {
   const notePath = join(garden.root, ...garden.notePath.split("/"))
   const libraryPath = join(garden.root, "content", "_assets", "fixture")
   let application: ElectronApplication | undefined
-  let originalClipboard: string | undefined
+  let clipboardSnapshotInstalled = false
   let chooserInstallationAttempted = false
   let primaryFailure: unknown
   try {
@@ -331,7 +599,8 @@ test("manages a note image library", async () => {
       GARDEN_PUBLISHER_E2E_RUNTIME: await createE2eRuntime(stateRoot),
       GARDEN_PUBLISHER_E2E_REGISTRY: join(stateRoot, "blogs.json"),
     })
-    originalClipboard = await application.evaluate(({ clipboard }) => clipboard.readText())
+    await snapshotClipboard(application)
+    clipboardSnapshotInstalled = true
     chooserInstallationAttempted = true
     await installImageChooser(application, [[alpha, beta, removed], [replacementAlpha]])
     const page = await application.firstWindow()
@@ -403,11 +672,9 @@ test("manages a note image library", async () => {
   }
 
   const cleanupFailures: unknown[] = []
-  if (application && originalClipboard !== undefined) {
+  if (clipboardSnapshotInstalled) {
     try {
-      await application.evaluate(({ clipboard }, text) => clipboard.writeText(text), originalClipboard)
-      const restoredClipboard = await application.evaluate(({ clipboard }) => clipboard.readText())
-      expect(restoredClipboard).toBe(originalClipboard)
+      expect(await restoreClipboard(application)).toBe(true)
     } catch (failure) {
       cleanupFailures.push(failure)
     }
