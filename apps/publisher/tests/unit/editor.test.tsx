@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { EditorView } from "@codemirror/view"
-import { undo } from "@codemirror/commands"
+import { undoDepth } from "@codemirror/commands"
 import { createHash } from "node:crypto"
 import { StrictMode, createRef } from "react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -54,6 +54,10 @@ function ok<T>(value: T): IpcResult<T> {
   return { ok: true, value }
 }
 
+function imageFailure<T>(message: string): IpcResult<T> {
+  return { ok: false, error: { code: "IMAGE_LIBRARY_FAILED", message } }
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void
   let reject!: (reason?: unknown) => void
@@ -97,6 +101,7 @@ function setup(
     document?: NoteDocument
     readOnly?: boolean
     images?: GardenApi["images"]
+    onSaved?: (receipt: NoteWriteReceipt) => void
   } = {},
 ) {
   const selectedDocument = options.document ?? document
@@ -105,6 +110,7 @@ function setup(
   const getRecovery = vi.fn(options.getRecovery ?? (async () => ok(options.recovery)))
   const writeRecovery = vi.fn(async () => ok({ contentHash: "c".repeat(64) }))
   const discardRecovery = vi.fn(options.discardRecovery ?? (async () => ok(undefined)))
+  const onSaved = vi.fn(options.onSaved)
   const images = options.images ?? imageApi()
   const ref = createRef<MarkdownEditorHandle>()
   const editor = (currentDocument = selectedDocument, readOnly = options.readOnly) => (
@@ -117,6 +123,7 @@ function setup(
       recovery={{ get: getRecovery, write: writeRecovery, discard: discardRecovery }}
       images={images}
       readOnly={readOnly}
+      onSaved={onSaved}
     />
   )
   const view = render(editor())
@@ -128,10 +135,82 @@ function setup(
     getRecovery,
     writeRecovery,
     discardRecovery,
+    onSaved,
     images,
+    sourceDocument: selectedDocument,
     rerenderReadOnly: (readOnly: boolean) => view.rerender(editor(selectedDocument, readOnly)),
     rerenderDocument: (next: NoteDocument) => view.rerender(editor(next)),
   }
+}
+
+type ImageFlowHarness = Pick<
+  ReturnType<typeof setup>,
+  "save" | "writeRecovery" | "discardRecovery" | "onSaved" | "sourceDocument"
+>
+
+function snapshotImageFlow(harness: ImageFlowHarness) {
+  const view = editorView()
+  const saveState = globalThis.document.querySelector<HTMLElement>('[aria-label="保存状态"]')
+  if (!saveState) throw new Error("Save state is not mounted")
+  return {
+    markdown: view.state.sliceDoc(),
+    selection: view.state.selection.toJSON(),
+    undoDepth: undoDepth(view.state),
+    saveState: {
+      className: saveState.className,
+      role: saveState.getAttribute("role"),
+      text: saveState.textContent,
+    },
+    calls: {
+      save: harness.save.mock.calls.length,
+      writeRecovery: harness.writeRecovery.mock.calls.length,
+      discardRecovery: harness.discardRecovery.mock.calls.length,
+      onSaved: harness.onSaved.mock.calls.length,
+    },
+    document: {
+      identity: harness.sourceDocument,
+      path: harness.sourceDocument.path,
+      mtimeMs: harness.sourceDocument.mtimeMs,
+      contentHash: harness.sourceDocument.contentHash,
+    },
+  }
+}
+
+function expectImageFlowUnchanged(
+  harness: ImageFlowHarness,
+  snapshot: ReturnType<typeof snapshotImageFlow>,
+): void {
+  const view = editorView()
+  const saveState = globalThis.document.querySelector<HTMLElement>('[aria-label="保存状态"]')
+  if (!saveState) throw new Error("Save state is not mounted")
+  expect(view.state.sliceDoc()).toBe(snapshot.markdown)
+  expect(view.state.selection.toJSON()).toEqual(snapshot.selection)
+  expect(undoDepth(view.state)).toBe(snapshot.undoDepth)
+  expect(saveState.className).toBe(snapshot.saveState.className)
+  expect(saveState.getAttribute("role")).toBe(snapshot.saveState.role)
+  expect(saveState.textContent).toBe(snapshot.saveState.text)
+  expect(harness.save).toHaveBeenCalledTimes(snapshot.calls.save)
+  expect(harness.writeRecovery).toHaveBeenCalledTimes(snapshot.calls.writeRecovery)
+  expect(harness.discardRecovery).toHaveBeenCalledTimes(snapshot.calls.discardRecovery)
+  expect(harness.onSaved).toHaveBeenCalledTimes(snapshot.calls.onSaved)
+  expect(harness.sourceDocument).toBe(snapshot.document.identity)
+  expect(harness.sourceDocument.path).toBe(snapshot.document.path)
+  expect(harness.sourceDocument.mtimeMs).toBe(snapshot.document.mtimeMs)
+  expect(harness.sourceDocument.contentHash).toBe(snapshot.document.contentHash)
+}
+
+function expectImageFlowCallsAndSourceUnchanged(
+  harness: ImageFlowHarness,
+  snapshot: ReturnType<typeof snapshotImageFlow>,
+): void {
+  expect(harness.save).toHaveBeenCalledTimes(snapshot.calls.save)
+  expect(harness.writeRecovery).toHaveBeenCalledTimes(snapshot.calls.writeRecovery)
+  expect(harness.discardRecovery).toHaveBeenCalledTimes(snapshot.calls.discardRecovery)
+  expect(harness.onSaved).toHaveBeenCalledTimes(snapshot.calls.onSaved)
+  expect(harness.sourceDocument).toBe(snapshot.document.identity)
+  expect(harness.sourceDocument.path).toBe(snapshot.document.path)
+  expect(harness.sourceDocument.mtimeMs).toBe(snapshot.document.mtimeMs)
+  expect(harness.sourceDocument.contentHash).toBe(snapshot.document.contentHash)
 }
 
 function editorView(): EditorView {
@@ -199,24 +278,30 @@ describe("MarkdownEditor", () => {
       copyMarkdown: vi.fn(async () => ok(undefined)),
       delete: vi.fn(async ({ path }) => ok({ path, images: [] })),
     })
-    const { save, writeRecovery, discardRecovery } = setup({ images })
+    const trackedDocument = Object.freeze({ ...document })
+    const harness = setup({ images, document: trackedDocument })
     await waitFor(() => expect(editorView().contentDOM).toHaveAttribute("contenteditable", "true"))
-    const view = editorView()
-    const before = {
-      doc: view.state.sliceDoc(),
-      selection: view.state.selection.toJSON(),
-      historyUndo: undo(view),
-      status: screen.getByRole("status", { name: "保存状态" }).textContent,
-    }
-    expect(before.historyUndo).toBe(false)
+    await replaceDoc(`${original}local draft before opening the image library`)
+    await act(async () => {
+      await expect(harness.ref.current!.flush()).resolves.toBe(true)
+    })
+    const before = snapshotImageFlow(harness)
+    expect(before.undoDepth).toBeGreaterThan(0)
+    expect(before.calls.save).toBeGreaterThan(0)
+    expect(before.calls.writeRecovery).toBeGreaterThan(0)
+    expect(before.calls.onSaved).toBeGreaterThan(0)
 
     const trigger = screen.getByRole("button", { name: "图片库" })
-    await user.dblClick(trigger)
+    await user.click(trigger)
     expect(await screen.findByRole("dialog", { name: "CSS Grid 图片库" })).toBeVisible()
     expect(images.open).toHaveBeenCalledTimes(1)
     expect(images.open).toHaveBeenCalledWith({ path: publicNote.path })
+    expectImageFlowUnchanged(harness, before)
 
     await user.click(screen.getByRole("button", { name: "添加图片" }))
+    expect(images.select).toHaveBeenCalledWith({ path: publicNote.path })
+    expect(await screen.findByRole("dialog", { name: "确认添加图片" })).toBeVisible()
+    expectImageFlowUnchanged(harness, before)
     await user.click(await screen.findByRole("button", { name: "确认添加 1 张图片" }))
     expect(await screen.findByRole("button", { name: "预览 diagram.png" })).toBeVisible()
     expect(images.commit).toHaveBeenCalledWith({
@@ -225,27 +310,143 @@ describe("MarkdownEditor", () => {
       include: ["diagram.png"],
       overwrite: [],
     })
+    expectImageFlowUnchanged(harness, before)
     await user.click(screen.getByRole("button", { name: "预览 diagram.png" }))
+    expect(images.preview).toHaveBeenCalledWith({
+      path: publicNote.path,
+      name: photo.name,
+      expectedContentHash: photo.contentHash,
+    })
+    expect(await screen.findByRole("button", { name: "复制 Markdown 链接" })).toBeVisible()
+    expectImageFlowUnchanged(harness, before)
     await user.click(await screen.findByRole("button", { name: "复制 Markdown 链接" }))
     expect(images.copyMarkdown).toHaveBeenCalledWith({
       path: publicNote.path,
       name: photo.name,
       expectedContentHash: photo.contentHash,
     })
+    expectImageFlowUnchanged(harness, before)
     await user.click(screen.getByRole("button", { name: "删除图片" }))
+    expect(await screen.findByRole("dialog", { name: "永久删除 diagram.png" })).toBeVisible()
+    expectImageFlowUnchanged(harness, before)
     await user.click(screen.getByRole("button", { name: "永久删除 diagram.png" }))
     expect(await screen.findByText("暂无图片")).toBeVisible()
+    expect(images.delete).toHaveBeenCalledWith({
+      path: publicNote.path,
+      name: photo.name,
+      expectedContentHash: photo.contentHash,
+    })
+    expectImageFlowUnchanged(harness, before)
     await user.click(screen.getByRole("button", { name: "关闭图片库" }))
 
     expect(screen.queryByRole("dialog", { name: /图片库/ })).not.toBeInTheDocument()
-    expect(view.state.sliceDoc()).toBe(before.doc)
-    expect(view.state.selection.toJSON()).toEqual(before.selection)
-    expect(undo(view)).toBe(false)
-    expect(screen.getByRole("status", { name: "保存状态" })).toHaveTextContent(before.status ?? "")
-    expect(save).not.toHaveBeenCalled()
-    expect(writeRecovery).not.toHaveBeenCalled()
-    expect(discardRecovery).not.toHaveBeenCalled()
+    expectImageFlowUnchanged(harness, before)
   })
+
+  it.each(["open", "select", "commit", "preview", "copy", "delete"] as const)(
+    "keeps the loaded note untouched when image %s fails and then recovers",
+    async (operation) => {
+      const user = userEvent.setup()
+      const photo: ImageLibraryItem = {
+        name: "failure.png",
+        sizeBytes: 2_048,
+        width: 800,
+        height: 600,
+        contentHash: "f".repeat(64),
+        thumbnailDataUrl: "data:image/png;base64,dGh1bWI=",
+        markdown: "![failure](<../_assets/css-grid/failure.png>)",
+      }
+      const message = `image ${operation} failed`
+      const library = { path: publicNote.path, images: [photo] }
+      const selection = {
+        cancelled: false as const,
+        selectionId: "selection-failure",
+        images: [{ ...photo, conflict: false }] as const,
+        conflicts: [],
+      }
+      const onceThenOk = <T,>(action: typeof operation, value: T) => {
+        let attempts = 0
+        return vi.fn(async (): Promise<IpcResult<T>> =>
+          action === operation && attempts++ === 0 ? imageFailure<T>(message) : ok(value),
+        )
+      }
+      const images = imageApi({
+        open: onceThenOk("open", library),
+        select: onceThenOk("select", selection),
+        commit: onceThenOk("commit", library),
+        preview: onceThenOk("preview", { ...photo, dataUrl: "data:image/png;base64,cHJldmlldw==" }),
+        copyMarkdown: onceThenOk("copy", undefined),
+        delete: onceThenOk("delete", { path: publicNote.path, images: [] }),
+      })
+      const trackedDocument = Object.freeze({ ...document })
+      const harness = setup({ images, document: trackedDocument })
+      await waitFor(() =>
+        expect(editorView().contentDOM).toHaveAttribute("contenteditable", "true"),
+      )
+      const before = snapshotImageFlow(harness)
+
+      await user.click(screen.getByRole("button", { name: "图片库" }))
+      if (operation === "open") {
+        expect(await screen.findByRole("alert")).toHaveTextContent(message)
+        expectImageFlowUnchanged(harness, before)
+        await user.click(screen.getByRole("button", { name: "重试" }))
+        expect(await screen.findByRole("button", { name: "预览 failure.png" })).toBeVisible()
+        expectImageFlowUnchanged(harness, before)
+        return
+      }
+
+      await screen.findByRole("button", { name: "预览 failure.png" })
+      await user.click(screen.getByRole("button", { name: "添加图片" }))
+      if (operation === "select") {
+        expect(await screen.findByRole("alert")).toHaveTextContent(message)
+        expectImageFlowUnchanged(harness, before)
+        await user.click(screen.getByRole("button", { name: "重试" }))
+        expect(await screen.findByRole("dialog", { name: "确认添加图片" })).toBeVisible()
+        expectImageFlowUnchanged(harness, before)
+        return
+      }
+
+      await user.click(await screen.findByRole("button", { name: "确认添加 1 张图片" }))
+      if (operation === "commit") {
+        expect(await screen.findByRole("alert")).toHaveTextContent(message)
+        expectImageFlowUnchanged(harness, before)
+        await user.click(screen.getByRole("button", { name: "添加图片" }))
+        await user.click(await screen.findByRole("button", { name: "确认添加 1 张图片" }))
+        expect(await screen.findByRole("button", { name: "预览 failure.png" })).toBeVisible()
+        expectImageFlowUnchanged(harness, before)
+        return
+      }
+
+      await user.click(screen.getByRole("button", { name: "预览 failure.png" }))
+      if (operation === "preview") {
+        expect(await screen.findByRole("alert")).toHaveTextContent(message)
+        expectImageFlowUnchanged(harness, before)
+        await user.click(screen.getByRole("button", { name: "重试" }))
+        expect(await screen.findByRole("button", { name: "复制 Markdown 链接" })).toBeVisible()
+        expectImageFlowUnchanged(harness, before)
+        return
+      }
+
+      await screen.findByRole("button", { name: "复制 Markdown 链接" })
+      if (operation === "copy") {
+        await user.click(screen.getByRole("button", { name: "复制 Markdown 链接" }))
+        expect(await screen.findByRole("alert")).toHaveTextContent(message)
+        expectImageFlowUnchanged(harness, before)
+        await user.click(screen.getByRole("button", { name: "重试" }))
+        expect(await screen.findByText("已复制 Markdown 链接")).toBeVisible()
+        expectImageFlowUnchanged(harness, before)
+        return
+      }
+
+      await user.click(screen.getByRole("button", { name: "删除图片" }))
+      await user.click(await screen.findByRole("button", { name: "永久删除 failure.png" }))
+      expect(await screen.findByRole("alert")).toHaveTextContent(message)
+      expectImageFlowUnchanged(harness, before)
+      await user.click(screen.getByRole("button", { name: "重试" }))
+      expect(await screen.findByText("暂无图片")).toBeVisible()
+      expectImageFlowUnchanged(harness, before)
+    },
+  )
 
   it("does not mutate the note when an image request fails and closes the library on read-only transition", async () => {
     const user = userEvent.setup()
@@ -259,39 +460,39 @@ describe("MarkdownEditor", () => {
         })
         .mockReturnValueOnce(pending.promise),
     })
-    const { rerenderReadOnly, save, writeRecovery, discardRecovery } = setup({ images })
+    const trackedDocument = Object.freeze({ ...document })
+    const harness = setup({ images, document: trackedDocument })
     await waitFor(() => expect(editorView().contentDOM).toHaveAttribute("contenteditable", "true"))
-    const before = editorView().state.sliceDoc()
+    const before = snapshotImageFlow(harness)
     await user.click(screen.getByRole("button", { name: "图片库" }))
     expect(await screen.findByRole("alert")).toHaveTextContent("图片库读取失败")
-    expect(editorView().state.sliceDoc()).toBe(before)
-    expect(save).not.toHaveBeenCalled()
-    expect(writeRecovery).not.toHaveBeenCalled()
-    expect(discardRecovery).not.toHaveBeenCalled()
+    expectImageFlowUnchanged(harness, before)
     await user.click(screen.getByRole("button", { name: "关闭图片库" }))
+    expectImageFlowUnchanged(harness, before)
     await user.click(screen.getByRole("button", { name: "图片库" }))
     expect(screen.getByRole("dialog", { name: "CSS Grid 图片库" })).toBeVisible()
+    expectImageFlowUnchanged(harness, before)
 
-    rerenderReadOnly(true)
+    harness.rerenderReadOnly(true)
     expect(screen.queryByRole("dialog", { name: /图片库/ })).not.toBeInTheDocument()
     expect(screen.getByRole("button", { name: "图片库" })).toBeDisabled()
     pending.resolve(ok({ path: publicNote.path, images: [] }))
     await act(async () => void (await pending.promise))
     expect(screen.queryByText("暂无图片")).not.toBeInTheDocument()
-    expect(editorView().state.sliceDoc()).toBe(before)
-    expect(save).not.toHaveBeenCalled()
-    expect(writeRecovery).not.toHaveBeenCalled()
-    expect(discardRecovery).not.toHaveBeenCalled()
+    expectImageFlowUnchanged(harness, before)
   })
 
   it("closes an open image library immediately when the document path changes and ignores its late result", async () => {
     const user = userEvent.setup()
     const pending = deferred<IpcResult<{ path: string; images: readonly ImageLibraryItem[] }>>()
     const images = imageApi({ open: vi.fn(() => pending.promise) })
-    const { rerenderDocument } = setup({ images })
+    const trackedDocument = Object.freeze({ ...document })
+    const harness = setup({ images, document: trackedDocument })
     await waitFor(() => expect(editorView().contentDOM).toHaveAttribute("contenteditable", "true"))
+    const before = snapshotImageFlow(harness)
     await user.click(screen.getByRole("button", { name: "图片库" }))
     expect(screen.getByRole("dialog", { name: "CSS Grid 图片库" })).toBeVisible()
+    expectImageFlowUnchanged(harness, before)
 
     const next: NoteDocument = {
       path: "private/life/journal.md",
@@ -299,13 +500,35 @@ describe("MarkdownEditor", () => {
       mtimeMs: 22,
       contentHash: "e".repeat(64),
     }
-    rerenderDocument(next)
+    harness.rerenderDocument(next)
     expect(screen.queryByRole("dialog", { name: /图片库/ })).not.toBeInTheDocument()
     pending.resolve(ok({ path: publicNote.path, images: [] }))
     await act(async () => void (await pending.promise))
     expect(screen.queryByRole("dialog", { name: /图片库/ })).not.toBeInTheDocument()
     expect(images.open).toHaveBeenCalledTimes(1)
     expect(images.open).toHaveBeenCalledWith({ path: publicNote.path })
+    expectImageFlowCallsAndSourceUnchanged(harness, before)
+  })
+
+  it("unmounts an open image library without applying its late result to the note", async () => {
+    const user = userEvent.setup()
+    const pending = deferred<IpcResult<{ path: string; images: readonly ImageLibraryItem[] }>>()
+    const images = imageApi({ open: vi.fn(() => pending.promise) })
+    const trackedDocument = Object.freeze({ ...document })
+    const harness = setup({ images, document: trackedDocument })
+    await waitFor(() => expect(editorView().contentDOM).toHaveAttribute("contenteditable", "true"))
+    const before = snapshotImageFlow(harness)
+
+    await user.click(screen.getByRole("button", { name: "图片库" }))
+    expect(screen.getByRole("dialog", { name: "CSS Grid 图片库" })).toBeVisible()
+    expectImageFlowUnchanged(harness, before)
+
+    harness.unmount()
+    expect(screen.queryByRole("dialog", { name: /图片库/ })).not.toBeInTheDocument()
+    pending.resolve(ok({ path: publicNote.path, images: [] }))
+    await act(async () => void (await pending.promise))
+    expect(screen.queryByRole("dialog", { name: /图片库/ })).not.toBeInTheDocument()
+    expectImageFlowCallsAndSourceUnchanged(harness, before)
   })
 
   it("blocks user and programmatic document changes while a switch barrier is active", async () => {
