@@ -1,7 +1,8 @@
 import { _electron as electron, expect, test } from "@playwright/test"
 import type { ChildProcess } from "node:child_process"
-import { mkdir, readFile, writeFile } from "node:fs/promises"
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises"
 import { basename, dirname, join, resolve } from "node:path"
+import { deflateSync } from "node:zlib"
 import {
   createQuartzGardenFixture,
   createTemporaryGitRepository,
@@ -18,6 +19,35 @@ import {
 const publisherRoot = resolve(import.meta.dirname, "../..")
 type ElectronApplication = Awaited<ReturnType<typeof electron.launch>>
 const launchedChildren = new Set<ChildProcess>()
+
+function pngChunk(type: string, payload: Buffer): Buffer {
+  const body = Buffer.concat([Buffer.from(type, "ascii"), payload])
+  let crc = 0xffffffff
+  for (const byte of body) {
+    crc ^= byte
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0)
+    }
+  }
+  const result = Buffer.alloc(12 + payload.length)
+  result.writeUInt32BE(payload.length, 0)
+  body.copy(result, 4)
+  result.writeUInt32BE((crc ^ 0xffffffff) >>> 0, 8 + payload.length)
+  return result
+}
+
+function onePixelPng(red: number, green: number, blue: number): Buffer {
+  const header = Buffer.alloc(13)
+  header.writeUInt32BE(1, 0)
+  header.writeUInt32BE(1, 4)
+  header.set([8, 6, 0, 0, 0], 8)
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk("IHDR", header),
+    pngChunk("IDAT", deflateSync(Buffer.from([0, red, green, blue, 255]))),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ])
+}
 
 function childHasExited(child: ChildProcess): boolean {
   return child.exitCode !== null || child.signalCode !== null
@@ -119,6 +149,37 @@ async function captureTrashTargets(
   }, receipt)
 }
 
+async function installImageChooser(
+  application: ElectronApplication,
+  selections: readonly (readonly string[])[],
+): Promise<void> {
+  await application.evaluate(({ dialog }, queuedSelections) => {
+    const state = dialog as typeof dialog & {
+      __gardenImageDialog?: typeof dialog.showOpenDialog
+      __gardenImageSelections?: string[][]
+    }
+    state.__gardenImageDialog ??= dialog.showOpenDialog
+    state.__gardenImageSelections = queuedSelections.map((selection) => [...selection])
+    dialog.showOpenDialog = (async () => {
+      const filePaths = state.__gardenImageSelections?.shift() ?? []
+      return { canceled: filePaths.length === 0, filePaths }
+    }) as typeof dialog.showOpenDialog
+  }, selections)
+}
+
+async function restoreImageChooser(application: ElectronApplication | undefined): Promise<void> {
+  if (!application) return
+  await application.evaluate(({ dialog }) => {
+    const state = dialog as typeof dialog & {
+      __gardenImageDialog?: typeof dialog.showOpenDialog
+      __gardenImageSelections?: string[][]
+    }
+    if (state.__gardenImageDialog) dialog.showOpenDialog = state.__gardenImageDialog
+    delete state.__gardenImageDialog
+    delete state.__gardenImageSelections
+  })
+}
+
 async function createNote(
   page: Awaited<ReturnType<ElectronApplication["firstWindow"]>>,
   options: {
@@ -199,6 +260,120 @@ tags:
 
 ${body}
 `
+
+test("manages a note image library", async () => {
+  const guide = await readFile(join(publisherRoot, "README.md"), "utf8")
+  for (const expected of [
+    "图片库",
+    "25 MiB",
+    "50",
+    "不会自动修改 Markdown",
+    "永久删除",
+    "content/_assets/<note-slug>/",
+    "private/_assets/<note-slug>/",
+  ]) {
+    expect(guide).toContain(expected)
+  }
+  const garden = await createQuartzGardenFixture({
+    directoryName: "Image Garden",
+    noteTitle: "Image Note",
+    noteBody: "the markdown must remain byte-for-byte unchanged",
+  })
+  const stateRoot = await createTemporaryDirectory("garden-publisher-e2e-images-")
+  const sources = join(stateRoot, "sources")
+  const replacementSources = join(stateRoot, "replacement-sources")
+  const alpha = join(sources, "alpha.png")
+  const beta = join(sources, "beta.png")
+  const removed = join(sources, "removed.png")
+  const replacementAlpha = join(replacementSources, "alpha.png")
+  const originalAlpha = onePixelPng(255, 0, 0)
+  const overwrittenAlpha = onePixelPng(0, 255, 0)
+  const betaBytes = onePixelPng(0, 0, 255)
+  const notePath = join(garden.root, ...garden.notePath.split("/"))
+  const libraryPath = join(garden.root, "content", "_assets", "fixture")
+  let application: ElectronApplication | undefined
+  try {
+    await Promise.all([
+      mkdir(sources, { recursive: true }),
+      mkdir(replacementSources, { recursive: true }),
+    ])
+    await Promise.all([
+      writeFile(alpha, originalAlpha),
+      writeFile(beta, betaBytes),
+      writeFile(removed, onePixelPng(255, 255, 0)),
+      writeFile(replacementAlpha, overwrittenAlpha),
+    ])
+    const noteBefore = await readFile(notePath)
+    application = await launchApplication(stateRoot, {
+      ...process.env,
+      GARDEN_PUBLISHER_E2E: "1",
+      GARDEN_PUBLISHER_E2E_WORKSPACE: garden.root,
+      GARDEN_PUBLISHER_E2E_RUNTIME: await createE2eRuntime(stateRoot),
+      GARDEN_PUBLISHER_E2E_REGISTRY: join(stateRoot, "blogs.json"),
+    })
+    await installImageChooser(application, [[alpha, beta, removed], [replacementAlpha]])
+    const page = await application.firstWindow()
+    await expect(page.locator('main[data-workspace-diagnostics="ready"]')).toBeVisible()
+    await page.getByRole("button", { name: "Image Note，公开" }).click()
+
+    await page.getByRole("button", { name: "图片库" }).click()
+    const library = page.getByRole("dialog", { name: "Image Note 图片库" })
+    await expect(library).toBeVisible()
+    await expect(library.getByText("暂无图片")).toBeVisible()
+    await expect.poll(async () => exists(join(libraryPath, ".gitkeep"))).toBe(true)
+
+    await library.getByRole("button", { name: "添加图片" }).click()
+    const candidates = page.getByRole("dialog", { name: "确认添加图片" })
+    await expect(candidates.getByText("alpha.png")).toBeVisible()
+    await expect(candidates.getByText("beta.png")).toBeVisible()
+    await expect(candidates.getByText("removed.png")).toBeVisible()
+    await candidates.getByRole("button", { name: "移除 removed.png" }).click()
+    await expect(candidates.getByText("removed.png")).toHaveCount(0)
+    await candidates.getByRole("button", { name: "确认添加 2 张图片" }).click()
+    await expect(page.getByRole("button", { name: "预览 alpha.png" })).toBeVisible()
+    await expect(page.getByRole("button", { name: "预览 beta.png" })).toBeVisible()
+    expect(await exists(join(libraryPath, ".gitkeep"))).toBe(false)
+    expect(await readFile(join(libraryPath, "alpha.png"))).toEqual(originalAlpha)
+    expect(await readFile(join(libraryPath, "beta.png"))).toEqual(betaBytes)
+
+    await page.getByRole("button", { name: "添加图片" }).click()
+    await page.getByRole("button", { name: "继续" }).click()
+    const overwrite = page.getByRole("dialog", { name: "确认覆盖同名图片" })
+    await expect(overwrite.getByText("alpha.png")).toBeVisible()
+    await overwrite.getByRole("button", { name: "覆盖并继续" }).click()
+    await expect(page.getByRole("button", { name: "预览 alpha.png" })).toBeVisible()
+    expect(await readFile(join(libraryPath, "alpha.png"))).toEqual(overwrittenAlpha)
+
+    await page.getByRole("button", { name: "预览 alpha.png" }).click()
+    const preview = page.getByRole("dialog", { name: "alpha.png" })
+    await expect(preview.getByRole("img", { name: "alpha.png" })).toBeVisible()
+    await expect(preview.getByText("1 × 1 像素")).toBeVisible()
+    await expect(preview.getByText(`${overwrittenAlpha.length} B`)).toBeVisible()
+    await preview.getByRole("button", { name: "复制 Markdown 链接" }).click()
+    await expect(preview.getByRole("status")).toHaveText("已复制 Markdown 链接")
+    const clipboard = await application.evaluate(({ clipboard }) => clipboard.readText())
+    expect(clipboard).toBe("![alpha](<../_assets/fixture/alpha.png>)")
+    expect(await readFile(notePath)).toEqual(noteBefore)
+
+    await preview.getByRole("button", { name: "删除图片" }).click()
+    await page.getByRole("button", { name: "永久删除 alpha.png" }).click()
+    await expect(page.getByRole("button", { name: "预览 alpha.png" })).toHaveCount(0)
+    await page.getByRole("button", { name: "预览 beta.png" }).click()
+    await page.getByRole("button", { name: "删除图片" }).click()
+    await page.getByRole("button", { name: "永久删除 beta.png" }).click()
+    await expect(page.getByText("暂无图片")).toBeVisible()
+    expect(await exists(join(libraryPath, "alpha.png"))).toBe(false)
+    expect(await exists(join(libraryPath, "beta.png"))).toBe(false)
+    expect(await exists(join(libraryPath, ".gitkeep"))).toBe(true)
+    expect(await readFile(notePath)).toEqual(noteBefore)
+    expect(await readdir(join(garden.root, ".garden-publisher", "image-import"))).toEqual([])
+  } finally {
+    await restoreImageChooser(application).catch(() => undefined)
+    await closeApplication(application)
+    await garden.cleanup()
+    await removeTemporaryDirectory(stateRoot)
+  }
+})
 
 test("edits, changes visibility, and publishes only the selected public note", async () => {
   const repository = await createTemporaryGitRepository()
