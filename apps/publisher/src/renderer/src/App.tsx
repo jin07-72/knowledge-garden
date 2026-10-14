@@ -242,12 +242,14 @@ export function PublisherApp({
   const showUnexpectedPublishError = (error: unknown, fallback: string): void => {
     const message = error instanceof Error ? error.message : fallback
     pendingPublishRequest.current = undefined
+    setPublishProgress(undefined)
     setPublishMessage(message)
     setPublishSubmitError({ code: "INTERNAL_ERROR", message })
   }
 
   const showPublishError = (error: AppError, fallback: string): void => {
     const message = messageFor(error, fallback)
+    setPublishProgress(undefined)
     setPublishMessage(message)
     setPublishSubmitError({ ...error, message })
   }

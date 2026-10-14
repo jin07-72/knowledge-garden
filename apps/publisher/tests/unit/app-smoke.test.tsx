@@ -12,6 +12,7 @@ import type {
   GardenApi,
   IpcResult,
   PreviewStatus,
+  PublishProgress,
   WorkspaceInspection,
 } from "../../src/shared/contracts"
 
@@ -781,6 +782,11 @@ describe("App blog orchestration", () => {
   it("repairs master and retries the exact publication selection", async () => {
     const user = userEvent.setup()
     const api = gardenApi()
+    let reportPublishProgress: ((progress: PublishProgress) => void) | undefined
+    vi.mocked(api.publish.onProgress).mockImplementation((listener) => {
+      reportPublishProgress = listener
+      return () => undefined
+    })
     const repairRequired = {
       code: "PUBLISH_BRANCH_REPAIR_REQUIRED" as const,
       message: "本地 master 正在跟踪 origin/main；请确认安全切换到 main 后继续发布。",
@@ -824,8 +830,13 @@ describe("App blog orchestration", () => {
     vi.mocked(api.publish.repairBranch).mockReturnValue(repairing.promise)
     Object.defineProperty(window, "garden", { configurable: true, value: api })
     render(<App />)
+    const openPublish = await screen.findByRole("button", { name: "检查并发布" })
+    act(() =>
+      reportPublishProgress?.({ phase: "failed", message: "上一轮发布的旧进度", percent: 90 }),
+    )
+    expect(document.querySelector(".status-live")).toHaveTextContent("上一轮发布的旧进度")
 
-    await user.click(await screen.findByRole("button", { name: "检查并发布" }))
+    await user.click(openPublish)
     const confirm = await screen.findByRole("button", { name: "验证并发布" })
     await user.click(confirm)
     expect(screen.getByRole("checkbox", { name: /修改.*Daily/ })).toBeDisabled()
