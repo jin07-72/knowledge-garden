@@ -49,6 +49,7 @@ import {
   type PreviewStartRequest,
   type PreviewStatus,
   type PublishCancelRequest,
+  type PublishBranchRepairReceipt,
   type PublishProgress,
   type PublishRequest,
   type PublishStartReceipt,
@@ -243,6 +244,8 @@ export function createGardenApi(ipc: IpcRendererPort): GardenApi {
   const publish = Object.freeze({
     start: (request: PublishRequest) =>
       invoke<PublishStartReceipt>(ipc, IPC_CHANNELS.requests.publishStart, request),
+    repairBranch: () =>
+      invoke<PublishBranchRepairReceipt>(ipc, IPC_CHANNELS.requests.publishRepairBranch),
     cancel: (request: PublishCancelRequest) =>
       invoke<void>(ipc, IPC_CHANNELS.requests.publishCancel, request),
     onProgress: (listener: (progress: PublishProgress) => void) =>

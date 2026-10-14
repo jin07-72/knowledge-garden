@@ -50,6 +50,7 @@ import {
   type PreviewStartRequest,
   type PreviewStatus,
   type PublishCancelRequest,
+  type PublishBranchRepairReceipt,
   type PublishProgress,
   type PublishRequest,
   type PublishStartReceipt,
@@ -144,6 +145,7 @@ export interface PublisherIpcServices {
   }
   readonly publish: {
     start(request: PublishRequest): Promise<PublishStartReceipt>
+    repairBranch(): Promise<PublishBranchRepairReceipt>
     cancel(request: PublishCancelRequest): Promise<void>
     subscribe(listener: (progress: PublishProgress) => void): () => void
   }
@@ -953,6 +955,15 @@ export function registerPublisherIpc(options: RegisterPublisherIpcOptions): () =
         publishRequestSchema,
         isTrustedSender,
         (request) => services.publish.start(request),
+      ),
+    ],
+    [
+      IPC_CHANNELS.requests.publishRepairBranch,
+      secureHandler(
+        IPC_CHANNELS.requests.publishRepairBranch,
+        noRequestSchema,
+        isTrustedSender,
+        () => services.publish.repairBranch(),
       ),
     ],
     [

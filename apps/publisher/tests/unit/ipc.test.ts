@@ -114,6 +114,7 @@ function services(): PublisherIpcServices & {
     changes: { list: call("changesList"), cancel: call("changesCancel") },
     publish: {
       start: call("publishStart"),
+      repairBranch: call("publishRepairBranch"),
       cancel: call("publishCancel"),
       subscribe(listener) {
         publishListeners.add(listener)
@@ -195,6 +196,26 @@ function setup() {
 }
 
 describe("secure publisher IPC", () => {
+  it("invokes the finite no-argument branch repair service for a trusted sender", async () => {
+    const { ipc, servicePorts } = setup()
+    const receipt = { branch: "main", upstream: "origin/main", head: "a".repeat(40) }
+    servicePorts.calls.publishRepairBranch.mockResolvedValueOnce(receipt)
+
+    await expect(
+      ipc.invoke(IPC_CHANNELS.requests.publishRepairBranch, trustedEvent),
+    ).resolves.toEqual({ ok: true, value: receipt })
+    expect(servicePorts.calls.publishRepairBranch).toHaveBeenCalledWith()
+  })
+
+  it("rejects branch repair from an untrusted sender", async () => {
+    const { ipc, servicePorts } = setup()
+
+    await expect(
+      ipc.invoke(IPC_CHANNELS.requests.publishRepairBranch, { sender: { id: 99 } }),
+    ).resolves.toMatchObject({ ok: false, error: { code: "IPC_UNAUTHORIZED" } })
+    expect(servicePorts.calls.publishRepairBranch).not.toHaveBeenCalled()
+  })
+
   it.each([
     [
       "domainsCreate",
@@ -847,6 +868,7 @@ describe("secure publisher IPC", () => {
         { changeGroupIds: ["note:a", "note:a"] },
         "publishStart",
       ],
+      [IPC_CHANNELS.requests.publishRepairBranch, {}, "publishRepairBranch"],
       [IPC_CHANNELS.requests.publishCancel, { operationId: "../bad" }, "publishCancel"],
       [IPC_CHANNELS.requests.historyGit, { limit: 0 }, "historyGit"],
       [IPC_CHANNELS.requests.historyGit, { requestId: "../bad" }, "historyGit"],
@@ -1016,11 +1038,7 @@ describe("secure publisher IPC", () => {
         { path, name: "cover.png", expectedContentHash: hash },
         "imagesDelete",
       ],
-      [
-        IPC_CHANNELS.requests.imagesCopyMarkdown,
-        { path, name: "cover.png" },
-        "imagesCopyMarkdown",
-      ],
+      [IPC_CHANNELS.requests.imagesCopyMarkdown, { path, name: "cover.png" }, "imagesCopyMarkdown"],
     ] as const
 
     for (const [channel, request, call] of pairs) {
@@ -1036,7 +1054,12 @@ describe("secure publisher IPC", () => {
       [IPC_CHANNELS.requests.imagesSelect, { path: "../daily.md" }, "imagesSelect"],
       [
         IPC_CHANNELS.requests.imagesCommit,
-        { path: "content/life/daily.md", selectionId: "token", include: ["cover.png"], overwrite: [] },
+        {
+          path: "content/life/daily.md",
+          selectionId: "token",
+          include: ["cover.png"],
+          overwrite: [],
+        },
         "imagesCommit",
       ],
       [
@@ -1078,9 +1101,13 @@ describe("secure publisher IPC", () => {
       ipc.invoke(IPC_CHANNELS.requests.imagesOpen, dead, { path: "content/life/daily.md" }),
     ).resolves.toMatchObject({ ok: false, error: { code: "IPC_UNAUTHORIZED" } })
     await expect(
-      ipc.invoke(IPC_CHANNELS.requests.imagesOpen, { sender: { isDestroyed: () => false } }, {
-        path: "content/life/daily.md",
-      }),
+      ipc.invoke(
+        IPC_CHANNELS.requests.imagesOpen,
+        { sender: { isDestroyed: () => false } },
+        {
+          path: "content/life/daily.md",
+        },
+      ),
     ).resolves.toMatchObject({ ok: false, error: { code: "IPC_UNAUTHORIZED" } })
     expect(servicePorts.calls.imagesOpen).not.toHaveBeenCalled()
   })
@@ -1538,6 +1565,16 @@ class FakeIpcRenderer implements IpcRendererPort {
 }
 
 describe("preload garden API", () => {
+  it("exposes validated branch repair through the exact no-argument channel", async () => {
+    const ipc = new FakeIpcRenderer()
+    const receipt = { branch: "main", upstream: "origin/main", head: "a".repeat(40) }
+    ipc.invoke = vi.fn(async () => ({ ok: true, value: { ...receipt, ignored: "host detail" } }))
+    const api = createGardenApi(ipc)
+
+    await expect(api.publish.repairBranch()).resolves.toEqual({ ok: true, value: receipt })
+    expect(ipc.invoke).toHaveBeenCalledWith(IPC_CHANNELS.requests.publishRepairBranch, undefined)
+  })
+
   it("exposes domain management through the shared renderer contract", () => {
     const api: SharedGardenApi = createGardenApi(new FakeIpcRenderer())
     void api.domains.list()
@@ -1690,6 +1727,7 @@ describe("preload garden API", () => {
     await api.changes.list()
     await api.changes.cancel()
     await api.publish.start({ changeGroupIds: ["note:a"], message: "Publish A" })
+    await api.publish.repairBranch()
     await api.publish.cancel({ operationId: "publish-1" })
     await api.history.git({ limit: 20, requestId: "history-1" })
     await api.history.deployments({ limit: 20, requestId: "history-1" })

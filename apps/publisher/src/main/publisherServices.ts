@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto"
 import type {
   AppError,
   PreviewStatus,
+  PublishBranchRepairReceipt,
   PublishProgress,
   TrashAdapter,
   TrashRecoveryUpdate,
@@ -46,6 +47,7 @@ import {
   type ImageLibraryAdapter,
   type ImageLibraryService,
 } from "./services/imageLibrary"
+import type { PublishBranchRepairService } from "./services/publishBranchRepair"
 
 export interface PreviewServicePort {
   start(request: {
@@ -88,6 +90,7 @@ export interface PublisherServiceDependencies {
     cancel(): Promise<void>
     dispose(): Promise<void>
   }
+  readonly branchRepair?: PublishBranchRepairService
   readonly publishCompletionMessage?: string
 }
 
@@ -135,6 +138,13 @@ export async function createPublisherServices(
   let emitPublish!: (progress: PublishProgress) => void
   const rollbackConstruction = async (primary: unknown): Promise<never> => {
     const failures: unknown[] = []
+    if (dependencies.branchRepair) {
+      try {
+        await dependencies.branchRepair.dispose()
+      } catch (error) {
+        failures.push(error)
+      }
+    }
     if (publisher) {
       try {
         await publisher.dispose()
@@ -210,6 +220,7 @@ export async function createPublisherServices(
     return rollbackConstruction(new Error("Publisher services failed to initialize."))
   let activePublish: string | undefined
   let preparingPublish = 0
+  let repairingBranch: Promise<PublishBranchRepairReceipt> | undefined
   let switchPreparing = false
   const recoveryListeners = new Set<(update: TrashRecoveryUpdate) => void>()
   const reconcileTrash =
@@ -259,7 +270,7 @@ export async function createPublisherServices(
   }
   return {
     assertSwitchSafe: async () => {
-      if (activePublish || preparingPublish > 0) throw switchBusy(true)
+      if (activePublish || preparingPublish > 0 || repairingBranch) throw switchBusy(true)
       switchPreparing = true
       try {
         await changeScanner.cancel()
@@ -286,6 +297,7 @@ export async function createPublisherServices(
         changeScanner.dispose?.() ?? changeScanner.cancel(),
         history.dispose(),
         publisher?.dispose(),
+        dependencies.branchRepair?.dispose(),
       ])
     },
     workspace: {
@@ -346,15 +358,30 @@ export async function createPublisherServices(
       start: async (request) => {
         if (switchPreparing) throw switchBusy()
         if (!publisher) return reject("Publishing")
-        if (activePublish) {
+        if (activePublish || repairingBranch) {
           throw {
             code: "INVALID_INPUT",
-            message: "A publication is already running.",
+            message: activePublish
+              ? "A publication is already running."
+              : "Publication branch repair is already running.",
           } satisfies AppError
         }
         preparingPublish += 1
         let review
         try {
+          const inspection = await dependencies.branchRepair?.inspect()
+          if (inspection?.status === "repairable") {
+            throw {
+              code: "PUBLISH_BRANCH_REPAIR_REQUIRED",
+              message: "本地 master 正在跟踪 origin/main；请确认安全切换到 main 后继续发布。",
+            } satisfies AppError
+          }
+          if (inspection?.status === "blocked") {
+            throw {
+              code: "PUBLISH_BRANCH_REPAIR_BLOCKED",
+              message: inspection.reason,
+            } satisfies AppError
+          }
           review = await changeScanner.list()
         } finally {
           preparingPublish -= 1
@@ -401,6 +428,23 @@ export async function createPublisherServices(
             if (activePublish === operationId) activePublish = undefined
           })
         return { operationId }
+      },
+      repairBranch: () => {
+        if (!dependencies.branchRepair) return reject("Publication branch repair")
+        if (repairingBranch) return repairingBranch
+        if (switchPreparing) return Promise.reject(switchBusy())
+        if (activePublish || preparingPublish > 0) {
+          return Promise.reject({
+            code: "INVALID_INPUT",
+            message: "Publication branch repair cannot run while publication is active.",
+          } satisfies AppError)
+        }
+        const operation = dependencies.branchRepair.repair()
+        const tracked = operation.finally(() => {
+          if (repairingBranch === tracked) repairingBranch = undefined
+        })
+        repairingBranch = tracked
+        return tracked
       },
       cancel: async (request) => {
         if (!publisher) return reject("Publishing")

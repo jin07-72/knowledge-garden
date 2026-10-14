@@ -47,6 +47,7 @@ import {
   type BlogImportService,
 } from "./services/blogImport"
 import { createElectronImageLibraryAdapter } from "./services/imageLibraryElectron"
+import { createPublishBranchRepair } from "./services/publishBranchRepair"
 
 let mainWindow: BrowserWindow | undefined
 let mainWindowTrust: RendererTrustPolicy | undefined
@@ -431,6 +432,7 @@ app.whenReady().then(async () => {
       ...(bundledRuntime ? { runtime: bundledRuntime } : {}),
       ...(e2e ? {} : { previewPortAvailable: () => isPreviewPortAvailable(8080) }),
       online: () => (e2e ? true : net.isOnline()),
+      branchRepair: createPublishBranchRepair({ workspace }),
       publisherFactory,
       ...(e2e && process.env.GARDEN_PUBLISHER_E2E_DEPLOYMENT === "success"
         ? { publishCompletionMessage: "部署成功" }

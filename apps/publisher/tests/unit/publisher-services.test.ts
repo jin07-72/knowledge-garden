@@ -12,10 +12,8 @@ import {
 import { createBlogRuntime, runBlogManagementShutdown } from "../../src/main/blogRuntime"
 import type { DomainCatalog } from "../../src/main/services/domains"
 import type { PreviewStatus } from "../../src/shared/contracts"
-import type {
-  ImageLibraryAdapter,
-  ImageLibraryService,
-} from "../../src/main/services/imageLibrary"
+import type { ImageLibraryAdapter, ImageLibraryService } from "../../src/main/services/imageLibrary"
+import type { PublishBranchRepairService } from "../../src/main/services/publishBranchRepair"
 import { git } from "../helpers/git"
 
 const temporaryDirectories: string[] = []
@@ -99,6 +97,21 @@ function imageService(overrides: Partial<ImageLibraryService> = {}): ImageLibrar
 }
 
 describe("publisher service wiring", () => {
+  function branchRepair(
+    overrides: Partial<PublishBranchRepairService> = {},
+  ): PublishBranchRepairService {
+    return {
+      inspect: vi.fn(async () => ({ status: "ready" as const, head: "a".repeat(40) })),
+      repair: vi.fn(async () => ({
+        branch: "main" as const,
+        upstream: "origin/main" as const,
+        head: "a".repeat(40),
+      })),
+      dispose: vi.fn(async () => undefined),
+      ...overrides,
+    }
+  }
+
   it("creates exactly one workspace-bound image service and exposes it unchanged", async () => {
     const workspace = await garden()
     const adapter = imageAdapter()
@@ -585,6 +598,166 @@ describe("publisher service wiring", () => {
     await vi.waitFor(() => expect(publish).toHaveBeenCalledOnce())
     await vi.waitFor(() => expect(progress).toContain("complete:部署成功"))
     await services.dispose()
+  })
+
+  it("rejects a repairable branch before scanning changes or starting publication", async () => {
+    const workspace = await garden()
+    const scan = vi.fn(async () => ({ groups: [] }))
+    const publish = vi.fn(async () => undefined)
+    const repair = branchRepair({
+      inspect: vi.fn(async () => ({ status: "repairable" as const, head: "a".repeat(40) })),
+    })
+    const services = await createPublisherServices({
+      workspace,
+      trash: { trashItem: async () => undefined },
+      isTracked: async () => false,
+      preview: preview(),
+      changeScanner: { list: scan, cancel: vi.fn(async () => undefined) },
+      branchRepair: repair,
+      publisherFactory: () => ({
+        publish,
+        cancel: vi.fn(async () => undefined),
+        dispose: vi.fn(async () => undefined),
+      }),
+    })
+
+    await expect(services.publish.start({ changeGroupIds: ["note:daily"] })).rejects.toEqual({
+      code: "PUBLISH_BRANCH_REPAIR_REQUIRED",
+      message: "本地 master 正在跟踪 origin/main；请确认安全切换到 main 后继续发布。",
+    })
+    expect(scan).not.toHaveBeenCalled()
+    expect(publish).not.toHaveBeenCalled()
+    await services.dispose()
+  })
+
+  it("maps a blocked branch inspection to the public blocked error", async () => {
+    const workspace = await garden()
+    const repair = branchRepair({
+      inspect: vi.fn(async () => ({ status: "blocked" as const, reason: "A local main exists." })),
+    })
+    const services = await createPublisherServices({
+      workspace,
+      trash: { trashItem: async () => undefined },
+      isTracked: async () => false,
+      preview: preview(),
+      branchRepair: repair,
+      changeScanner: { list: vi.fn(), cancel: vi.fn(async () => undefined) },
+      publisherFactory: () => ({
+        publish: vi.fn(async () => undefined),
+        cancel: vi.fn(async () => undefined),
+        dispose: vi.fn(async () => undefined),
+      }),
+    })
+
+    await expect(services.publish.start({ changeGroupIds: ["note:daily"] })).rejects.toEqual({
+      code: "PUBLISH_BRANCH_REPAIR_BLOCKED",
+      message: "A local main exists.",
+    })
+    await services.dispose()
+  })
+
+  it("coordinates branch repair against preparing, active, and repairing publications", async () => {
+    const workspace = await garden()
+    let finishInspect!: () => void
+    const inspectPending = new Promise<void>((resolve) => {
+      finishInspect = resolve
+    })
+    let finishRepair!: () => void
+    const repairPending = new Promise<void>((resolve) => {
+      finishRepair = resolve
+    })
+    const repair = branchRepair({
+      inspect: vi.fn(async () => {
+        await inspectPending
+        return { status: "ready" as const, head: "a".repeat(40) }
+      }),
+      repair: vi.fn(async () => {
+        await repairPending
+        return { branch: "main" as const, upstream: "origin/main" as const, head: "a".repeat(40) }
+      }),
+    })
+    const services = await createPublisherServices({
+      workspace,
+      trash: { trashItem: async () => undefined },
+      isTracked: async () => false,
+      preview: preview(),
+      branchRepair: repair,
+      changeScanner: {
+        list: vi.fn(async () => ({ groups: [] })),
+        cancel: vi.fn(async () => undefined),
+      },
+      publisherFactory: () => ({
+        publish: vi.fn(async () => undefined),
+        cancel: vi.fn(async () => undefined),
+        dispose: vi.fn(async () => undefined),
+      }),
+    })
+
+    const preparing = services.publish.start({ changeGroupIds: ["note:daily"] })
+    await vi.waitFor(() => expect(repair.inspect).toHaveBeenCalledOnce())
+    await expect(services.publish.repairBranch()).rejects.toMatchObject({ code: "INVALID_INPUT" })
+    finishInspect()
+    await expect(preparing).rejects.toMatchObject({ code: "INVALID_INPUT" })
+
+    const repairing = services.publish.repairBranch()
+    const sameRepair = services.publish.repairBranch()
+    await vi.waitFor(() => expect(repair.repair).toHaveBeenCalledOnce())
+    await expect(services.publish.start({ changeGroupIds: ["note:daily"] })).rejects.toMatchObject({
+      code: "INVALID_INPUT",
+    })
+    finishRepair()
+    await expect(Promise.all([repairing, sameRepair])).resolves.toEqual([
+      { branch: "main", upstream: "origin/main", head: "a".repeat(40) },
+      { branch: "main", upstream: "origin/main", head: "a".repeat(40) },
+    ])
+    await services.dispose()
+  })
+
+  it("rejects branch repair while publication is active and disposes the branch service", async () => {
+    const workspace = await garden()
+    let finishPublish!: () => void
+    const publishing = new Promise<void>((resolve) => {
+      finishPublish = resolve
+    })
+    const repair = branchRepair()
+    const services = await createPublisherServices({
+      workspace,
+      trash: { trashItem: async () => undefined },
+      isTracked: async () => false,
+      preview: preview(),
+      branchRepair: repair,
+      changeScanner: {
+        list: vi.fn(async () => ({
+          groups: [
+            {
+              id: "note:daily",
+              label: "Daily",
+              kind: "modified" as const,
+              visibility: "public" as const,
+              selection: "default" as const,
+              description: "changed",
+              paths: ["content/life/daily.md"],
+              attachments: [],
+            },
+          ],
+        })),
+        cancel: vi.fn(async () => undefined),
+      },
+      publisherFactory: () => ({
+        publish: () => publishing,
+        cancel: vi.fn(async () => undefined),
+        dispose: vi.fn(async () => undefined),
+      }),
+    })
+
+    await services.publish.start({ changeGroupIds: ["note:daily"] })
+    await expect(services.publish.repairBranch()).rejects.toMatchObject({ code: "INVALID_INPUT" })
+    finishPublish()
+    await vi.waitFor(() =>
+      expect(services.publish.repairBranch()).resolves.toMatchObject({ branch: "main" }),
+    )
+    await services.dispose()
+    expect(repair.dispose).toHaveBeenCalledOnce()
   })
 
   it("keeps IPC registered until preview disposal succeeds", async () => {
