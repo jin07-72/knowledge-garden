@@ -147,7 +147,7 @@ export function PublishReview({
                       <input
                         type="checkbox"
                         checked={!locked && selected.has(group.id)}
-                        disabled={locked}
+                        disabled={locked || publishing}
                         onChange={() => toggle(group.id)}
                         aria-label={`${kindLabel[group.kind]}：${group.label}`}
                       />

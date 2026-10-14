@@ -246,6 +246,12 @@ export function PublisherApp({
     setPublishSubmitError({ code: "INTERNAL_ERROR", message })
   }
 
+  const showPublishError = (error: AppError, fallback: string): void => {
+    const message = messageFor(error, fallback)
+    setPublishMessage(message)
+    setPublishSubmitError({ ...error, message })
+  }
+
   const setBlogOperationBusy = useCallback((busy: boolean): void => {
     blogBusyRef.current = busy
     setBlogBusy(busy)
@@ -1129,10 +1135,13 @@ export function PublisherApp({
             try {
               const saved = (await markdownEditor.current?.flush()) ?? true
               if (!saved) {
-                setPublishSubmitError({
-                  code: "INTERNAL_ERROR",
-                  message: "当前笔记保存失败，未开始发布。",
-                })
+                showPublishError(
+                  {
+                    code: "INTERNAL_ERROR",
+                    message: "当前笔记保存失败，未开始发布。",
+                  },
+                  "当前笔记保存失败，未开始发布。",
+                )
                 return
               }
               const request: PublishRequest = Object.freeze({
@@ -1141,9 +1150,7 @@ export function PublisherApp({
               pendingPublishRequest.current = request
               const result = await api.publish.start(request)
               if (!result.ok) {
-                const message = messageFor(result.error, "无法开始发布。")
-                setPublishMessage(message)
-                setPublishSubmitError({ ...result.error, message })
+                showPublishError(result.error, "无法开始发布。")
                 return
               }
               pendingPublishRequest.current = undefined
@@ -1160,12 +1167,12 @@ export function PublisherApp({
             try {
               const repaired = await api.publish.repairBranch()
               if (!repaired.ok) {
-                setPublishSubmitError(repaired.error)
+                showPublishError(repaired.error, "无法安全切换到 main。")
                 return
               }
               const retried = await api.publish.start(request)
               if (!retried.ok) {
-                setPublishSubmitError(retried.error)
+                showPublishError(retried.error, "无法继续发布。")
                 return
               }
               pendingPublishRequest.current = undefined

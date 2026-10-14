@@ -809,16 +809,28 @@ describe("App blog orchestration", () => {
         ],
       }),
     )
+    const starting = deferred<Awaited<ReturnType<GardenApi["publish"]["start"]>>>()
     vi.mocked(api.publish.start)
-      .mockResolvedValueOnce({ ok: false, error: repairRequired })
-      .mockResolvedValueOnce(ok({ operationId: "publish-2" }))
+      .mockReturnValueOnce(starting.promise)
+      .mockResolvedValueOnce({
+        ok: false,
+        error: {
+          code: "PUBLISH_BRANCH_REPAIR_REQUIRED",
+          message: "重试发布仍被分支状态阻止。",
+        },
+      })
+      .mockResolvedValueOnce(ok({ operationId: "publish-3" }))
     const repairing = deferred<Awaited<ReturnType<GardenApi["publish"]["repairBranch"]>>>()
     vi.mocked(api.publish.repairBranch).mockReturnValue(repairing.promise)
     Object.defineProperty(window, "garden", { configurable: true, value: api })
     render(<App />)
 
     await user.click(await screen.findByRole("button", { name: "检查并发布" }))
-    await user.click(await screen.findByRole("button", { name: "验证并发布" }))
+    const confirm = await screen.findByRole("button", { name: "验证并发布" })
+    await user.click(confirm)
+    expect(screen.getByRole("checkbox", { name: /修改.*Daily/ })).toBeDisabled()
+    expect(screen.getByRole("checkbox", { name: /附件.*Daily 图片/ })).toBeDisabled()
+    starting.resolve({ ok: false, error: repairRequired })
 
     const alert = await screen.findByRole("alert")
     expect(alert).toHaveTextContent("本地 master")
@@ -832,6 +844,16 @@ describe("App blog orchestration", () => {
     repairing.resolve(ok({ branch: "main", upstream: "origin/main", head: "a".repeat(40) }))
     await waitFor(() =>
       expect(api.publish.start).toHaveBeenNthCalledWith(2, {
+        changeGroupIds: ["note:daily", "attachment:daily"],
+      }),
+    )
+    expect(await screen.findByRole("alert")).toHaveTextContent("重试发布仍被分支状态阻止")
+    expect(document.querySelector(".status-live")).toHaveTextContent("重试发布仍被分支状态阻止")
+
+    await user.click(screen.getByRole("button", { name: "安全切换到 main 并继续" }))
+    expect(api.publish.repairBranch).toHaveBeenCalledTimes(2)
+    await waitFor(() =>
+      expect(api.publish.start).toHaveBeenNthCalledWith(3, {
         changeGroupIds: ["note:daily", "attachment:daily"],
       }),
     )
