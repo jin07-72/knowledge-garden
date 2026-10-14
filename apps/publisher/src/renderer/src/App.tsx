@@ -232,6 +232,7 @@ export function PublisherApp({
   const previewRequest = useRef(0)
   const changesRequest = useRef(0)
   const pendingPublishRequest = useRef<PublishRequest | undefined>(undefined)
+  const publishAttempt = useRef(0)
   const previewStart = useRef<ReturnType<GardenApi["preview"]["start"]> | undefined>(undefined)
   const safePaneSizes = useMemo(
     () => clampPaneSizes(paneSizes, workspaceWidth),
@@ -1102,6 +1103,7 @@ export function PublisherApp({
             changeReviewState === "error" ? "publish-review-unavailable" : undefined
           }
           onClick={() => {
+            publishAttempt.current += 1
             pendingPublishRequest.current = undefined
             setPublishSubmitError(undefined)
             setChangeReviewOpen(true)
@@ -1122,20 +1124,34 @@ export function PublisherApp({
           error={changeReviewState === "error" ? publishMessage : undefined}
           submitError={publishSubmitError}
           onClose={() => {
+            publishAttempt.current += 1
             changesRequest.current += 1
             void api.changes.cancel()
             pendingPublishRequest.current = undefined
             setPublishSubmitError(undefined)
             setChangeReviewOpen(false)
           }}
-          onRefresh={() => void loadChanges()}
+          onRefresh={() => {
+            publishAttempt.current += 1
+            void loadChanges()
+          }}
           onClearSubmitError={() => {
+            publishAttempt.current += 1
             pendingPublishRequest.current = undefined
             setPublishSubmitError(undefined)
+            setPublishProgress(undefined)
+            setPublishMessage(
+              changeReview?.blockedReason ??
+                (changeReview?.groups.length === 0
+                  ? "当前没有可发布变化"
+                  : "可查看并选择要发布的变化"),
+            )
           }}
           onPublish={async (changeGroupIds) => {
+            const attempt = ++publishAttempt.current
             try {
               const saved = (await markdownEditor.current?.flush()) ?? true
+              if (attempt !== publishAttempt.current) return
               if (!saved) {
                 showPublishError(
                   {
@@ -1151,6 +1167,7 @@ export function PublisherApp({
               })
               pendingPublishRequest.current = request
               const result = await api.publish.start(request)
+              if (attempt !== publishAttempt.current) return
               if (!result.ok) {
                 showPublishError(result.error, "无法开始发布。")
                 return
@@ -1160,19 +1177,23 @@ export function PublisherApp({
               setPublishMessage("正在验证所选公开变化…")
               setChangeReviewOpen(false)
             } catch (error) {
+              if (attempt !== publishAttempt.current) return
               showUnexpectedPublishError(error, "无法开始发布。")
             }
           }}
           onRepairAndPublish={async () => {
             const request = pendingPublishRequest.current
             if (!request) return
+            const attempt = ++publishAttempt.current
             try {
               const repaired = await api.publish.repairBranch()
+              if (attempt !== publishAttempt.current) return
               if (!repaired.ok) {
                 showPublishError(repaired.error, "无法安全切换到 main。")
                 return
               }
               const retried = await api.publish.start(request)
+              if (attempt !== publishAttempt.current) return
               if (!retried.ok) {
                 showPublishError(retried.error, "无法继续发布。")
                 return
@@ -1182,6 +1203,7 @@ export function PublisherApp({
               setPublishMessage("正在验证所选公开变化…")
               setChangeReviewOpen(false)
             } catch (error) {
+              if (attempt !== publishAttempt.current) return
               showUnexpectedPublishError(error, "无法安全切换分支并继续发布。")
             }
           }}

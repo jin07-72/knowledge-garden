@@ -41,6 +41,7 @@ export function PublishReview({
   onClearSubmitError,
 }: PublishReviewProps): React.JSX.Element {
   const closeButton = useRef<HTMLButtonElement>(null)
+  const mounted = useRef(true)
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set())
   const [publishing, setPublishing] = useState(false)
 
@@ -55,6 +56,13 @@ export function PublishReview({
       ),
     )
   }, [review])
+
+  useEffect(
+    () => () => {
+      mounted.current = false
+    },
+    [],
+  )
 
   const counts = useMemo(() => {
     const chosen = review?.groups.filter((group) => selected.has(group.id)) ?? []
@@ -80,7 +88,9 @@ export function PublishReview({
     setPublishing(true)
     void submission()
       .catch(() => undefined)
-      .finally(() => setPublishing(false))
+      .finally(() => {
+        if (mounted.current) setPublishing(false)
+      })
   }
 
   return (
