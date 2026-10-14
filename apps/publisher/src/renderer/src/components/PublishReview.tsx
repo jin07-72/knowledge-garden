@@ -57,12 +57,12 @@ export function PublishReview({
     )
   }, [review])
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    mounted.current = true
+    return () => {
       mounted.current = false
-    },
-    [],
-  )
+    }
+  }, [])
 
   const counts = useMemo(() => {
     const chosen = review?.groups.filter((group) => selected.has(group.id)) ?? []

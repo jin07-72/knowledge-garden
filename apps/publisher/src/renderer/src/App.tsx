@@ -361,6 +361,8 @@ export function PublisherApp({
     })
     return () => {
       appMounted.current = false
+      publishAttempt.current += 1
+      pendingPublishRequest.current = undefined
       unsubscribeBeforeClose()
       unsubscribeCloseBlocked()
     }

@@ -829,7 +829,11 @@ describe("App blog orchestration", () => {
     const repairing = deferred<Awaited<ReturnType<GardenApi["publish"]["repairBranch"]>>>()
     vi.mocked(api.publish.repairBranch).mockReturnValue(repairing.promise)
     Object.defineProperty(window, "garden", { configurable: true, value: api })
-    render(<App />)
+    render(
+      <StrictMode>
+        <App />
+      </StrictMode>,
+    )
     const openPublish = await screen.findByRole("button", { name: "检查并发布" })
     await waitFor(() => expect(reportPublishProgress).toBeTypeOf("function"))
     act(() =>
@@ -919,5 +923,45 @@ describe("App blog orchestration", () => {
     expect(api.publish.start).toHaveBeenCalledTimes(1)
     expect(screen.getByRole("dialog", { name: "检查并发布" })).toBeVisible()
     expect(screen.queryByRole("alert")).not.toBeInTheDocument()
+  })
+
+  it("does not retry a repair after the app unmounts", async () => {
+    const user = userEvent.setup()
+    const api = gardenApi()
+    vi.mocked(api.changes.list).mockResolvedValue(
+      ok({
+        groups: [
+          {
+            id: "note:daily",
+            label: "Daily",
+            kind: "modified",
+            selection: "default",
+            description: "公开文章已修改",
+            paths: ["content/study/daily.md"],
+            attachments: [],
+          },
+        ],
+      }),
+    )
+    vi.mocked(api.publish.start).mockResolvedValueOnce({
+      ok: false,
+      error: {
+        code: "PUBLISH_BRANCH_REPAIR_REQUIRED",
+        message: "本地 master 正在跟踪 origin/main。",
+      },
+    })
+    const repairing = deferred<Awaited<ReturnType<GardenApi["publish"]["repairBranch"]>>>()
+    vi.mocked(api.publish.repairBranch).mockReturnValue(repairing.promise)
+    Object.defineProperty(window, "garden", { configurable: true, value: api })
+    const view = render(<App />)
+
+    await user.click(await screen.findByRole("button", { name: "检查并发布" }))
+    await user.click(await screen.findByRole("button", { name: "验证并发布" }))
+    await user.click(await screen.findByRole("button", { name: "安全切换到 main 并继续" }))
+    view.unmount()
+    repairing.resolve(ok({ branch: "main", upstream: "origin/main", head: "a".repeat(40) }))
+    await act(async () => void (await repairing.promise))
+
+    expect(api.publish.start).toHaveBeenCalledTimes(1)
   })
 })
