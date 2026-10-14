@@ -1014,6 +1014,7 @@ test("repairs legacy master and publishes the exact selection", async () => {
   })
   const stateRoot = await createTemporaryDirectory("garden-publisher-e2e-branch-repair-")
   let application: ElectronApplication | undefined
+  let primaryFailure: unknown
   const privatePath = join(garden.root, "private", "life", "draft.md")
   const unrelatedPublicPath = join(garden.root, "content", "life", "unrelated.md")
   const privateBefore = note("Private draft", "must stay local and unchanged")
@@ -1109,12 +1110,37 @@ test("repairs legacy master and publishes the exact selection", async () => {
     expect(
       await gitOutput(garden.root, ["status", "--porcelain", "--", "content/life/unrelated.md"]),
     ).toBe("?? content/life/unrelated.md")
-  } finally {
+  } catch (failure) {
+    primaryFailure = failure
+  }
+
+  const cleanupFailures: unknown[] = []
+  try {
     await closeApplication(application)
+  } catch (failure) {
+    cleanupFailures.push(failure)
+  }
+  try {
     if (!(await bounded(garden.cleanup(), 10_000))) {
       throw new Error("The temporary E2E garden could not be cleaned up within 10 seconds.")
     }
+  } catch (failure) {
+    cleanupFailures.push(failure)
+  }
+  try {
     await removeTemporaryDirectory(stateRoot)
+  } catch (failure) {
+    cleanupFailures.push(failure)
+  }
+
+  if (primaryFailure !== undefined && cleanupFailures.length === 0) throw primaryFailure
+  if (primaryFailure !== undefined || cleanupFailures.length > 0) {
+    throw new AggregateError(
+      primaryFailure === undefined ? cleanupFailures : [primaryFailure, ...cleanupFailures],
+      primaryFailure === undefined
+        ? "The branch repair E2E cleanup failed."
+        : "The branch repair E2E flow failed; cleanup results are attached.",
+    )
   }
 })
 
