@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { systemCommandRunner, type CommandRunner } from "../../src/main/lib/commandRunner"
 import { createPublishBranchRepair } from "../../src/main/services/publishBranchRepair"
 import {
+  PublishCommandFailure,
   createBoundedCommandRunnerForTest,
   type BoundedCommandRunner,
 } from "../../src/main/services/publish"
@@ -331,6 +332,73 @@ describe("publish branch repair", () => {
       await expect(service.inspect()).resolves.toMatchObject({ status: "repairable" })
     },
   )
+
+  it("does not classify changed upstream configuration as an unchanged rename failure", async () => {
+    const repository = await fixture()
+    let injected = false
+    const rename = ["branch", "-m", "master", "main"]
+    const runner: CommandRunner = {
+      async run(request) {
+        if (!injected && request.args.join("\0") === rename.join("\0")) {
+          injected = true
+          const changed = await systemCommandRunner.run({
+            ...request,
+            args: ["branch", "--unset-upstream", "master"],
+          })
+          expect(changed.exitCode).toBe(0)
+          return { exitCode: 1, stdout: "", stderr: "misreported rename failure" }
+        }
+        return systemCommandRunner.run(request)
+      },
+    }
+    const service = createPublishBranchRepair({
+      workspace: repository.root,
+      runner: createBoundedCommandRunnerForTest(runner),
+    })
+
+    await expect(service.repair()).rejects.toMatchObject({
+      code: "PUBLISH_BRANCH_REPAIR_UNCERTAIN",
+    })
+    expect(await currentBranch(repository.root)).toBe("master")
+    await expect(service.inspect()).rejects.toMatchObject({
+      code: "PUBLISH_BRANCH_REPAIR_UNCERTAIN",
+    })
+    await expect(service.repair()).rejects.toMatchObject({
+      code: "PUBLISH_BRANCH_REPAIR_UNCERTAIN",
+    })
+  })
+
+  it("persists uncertainty without probing after unconfirmed rename termination", async () => {
+    const repository = await fixture()
+    const requests: string[][] = []
+    const rename = ["branch", "-m", "master", "main"]
+    const runner: CommandRunner = {
+      run(request) {
+        requests.push([...request.args])
+        if (request.args.join("\0") === rename.join("\0")) {
+          return Promise.reject(new PublishCommandFailure("termination not confirmed", true))
+        }
+        return systemCommandRunner.run(request)
+      },
+    }
+    const service = createPublishBranchRepair({
+      workspace: repository.root,
+      runner: createBoundedCommandRunnerForTest(runner),
+    })
+
+    await expect(service.repair()).rejects.toMatchObject({
+      code: "PUBLISH_BRANCH_REPAIR_UNCERTAIN",
+    })
+    expect(requests.at(-1)).toEqual(rename)
+    const requestCount = requests.length
+    await expect(service.inspect()).rejects.toMatchObject({
+      code: "PUBLISH_BRANCH_REPAIR_UNCERTAIN",
+    })
+    await expect(service.repair()).rejects.toMatchObject({
+      code: "PUBLISH_BRANCH_REPAIR_UNCERTAIN",
+    })
+    expect(requests).toHaveLength(requestCount)
+  })
 
   it("persists uncertainty when rollback cannot be confirmed", async () => {
     const repository = await fixture()

@@ -82,6 +82,15 @@ function blocked(reason: string): PublishBranchInspection {
   return { status: "blocked", reason }
 }
 
+function terminationUncertain(caught: unknown): boolean {
+  return (
+    typeof caught === "object" &&
+    caught !== null &&
+    "terminationUncertain" in caught &&
+    caught.terminationUncertain === true
+  )
+}
+
 class GitPublishBranchRepair implements PublishBranchRepairService {
   readonly #workspace: string
   readonly #runner: BoundedCommandRunner
@@ -141,10 +150,11 @@ class GitPublishBranchRepair implements PublishBranchRepairService {
     original: RepairSnapshot,
   ): Promise<"renamed" | "unchanged" | "ambiguous"> {
     try {
-      const [branch, head, status, main, master] = await Promise.all([
+      const [branch, head, status, upstream, main, master] = await Promise.all([
         this.#git(["symbolic-ref", "--quiet", "--short", "HEAD"]),
         this.#git(["rev-parse", "--verify", "HEAD"]),
         this.#git(["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
+        this.#git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]),
         this.#git(["show-ref", "--verify", "--quiet", "refs/heads/main"]),
         this.#git(["show-ref", "--verify", "--quiet", "refs/heads/master"]),
       ])
@@ -153,7 +163,9 @@ class GitPublishBranchRepair implements PublishBranchRepairService {
         head.exitCode !== 0 ||
         head.stdout.trim() !== original.head ||
         status.exitCode !== 0 ||
-        status.stdout !== original.statusBytes
+        status.stdout !== original.statusBytes ||
+        upstream.exitCode !== 0 ||
+        upstream.stdout.trim() !== "origin/main"
       ) {
         return "ambiguous"
       }
@@ -305,7 +317,14 @@ class GitPublishBranchRepair implements PublishBranchRepairService {
     try {
       const renamed = await this.#git(["branch", "-m", "master", "main"])
       renameFailed = renamed.exitCode !== 0
-    } catch {
+    } catch (caught) {
+      if (terminationUncertain(caught)) {
+        this.#uncertain = true
+        throw new PublishBranchRepairError(
+          "PUBLISH_BRANCH_REPAIR_UNCERTAIN",
+          "Publication branch rename termination could not be confirmed.",
+        )
+      }
       renameFailed = true
     }
     if (renameFailed) {
