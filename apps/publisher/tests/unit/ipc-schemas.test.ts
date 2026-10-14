@@ -758,6 +758,13 @@ describe("IPC success schemas", () => {
       success: true,
       data: { branch: "main", upstream: "origin/main", head: "a".repeat(40) },
     })
+    expect(
+      entry[1].safeParse({
+        branch: "main",
+        upstream: "origin/main",
+        head: "a".repeat(64),
+      }).success,
+    ).toBe(true)
   })
 
   it("rejects master and invalid upstreams in publish branch repair receipts", () => {
