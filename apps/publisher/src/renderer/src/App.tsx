@@ -36,6 +36,7 @@ import { DeleteNoteDialog } from "./components/DeleteNoteDialog"
 import { BlogSwitcher } from "./components/BlogSwitcher"
 import { BlogManager, type BlogImportUiState } from "./components/BlogManager"
 import { DomainManager } from "./components/DomainManager"
+import { publishedDeploymentStatus } from "./publishDeploymentStatus"
 import "./app.css"
 
 type LoadState = "loading" | "ready" | "error"
@@ -49,6 +50,12 @@ const MIN_EDITOR = 360
 const MAX_EDITOR = 900
 const MIN_PREVIEW = 360
 const COMPACT_PANE_BREAKPOINT = 1050
+let publishDeploymentRequestSequence = 0
+
+function nextPublishDeploymentRequestId(): string {
+  publishDeploymentRequestSequence += 1
+  return `publish-deployment-${Date.now().toString(36)}-${publishDeploymentRequestSequence.toString(36)}`
+}
 
 type PaneSizes = { sidebar: number; editor: number }
 
@@ -200,6 +207,7 @@ export function PublisherApp({
   const [publishMessage, setPublishMessage] = useState("正在检查可发布变化…")
   const [publishSubmitError, setPublishSubmitError] = useState<AppError>()
   const [publishProgress, setPublishProgress] = useState<PublishProgress>()
+  const [publishActionsUrl, setPublishActionsUrl] = useState<string>()
   const [saveStateLabel, setSaveStateLabel] = useState("已保存")
   const [visibilityBusy, setVisibilityBusy] = useState(false)
   const [visibilityError, setVisibilityError] = useState<{
@@ -234,6 +242,18 @@ export function PublisherApp({
   const pendingPublishRequest = useRef<PublishRequest | undefined>(undefined)
   const publishAttempt = useRef(0)
   const previewStart = useRef<ReturnType<GardenApi["preview"]["start"]> | undefined>(undefined)
+  const publishDeploymentGeneration = useRef(0)
+  const publishDeploymentRequest = useRef<string | undefined>(undefined)
+  const publishCompletionHandled = useRef(false)
+
+  const cancelPublishDeployment = useCallback((): void => {
+    const requestId = publishDeploymentRequest.current
+    publishDeploymentGeneration.current += 1
+    publishDeploymentRequest.current = undefined
+    publishCompletionHandled.current = false
+    if (requestId) void api.history.cancel({ requestId }).catch(() => undefined)
+  }, [api])
+
   const safePaneSizes = useMemo(
     () => clampPaneSizes(paneSizes, workspaceWidth),
     [paneSizes, workspaceWidth],
@@ -468,8 +488,12 @@ export function PublisherApp({
     return previewStart.current
   }, [api])
 
-  const loadChanges = useCallback(async (): Promise<void> => {
+  const loadChanges = useCallback(async (expectedPublishGeneration?: number): Promise<void> => {
     const request = ++changesRequest.current
+    const stale = (): boolean =>
+      request !== changesRequest.current ||
+      (expectedPublishGeneration !== undefined &&
+        expectedPublishGeneration !== publishDeploymentGeneration.current)
     pendingPublishRequest.current = undefined
     setPublishSubmitError(undefined)
     setChangeReviewState("loading")
@@ -477,14 +501,14 @@ export function PublisherApp({
     try {
       result = await api.changes.list()
     } catch (error) {
-      if (request !== changesRequest.current) return
+      if (stale()) return
       setChangeReview(undefined)
       setChangeCount(undefined)
       setChangeReviewState("error")
       setPublishMessage(error instanceof Error ? error.message : "无法检查可发布变化")
       return
     }
-    if (request !== changesRequest.current) return
+    if (stale()) return
     if (!result.ok) {
       setChangeReview(undefined)
       setChangeCount(undefined)
@@ -501,6 +525,52 @@ export function PublisherApp({
         (result.value.groups.length === 0 ? "当前没有可发布变化" : "可查看并选择要发布的变化"),
     )
   }, [api])
+
+  const applyPublishProgress = useCallback(
+    (next: PublishProgress): void => {
+      if (next.phase === "validating") {
+        cancelPublishDeployment()
+        setPublishActionsUrl(undefined)
+      }
+      setPublishProgress(next)
+      if (next.phase !== "complete" || publishCompletionHandled.current) return
+
+      publishCompletionHandled.current = true
+      const generation = ++publishDeploymentGeneration.current
+      const requestId = nextPublishDeploymentRequestId()
+      publishDeploymentRequest.current = requestId
+      setPublishProgress({ phase: "deploying", message: "发布成功，正在部署…", percent: 100 })
+      void loadChanges(generation)
+      void Promise.allSettled([
+        api.history.git({ limit: 1, requestId }),
+        api.history.deployments({ limit: 20, requestId }),
+      ]).then(([gitOutcome, deploymentsOutcome]) => {
+        if (
+          generation !== publishDeploymentGeneration.current ||
+          requestId !== publishDeploymentRequest.current
+        ) {
+          return
+        }
+        publishDeploymentRequest.current = undefined
+        const git = gitOutcome.status === "fulfilled" ? gitOutcome.value : undefined
+        const deployments =
+          deploymentsOutcome.status === "fulfilled" ? deploymentsOutcome.value : undefined
+        if (deployments?.ok) setPublishActionsUrl(deployments.value.actionsUrl)
+        if (!git?.ok || !deployments?.ok) {
+          setPublishProgress({
+            phase: "complete",
+            message: "发布成功，暂时无法确认部署状态。",
+            percent: 100,
+          })
+          return
+        }
+        const status = publishedDeploymentStatus(git.value[0], deployments.value)
+        setPublishActionsUrl(status.actionsUrl)
+        setPublishProgress(status.progress)
+      })
+    },
+    [api, cancelPublishDeployment, loadChanges],
+  )
 
   useEffect(() => {
     const unsubscribeRecovery = api.notes.onRecovery(({ restored, conflicts }) => {
@@ -550,7 +620,7 @@ export function PublisherApp({
       })
     void loadChanges()
     const unsubscribePreview = api.preview.onProgress(applyPreview)
-    const unsubscribePublish = api.publish.onProgress(setPublishProgress)
+    const unsubscribePublish = api.publish.onProgress(applyPublishProgress)
     return () => {
       unsubscribeRecovery()
       unsubscribePreview()
@@ -561,7 +631,7 @@ export function PublisherApp({
       changesRequest.current += 1
       void api.changes.cancel()
     }
-  }, [api, applyPreview, loadChanges, loadDomains, loadNotes, startPreview])
+  }, [api, applyPreview, applyPublishProgress, loadChanges, loadDomains, loadNotes, startPreview])
 
   useEffect(() => {
     if (!customPaneSizes) return

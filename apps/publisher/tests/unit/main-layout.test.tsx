@@ -26,6 +26,7 @@ import type {
   NoteTransactionReceipt,
   NoteWriteReceipt,
   PreviewStatus,
+  PublishProgress,
   WorkspaceInspection,
 } from "../../src/shared/contracts"
 
@@ -1417,6 +1418,65 @@ describe("publisher main layout", () => {
     await waitFor(() =>
       expect(screen.queryByRole("dialog", { name: "检查并发布" })).not.toBeInTheDocument(),
     )
+  })
+
+  it("rescans changes and reports the matching deployment after publication completes", async () => {
+    let publishProgress: ((progress: PublishProgress) => void) | undefined
+    const commitId = "a".repeat(40)
+    const runUrl = "https://github.com/octocat/garden/actions/runs/42"
+    vi.mocked(garden.publish.onProgress).mockImplementation((listener) => {
+      publishProgress = listener
+      return () => undefined
+    })
+    vi.mocked(garden.changes.list)
+      .mockResolvedValueOnce(
+        ok({
+          groups: [
+            {
+              id: "change-1",
+              label: "一项变化",
+              kind: "modified",
+              selection: "default",
+              description: "公开文章已修改",
+              paths: ["content/technology/a.md"],
+              attachments: [],
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(ok({ groups: [] }))
+    vi.mocked(garden.history.git).mockResolvedValueOnce(
+      ok([{ id: commitId, authoredAt: "2026-10-15T00:00:00.000Z", subject: "Publish" }]),
+    )
+    vi.mocked(garden.history.deployments).mockResolvedValueOnce(
+      ok({
+        runs: [
+          {
+            id: "42",
+            headSha: commitId,
+            startedAt: "2026-10-15T00:00:01.000Z",
+            completedAt: "2026-10-15T00:00:02.000Z",
+            status: "succeeded",
+            url: runUrl,
+          },
+        ],
+        actionsUrl: "https://github.com/octocat/garden/actions/workflows/deploy.yml",
+        liveSiteUrl: "https://octocat.github.io/garden/",
+      }),
+    )
+    render(<App />)
+
+    expect(await screen.findByText("可发布变化：1")).toBeVisible()
+    act(() => {
+      publishProgress?.({ phase: "complete", message: "发布成功，正在等待部署。", percent: 100 })
+    })
+
+    expect(await screen.findByText("可发布变化：0")).toBeVisible()
+    expect(await screen.findByText("发布成功，部署已完成。")).toBeVisible()
+    const gitRequest = vi.mocked(garden.history.git).mock.calls[0]?.[0]
+    const deploymentRequest = vi.mocked(garden.history.deployments).mock.calls[0]?.[0]
+    expect(gitRequest).toEqual({ limit: 1, requestId: expect.stringMatching(/^publish-deployment-/) })
+    expect(deploymentRequest).toEqual({ limit: 20, requestId: gitRequest?.requestId })
   })
 
   it("ignores pending bootstrap results after unmount without console errors", async () => {
