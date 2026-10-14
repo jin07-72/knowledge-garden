@@ -19,6 +19,7 @@ import type {
   NoteTrashReceipt,
   PreviewStatus,
   PublishProgress,
+  PublishRequest,
   Visibility,
   WorkspaceInspection,
   WorkspaceRepairAction,
@@ -197,6 +198,7 @@ export function PublisherApp({
   const [changeReviewState, setChangeReviewState] = useState<LoadState>("loading")
   const [changeReviewOpen, setChangeReviewOpen] = useState(false)
   const [publishMessage, setPublishMessage] = useState("正在检查可发布变化…")
+  const [publishSubmitError, setPublishSubmitError] = useState<AppError>()
   const [publishProgress, setPublishProgress] = useState<PublishProgress>()
   const [saveStateLabel, setSaveStateLabel] = useState("已保存")
   const [visibilityBusy, setVisibilityBusy] = useState(false)
@@ -229,12 +231,20 @@ export function PublisherApp({
   const loadedBlogId = useRef(initialRegistry.activeBlogId)
   const previewRequest = useRef(0)
   const changesRequest = useRef(0)
+  const pendingPublishRequest = useRef<PublishRequest | undefined>(undefined)
   const previewStart = useRef<ReturnType<GardenApi["preview"]["start"]> | undefined>(undefined)
   const safePaneSizes = useMemo(
     () => clampPaneSizes(paneSizes, workspaceWidth),
     [paneSizes, workspaceWidth],
   )
   const compactPanes = workspaceWidth <= COMPACT_PANE_BREAKPOINT
+
+  const showUnexpectedPublishError = (error: unknown, fallback: string): void => {
+    const message = error instanceof Error ? error.message : fallback
+    pendingPublishRequest.current = undefined
+    setPublishMessage(message)
+    setPublishSubmitError({ code: "INTERNAL_ERROR", message })
+  }
 
   const setBlogOperationBusy = useCallback((busy: boolean): void => {
     blogBusyRef.current = busy
@@ -449,6 +459,8 @@ export function PublisherApp({
 
   const loadChanges = useCallback(async (): Promise<void> => {
     const request = ++changesRequest.current
+    pendingPublishRequest.current = undefined
+    setPublishSubmitError(undefined)
     setChangeReviewState("loading")
     let result: Awaited<ReturnType<GardenApi["changes"]["list"]>>
     try {
@@ -1082,6 +1094,8 @@ export function PublisherApp({
             changeReviewState === "error" ? "publish-review-unavailable" : undefined
           }
           onClick={() => {
+            pendingPublishRequest.current = undefined
+            setPublishSubmitError(undefined)
             setChangeReviewOpen(true)
             void loadChanges()
           }}
@@ -1098,23 +1112,69 @@ export function PublisherApp({
           state={changeReviewState}
           review={changeReview}
           error={changeReviewState === "error" ? publishMessage : undefined}
+          submitError={publishSubmitError}
           onClose={() => {
             changesRequest.current += 1
             void api.changes.cancel()
+            pendingPublishRequest.current = undefined
+            setPublishSubmitError(undefined)
             setChangeReviewOpen(false)
           }}
           onRefresh={() => void loadChanges()}
+          onClearSubmitError={() => {
+            pendingPublishRequest.current = undefined
+            setPublishSubmitError(undefined)
+          }}
           onPublish={async (changeGroupIds) => {
-            const saved = (await markdownEditor.current?.flush()) ?? true
-            if (!saved) throw new Error("当前笔记保存失败，未开始发布。")
-            const result = await api.publish.start({ changeGroupIds })
-            if (!result.ok) {
-              const message = messageFor(result.error, "无法开始发布。")
-              setPublishMessage(message)
-              throw new Error(message)
+            try {
+              const saved = (await markdownEditor.current?.flush()) ?? true
+              if (!saved) {
+                setPublishSubmitError({
+                  code: "INTERNAL_ERROR",
+                  message: "当前笔记保存失败，未开始发布。",
+                })
+                return
+              }
+              const request: PublishRequest = Object.freeze({
+                changeGroupIds: Object.freeze([...changeGroupIds]),
+              })
+              pendingPublishRequest.current = request
+              const result = await api.publish.start(request)
+              if (!result.ok) {
+                const message = messageFor(result.error, "无法开始发布。")
+                setPublishMessage(message)
+                setPublishSubmitError({ ...result.error, message })
+                return
+              }
+              pendingPublishRequest.current = undefined
+              setPublishSubmitError(undefined)
+              setPublishMessage("正在验证所选公开变化…")
+              setChangeReviewOpen(false)
+            } catch (error) {
+              showUnexpectedPublishError(error, "无法开始发布。")
             }
-            setPublishMessage("正在验证所选公开变化…")
-            setChangeReviewOpen(false)
+          }}
+          onRepairAndPublish={async () => {
+            const request = pendingPublishRequest.current
+            if (!request) return
+            try {
+              const repaired = await api.publish.repairBranch()
+              if (!repaired.ok) {
+                setPublishSubmitError(repaired.error)
+                return
+              }
+              const retried = await api.publish.start(request)
+              if (!retried.ok) {
+                setPublishSubmitError(retried.error)
+                return
+              }
+              pendingPublishRequest.current = undefined
+              setPublishSubmitError(undefined)
+              setPublishMessage("正在验证所选公开变化…")
+              setChangeReviewOpen(false)
+            } catch (error) {
+              showUnexpectedPublishError(error, "无法安全切换分支并继续发布。")
+            }
           }}
         />
       ) : null}

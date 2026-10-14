@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react"
 import { Lock, RefreshCw, X } from "lucide-react"
-import type { ChangeGroup, ChangeKind, ChangeReview } from "../../../shared/contracts"
+import type { AppError, ChangeGroup, ChangeKind, ChangeReview } from "../../../shared/contracts"
 import { ModalShell } from "./ModalShell"
 
 interface PublishReviewProps {
@@ -10,6 +10,9 @@ interface PublishReviewProps {
   readonly onClose: () => void
   readonly onRefresh: () => void
   readonly onPublish?: (changeGroupIds: readonly string[]) => Promise<void>
+  readonly submitError?: AppError
+  readonly onRepairAndPublish?: () => Promise<void>
+  readonly onClearSubmitError?: () => void
 }
 
 const kindLabel: Record<ChangeKind, string> = {
@@ -33,6 +36,9 @@ export function PublishReview({
   onClose,
   onRefresh,
   onPublish,
+  submitError,
+  onRepairAndPublish,
+  onClearSubmitError,
 }: PublishReviewProps): React.JSX.Element {
   const closeButton = useRef<HTMLButtonElement>(null)
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set())
@@ -60,12 +66,21 @@ export function PublishReview({
   }, [review, selected])
 
   const toggle = (id: string): void => {
+    onClearSubmitError?.()
     setSelected((current) => {
       const next = new Set(current)
       if (next.has(id)) next.delete(id)
       else next.add(id)
       return next
     })
+  }
+
+  const runSubmission = (submission: () => Promise<void>): void => {
+    if (publishing) return
+    setPublishing(true)
+    void submission()
+      .catch(() => undefined)
+      .finally(() => setPublishing(false))
   }
 
   return (
@@ -161,6 +176,22 @@ export function PublishReview({
             })}
           </div>
         ) : null}
+        {submitError ? (
+          <div className="review-state review-error publish-submit-error" role="alert">
+            <strong>发布未开始</strong>
+            <span>{submitError.message}</span>
+            {submitError.code === "PUBLISH_BRANCH_REPAIR_REQUIRED" && onRepairAndPublish ? (
+              <button
+                type="button"
+                className="primary-button"
+                disabled={publishing}
+                onClick={() => runSubmission(onRepairAndPublish)}
+              >
+                {publishing ? "正在安全切换…" : "安全切换到 main 并继续"}
+              </button>
+            ) : null}
+          </div>
+        ) : null}
       </div>
 
       <footer className="publish-review-footer">
@@ -179,10 +210,7 @@ export function PublishReview({
           aria-describedby="publish-step-note"
           onClick={() => {
             if (!onPublish || publishing) return
-            setPublishing(true)
-            void onPublish([...selected])
-              .catch(() => undefined)
-              .finally(() => setPublishing(false))
+            runSubmission(() => onPublish([...selected]))
           }}
         >
           {publishing ? "正在验证…" : "验证并发布"}

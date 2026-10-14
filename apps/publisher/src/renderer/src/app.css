@@ -1878,6 +1878,12 @@ button {
 .review-error span {
   color: #f5a97f;
 }
+.publish-submit-error {
+  align-items: flex-start;
+}
+.publish-submit-error .primary-button {
+  align-self: flex-start;
+}
 .review-blocked {
   margin-bottom: 10px;
   padding: 9px 11px;

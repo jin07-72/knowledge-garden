@@ -777,4 +777,66 @@ describe("App blog orchestration", () => {
     await act(async () => void (await successfulSwitch.promise))
     expect(textbox).toHaveAttribute("contenteditable", "false")
   })
+
+  it("repairs master and retries the exact publication selection", async () => {
+    const user = userEvent.setup()
+    const api = gardenApi()
+    const repairRequired = {
+      code: "PUBLISH_BRANCH_REPAIR_REQUIRED" as const,
+      message: "本地 master 正在跟踪 origin/main；请确认安全切换到 main 后继续发布。",
+    }
+    vi.mocked(api.changes.list).mockResolvedValue(
+      ok({
+        groups: [
+          {
+            id: "note:daily",
+            label: "Daily",
+            kind: "modified",
+            selection: "default",
+            description: "公开文章已修改",
+            paths: ["content/study/daily.md"],
+            attachments: [],
+          },
+          {
+            id: "attachment:daily",
+            label: "Daily 图片",
+            kind: "attachment",
+            selection: "default",
+            description: "公开附件已修改",
+            paths: ["content/_assets/daily/diagram.png"],
+            attachments: [{ path: "content/_assets/daily/diagram.png", label: "diagram.png" }],
+          },
+        ],
+      }),
+    )
+    vi.mocked(api.publish.start)
+      .mockResolvedValueOnce({ ok: false, error: repairRequired })
+      .mockResolvedValueOnce(ok({ operationId: "publish-2" }))
+    const repairing = deferred<Awaited<ReturnType<GardenApi["publish"]["repairBranch"]>>>()
+    vi.mocked(api.publish.repairBranch).mockReturnValue(repairing.promise)
+    Object.defineProperty(window, "garden", { configurable: true, value: api })
+    render(<App />)
+
+    await user.click(await screen.findByRole("button", { name: "检查并发布" }))
+    await user.click(await screen.findByRole("button", { name: "验证并发布" }))
+
+    const alert = await screen.findByRole("alert")
+    expect(alert).toHaveTextContent("本地 master")
+    const repair = screen.getByRole("button", { name: "安全切换到 main 并继续" })
+    expect(repair).toBeEnabled()
+    expect(screen.getByRole("dialog", { name: "检查并发布" })).toBeVisible()
+
+    await user.dblClick(repair)
+    expect(api.publish.repairBranch).toHaveBeenCalledOnce()
+    expect(screen.getByRole("button", { name: "正在安全切换…" })).toBeDisabled()
+    repairing.resolve(ok({ branch: "main", upstream: "origin/main", head: "a".repeat(40) }))
+    await waitFor(() =>
+      expect(api.publish.start).toHaveBeenNthCalledWith(2, {
+        changeGroupIds: ["note:daily", "attachment:daily"],
+      }),
+    )
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "检查并发布" })).not.toBeInTheDocument(),
+    )
+  })
 })
