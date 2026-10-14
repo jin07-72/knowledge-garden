@@ -1087,6 +1087,24 @@ test("repairs legacy master and publishes the exact selection", async () => {
       ]),
     ).toBe("content/_assets/selected/diagram.png")
     expect(await readFile(privatePath, "utf8")).toBe(privateBefore)
+    expect(
+      await gitOutput(garden.root, [
+        "status",
+        "--porcelain",
+        "--ignored",
+        "--",
+        "private/life/draft.md",
+      ]),
+    ).toBe("!! private/life/")
+    expect(
+      await gitOutput(garden.root, [
+        "ls-tree",
+        "-r",
+        "--name-only",
+        "origin/main",
+        "private/life/draft.md",
+      ]),
+    ).toBe("")
     expect(await exists(unrelatedPublicPath)).toBe(true)
     expect(
       await gitOutput(garden.root, ["status", "--porcelain", "--", "content/life/unrelated.md"]),
