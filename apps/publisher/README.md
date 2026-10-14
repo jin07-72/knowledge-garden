@@ -23,6 +23,10 @@ Knowledge Garden Publisher 是知识花园的桌面编辑与发布工具。它�
 
 当前版本不支持在应用内重命名笔记路径。若以后修改路径，需要同步迁移对应的图片文件夹和 Markdown 链接。
 
+### 本地 master 与 GitHub main 不一致
+
+如果本地博客仍使用 `master`，但它明确跟踪 `origin/main`，发布窗口会说明原因并提供“安全切换到 main 并继续”。软件只重命名本地分支并保留 `origin/main` 上游、当前提交和未提交文件。若本地已存在 `main`、上游不同、有暂存内容或 Git 操作正在进行，软件会拒绝自动修改并显示原因。
+
 ## 支持范围与限制
 
 - 格式：PNG、JPG、JPEG、GIF、WebP、AVIF。

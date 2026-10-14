@@ -26,7 +26,7 @@ function pngChunk(type: string, payload: Buffer): Buffer {
   for (const byte of body) {
     crc ^= byte
     for (let bit = 0; bit < 8; bit += 1) {
-      crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0)
+      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0)
     }
   }
   const result = Buffer.alloc(12 + payload.length)
@@ -596,6 +596,12 @@ async function writeGardenFile(root: string, path: string, contents: string): Pr
   await writeFile(target, contents)
 }
 
+async function gitOutput(root: string, args: readonly string[]): Promise<string> {
+  const result = await git(root, args)
+  expect(result.exitCode).toBe(0)
+  return result.stdout.trim()
+}
+
 const note = (title: string, body: string): string => `---
 title: ${title}
 date: 2026-09-30
@@ -994,6 +1000,100 @@ test("edits, changes visibility, and publishes only the selected public note", a
   } finally {
     await closeApplication(application)
     if (!(await bounded(repository.cleanup(), 10_000))) {
+      throw new Error("The temporary E2E garden could not be cleaned up within 10 seconds.")
+    }
+    await removeTemporaryDirectory(stateRoot)
+  }
+})
+
+test("repairs legacy master and publishes the exact selection", async () => {
+  const garden = await createQuartzGardenFixture({
+    directoryName: "Legacy Branch Garden",
+    noteTitle: "Existing",
+    noteBody: "tracked baseline",
+  })
+  const stateRoot = await createTemporaryDirectory("garden-publisher-e2e-branch-repair-")
+  let application: ElectronApplication | undefined
+  const privatePath = join(garden.root, "private", "life", "draft.md")
+  const unrelatedPublicPath = join(garden.root, "content", "life", "unrelated.md")
+  const privateBefore = note("Private draft", "must stay local and unchanged")
+  try {
+    await git(garden.root, ["branch", "-m", "master"])
+    await git(garden.root, ["branch", "--set-upstream-to=origin/main", "master"])
+    await Promise.all([
+      writeGardenFile(
+        garden.root,
+        "content/life/selected.md",
+        note(
+          "Selected publication",
+          "![diagram](../_assets/selected/diagram.png)\n\nselected body",
+        ),
+      ),
+      writeGardenFile(garden.root, "content/life/unrelated.md", note("Unrelated", "leave local")),
+      writeGardenFile(garden.root, "private/life/draft.md", privateBefore),
+      writeGardenFile(garden.root, "content/_assets/selected/diagram.png", "fixture image bytes"),
+    ])
+
+    const runtimeRoot = await createE2eRuntime(stateRoot)
+    application = await launchApplication(stateRoot, {
+      ...process.env,
+      GARDEN_PUBLISHER_E2E: "1",
+      GARDEN_PUBLISHER_E2E_WORKSPACE: garden.root,
+      GARDEN_PUBLISHER_E2E_RUNTIME: runtimeRoot,
+      GARDEN_PUBLISHER_E2E_REGISTRY: join(stateRoot, "blogs.json"),
+      GARDEN_PUBLISHER_E2E_DEPLOYMENT: "success",
+    })
+    const page = await application.firstWindow()
+    await expect(page.locator('main[data-workspace-diagnostics="ready"]')).toBeVisible()
+
+    await page.getByRole("button", { name: "检查并发布" }).click()
+    const review = page.getByRole("dialog", { name: "检查并发布" })
+    const selected = review.getByRole("checkbox", { name: /selected/i })
+    const unrelated = review.getByRole("checkbox", { name: /unrelated/i })
+    await expect(selected).toBeChecked()
+    await expect(unrelated).toBeChecked()
+    await unrelated.uncheck()
+    await review.getByRole("button", { name: "验证并发布" }).click()
+
+    await expect(review.getByRole("alert")).toContainText("本地 master")
+    await review.getByRole("button", { name: "安全切换到 main 并继续" }).click()
+    await expect(review).toHaveCount(0)
+    await expect(page.getByRole("status", { name: "发布状态" })).toContainText("部署成功")
+
+    await expect.poll(() => gitOutput(garden.root, ["branch", "--show-current"])).toBe("main")
+    await expect
+      .poll(() =>
+        gitOutput(garden.root, [
+          "rev-parse",
+          "--abbrev-ref",
+          "--symbolic-full-name",
+          "@{upstream}",
+        ]),
+      )
+      .toBe("origin/main")
+    await expect
+      .poll(() => gitOutput(garden.root, ["rev-parse", "origin/main"]))
+      .toBe(await gitOutput(garden.root, ["rev-parse", "HEAD"]))
+    expect(
+      await gitOutput(garden.root, ["show", "origin/main:content/life/selected.md"]),
+    ).toContain("selected body")
+    expect(
+      await gitOutput(garden.root, [
+        "ls-tree",
+        "-r",
+        "--name-only",
+        "origin/main",
+        "content/_assets/selected",
+      ]),
+    ).toBe("content/_assets/selected/diagram.png")
+    expect(await readFile(privatePath, "utf8")).toBe(privateBefore)
+    expect(await exists(unrelatedPublicPath)).toBe(true)
+    expect(
+      await gitOutput(garden.root, ["status", "--porcelain", "--", "content/life/unrelated.md"]),
+    ).toBe("?? content/life/unrelated.md")
+  } finally {
+    await closeApplication(application)
+    if (!(await bounded(garden.cleanup(), 10_000))) {
       throw new Error("The temporary E2E garden could not be cleaned up within 10 seconds.")
     }
     await removeTemporaryDirectory(stateRoot)
