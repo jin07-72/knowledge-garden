@@ -1,7 +1,15 @@
 import { access, realpath } from "node:fs/promises"
-import { isAbsolute, resolve } from "node:path"
+import { basename, dirname, isAbsolute, resolve } from "node:path"
 import type { PublishBranchRepairReceipt } from "../../shared/contracts"
-import { systemCommandRunner, type CommandResult, type CommandRunner } from "../lib/commandRunner"
+import type { CommandResult } from "../lib/commandRunner"
+import {
+  boundedCommandRunnerCapability,
+  createSystemBoundedCommandRunner,
+  type BoundedCommandRunner,
+} from "./publish"
+
+const branchRepairCommandRunner = createSystemBoundedCommandRunner({ commandDeadlineMs: 30_000 })
+const branchRepairOutputBytes = 2 * 1024 * 1024
 
 export type PublishBranchInspection =
   | { readonly status: "ready"; readonly head: string }
@@ -16,9 +24,10 @@ export interface PublishBranchRepairService {
 
 export interface PublishBranchRepairDependencies {
   readonly workspace: string
-  readonly runner?: CommandRunner
+  readonly runner?: BoundedCommandRunner
   readonly beforeMutation?: () => Promise<void> | void
   readonly afterRename?: () => Promise<void> | void
+  readonly fileSystemAccess?: (path: string) => Promise<void>
 }
 
 interface RepairSnapshot {
@@ -36,12 +45,23 @@ const operationMarkers = [
   "BISECT_LOG",
 ] as const
 
-async function exists(path: string): Promise<boolean> {
+async function markerState(
+  path: string,
+  fileSystemAccess: (path: string) => Promise<void>,
+): Promise<"present" | "absent" | "inaccessible"> {
   try {
-    await access(path)
-    return true
-  } catch {
-    return false
+    await fileSystemAccess(path)
+    return "present"
+  } catch (caught) {
+    if (
+      typeof caught === "object" &&
+      caught !== null &&
+      "code" in caught &&
+      caught.code === "ENOENT"
+    ) {
+      return "absent"
+    }
+    return "inaccessible"
   }
 }
 
@@ -64,19 +84,30 @@ function blocked(reason: string): PublishBranchInspection {
 
 class GitPublishBranchRepair implements PublishBranchRepairService {
   readonly #workspace: string
-  readonly #runner: CommandRunner
+  readonly #runner: BoundedCommandRunner
   #uncertain = false
   #disposed = false
   #active: Promise<PublishBranchRepairReceipt> | undefined
   #disposal: Promise<void> | undefined
 
   constructor(private readonly dependencies: PublishBranchRepairDependencies) {
+    if (
+      dependencies.runner !== undefined &&
+      dependencies.runner[boundedCommandRunnerCapability] !== true
+    ) {
+      throw new TypeError("Publish branch repair requires a bounded command runner.")
+    }
     this.#workspace = resolve(dependencies.workspace)
-    this.#runner = dependencies.runner ?? systemCommandRunner
+    this.#runner = dependencies.runner ?? branchRepairCommandRunner
   }
 
   async #git(args: readonly string[]): Promise<CommandResult> {
-    return this.#runner.run({ executable: "git", args, cwd: this.#workspace })
+    return this.#runner.run({
+      executable: "git",
+      args,
+      cwd: this.#workspace,
+      maxOutputBytes: branchRepairOutputBytes,
+    })
   }
 
   async #rollback(original: RepairSnapshot): Promise<boolean> {
@@ -103,6 +134,38 @@ class GitPublishBranchRepair implements PublishBranchRepairService {
       )
     } catch {
       return false
+    }
+  }
+
+  async #stateAfterAmbiguousRename(
+    original: RepairSnapshot,
+  ): Promise<"renamed" | "unchanged" | "ambiguous"> {
+    try {
+      const [branch, head, status, main, master] = await Promise.all([
+        this.#git(["symbolic-ref", "--quiet", "--short", "HEAD"]),
+        this.#git(["rev-parse", "--verify", "HEAD"]),
+        this.#git(["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
+        this.#git(["show-ref", "--verify", "--quiet", "refs/heads/main"]),
+        this.#git(["show-ref", "--verify", "--quiet", "refs/heads/master"]),
+      ])
+      if (
+        branch.exitCode !== 0 ||
+        head.exitCode !== 0 ||
+        head.stdout.trim() !== original.head ||
+        status.exitCode !== 0 ||
+        status.stdout !== original.statusBytes
+      ) {
+        return "ambiguous"
+      }
+      const mainState = main.exitCode === 0
+      const masterState = master.exitCode === 0
+      const mainAbsent = main.exitCode === 1
+      const masterAbsent = master.exitCode === 1
+      if (branch.stdout.trim() === "main" && mainState && masterAbsent) return "renamed"
+      if (branch.stdout.trim() === "master" && masterState && mainAbsent) return "unchanged"
+      return "ambiguous"
+    } catch {
+      return "ambiguous"
     }
   }
 
@@ -153,19 +216,30 @@ class GitPublishBranchRepair implements PublishBranchRepairService {
     if (staged.exitCode === 1) return blocked("Staged changes must be committed or unstaged first.")
     if (staged.exitCode !== 0) return blocked("Staged changes could not be inspected.")
 
-    const commonDirectoryResult = await this.#git(["rev-parse", "--git-common-dir"])
-    if (commonDirectoryResult.exitCode !== 0) {
-      return blocked("The common Git directory could not be resolved.")
-    }
-    const commonDirectoryValue = commonDirectoryResult.stdout.trim()
-    const commonDirectory = await realpath(
-      isAbsolute(commonDirectoryValue)
-        ? commonDirectoryValue
-        : resolve(this.#workspace, commonDirectoryValue),
-    )
     for (const marker of operationMarkers) {
-      if (await exists(resolve(commonDirectory, marker))) {
+      const markerResult = await this.#git(["rev-parse", "--git-path", marker])
+      if (markerResult.exitCode !== 0) {
+        return blocked("The Git operation state could not be resolved.")
+      }
+      const markerValue = markerResult.stdout.trim()
+      const unresolvedMarker = isAbsolute(markerValue)
+        ? markerValue
+        : resolve(this.#workspace, markerValue)
+      let markerDirectory: string
+      try {
+        markerDirectory = await realpath(dirname(unresolvedMarker))
+      } catch {
+        return blocked("The Git operation state could not be inspected.")
+      }
+      const state = await markerState(
+        resolve(markerDirectory, basename(unresolvedMarker)),
+        this.dependencies.fileSystemAccess ?? access,
+      )
+      if (state === "present") {
         return blocked("A Git operation is in progress.")
+      }
+      if (state === "inaccessible") {
+        return blocked("The Git operation state could not be inspected.")
       }
     }
 
@@ -227,8 +301,30 @@ class GitPublishBranchRepair implements PublishBranchRepairService {
       )
     }
 
-    const renamed = await this.#git(["branch", "-m", "master", "main"])
-    if (renamed.exitCode !== 0) {
+    let renameFailed = false
+    try {
+      const renamed = await this.#git(["branch", "-m", "master", "main"])
+      renameFailed = renamed.exitCode !== 0
+    } catch {
+      renameFailed = true
+    }
+    if (renameFailed) {
+      const state = await this.#stateAfterAmbiguousRename(original)
+      if (state === "renamed") {
+        if (!(await this.#rollback(original))) {
+          this.#uncertain = true
+          throw new PublishBranchRepairError(
+            "PUBLISH_BRANCH_REPAIR_UNCERTAIN",
+            "Publication branch repair could not be safely recovered.",
+          )
+        }
+      } else if (state === "ambiguous") {
+        this.#uncertain = true
+        throw new PublishBranchRepairError(
+          "PUBLISH_BRANCH_REPAIR_UNCERTAIN",
+          "Publication branch repair could not confirm the repository state.",
+        )
+      }
       throw new PublishBranchRepairError(
         "PUBLISH_BRANCH_REPAIR_FAILED",
         "The publication branch could not be renamed.",

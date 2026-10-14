@@ -1,8 +1,12 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises"
-import { dirname, join } from "node:path"
+import { dirname, isAbsolute, join, resolve } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { systemCommandRunner, type CommandRunner } from "../../src/main/lib/commandRunner"
 import { createPublishBranchRepair } from "../../src/main/services/publishBranchRepair"
+import {
+  createBoundedCommandRunnerForTest,
+  type BoundedCommandRunner,
+} from "../../src/main/services/publish"
 import { createTemporaryGitRepository, git, type TemporaryGitRepository } from "../helpers/git"
 
 const repositories: TemporaryGitRepository[] = []
@@ -44,6 +48,19 @@ afterEach(async () => {
 })
 
 describe("publish branch repair", () => {
+  it("rejects an injected runner without the bounded capability", () => {
+    const runner: CommandRunner = {
+      run: () => Promise.resolve({ exitCode: 0, stdout: "", stderr: "" }),
+    }
+
+    expect(() =>
+      createPublishBranchRepair({
+        workspace: String.raw`C:\garden`,
+        runner: runner as unknown as BoundedCommandRunner,
+      }),
+    ).toThrow(TypeError)
+  })
+
   it("inspects an eligible legacy master branch as repairable", async () => {
     const repository = await fixture()
     await put(repository.root, "README.md", "unstaged publisher branch repair\n")
@@ -185,6 +202,34 @@ describe("publish branch repair", () => {
     ).resolves.toMatchObject({ status: "blocked" })
   })
 
+  it("blocks an operation marker stored in a linked worktree Git directory", async () => {
+    const repository = await fixture()
+    const linked = join(dirname(repository.root), "linked-workspace")
+    expect((await git(repository.root, ["switch", "--detach"])).exitCode).toBe(0)
+    expect((await git(repository.root, ["worktree", "add", linked, "master"])).exitCode).toBe(0)
+    const markerValue = (await git(linked, ["rev-parse", "--git-path", "MERGE_HEAD"])).stdout.trim()
+    const marker = isAbsolute(markerValue) ? markerValue : resolve(linked, markerValue)
+    await writeFile(marker, "linked worktree merge marker\n")
+
+    await expect(createPublishBranchRepair({ workspace: linked }).inspect()).resolves.toMatchObject(
+      {
+        status: "blocked",
+      },
+    )
+  })
+
+  it("fails closed when an operation marker cannot be accessed", async () => {
+    const repository = await fixture()
+    const service = createPublishBranchRepair({
+      workspace: repository.root,
+      fileSystemAccess: async () => {
+        throw Object.assign(new Error("access denied"), { code: "EACCES" })
+      },
+    })
+
+    await expect(service.inspect()).resolves.toMatchObject({ status: "blocked" })
+  })
+
   it("rejects a workspace below the exact Git root", async () => {
     const repository = await fixture()
     const nested = join(repository.root, "nested")
@@ -256,6 +301,37 @@ describe("publish branch repair", () => {
     ).toBe(status)
   })
 
+  it.each(["rejects", "returns nonzero"] as const)(
+    "recovers when the initial rename succeeds but its runner %s",
+    async (outcome) => {
+      const repository = await fixture()
+      let injected = false
+      const runner: CommandRunner = {
+        async run(request) {
+          if (
+            !injected &&
+            request.args.join("\0") === ["branch", "-m", "master", "main"].join("\0")
+          ) {
+            injected = true
+            const result = await systemCommandRunner.run(request)
+            expect(result.exitCode).toBe(0)
+            if (outcome === "rejects") throw new Error("ambiguous rename result")
+            return { ...result, exitCode: 1, stderr: "ambiguous rename result" }
+          }
+          return systemCommandRunner.run(request)
+        },
+      }
+      const service = createPublishBranchRepair({
+        workspace: repository.root,
+        runner: createBoundedCommandRunnerForTest(runner),
+      })
+
+      await expect(service.repair()).rejects.toMatchObject({ code: "PUBLISH_BRANCH_REPAIR_FAILED" })
+      expect(await currentBranch(repository.root)).toBe("master")
+      await expect(service.inspect()).resolves.toMatchObject({ status: "repairable" })
+    },
+  )
+
   it("persists uncertainty when rollback cannot be confirmed", async () => {
     const repository = await fixture()
     const runner: CommandRunner = {
@@ -274,7 +350,7 @@ describe("publish branch repair", () => {
     }
     const service = createPublishBranchRepair({
       workspace: repository.root,
-      runner,
+      runner: createBoundedCommandRunnerForTest(runner),
       afterRename: () => {
         throw new Error("injected post-rename failure")
       },
