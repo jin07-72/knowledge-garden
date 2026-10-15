@@ -1958,7 +1958,10 @@ button {
   margin-top: 3px;
   overflow: hidden;
   color: #8d98a5;
-  font: 10px/1.4 "Cascadia Code", Consolas, monospace;
+  font:
+    10px/1.4 "Cascadia Code",
+    Consolas,
+    monospace;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
