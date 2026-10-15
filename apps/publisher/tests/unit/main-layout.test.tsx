@@ -1505,6 +1505,7 @@ describe("publisher main layout", () => {
     render(<App />)
 
     expect(await screen.findByText("可发布变化：1")).toBeVisible()
+    expect(screen.queryByRole("button", { name: "查看 Actions" })).not.toBeInTheDocument()
     act(() => {
       publishProgress?.({ phase: "complete", message: "发布成功，正在等待部署。", percent: 100 })
     })
@@ -1542,6 +1543,32 @@ describe("publisher main layout", () => {
       requestId: expect.stringMatching(/^publish-deployment-/),
     })
     expect(deploymentRequest).toEqual({ limit: 20, requestId: gitRequest?.requestId })
+  })
+
+  it("reports an Actions link failure without erasing the completed deployment status", async () => {
+    const user = userEvent.setup()
+    const progress = capturePublishProgress(garden)
+    const commitId = "a".repeat(40)
+    vi.mocked(garden.changes.list).mockResolvedValue(ok({ groups: [] }))
+    vi.mocked(garden.history.git).mockResolvedValueOnce(
+      ok([{ id: commitId, authoredAt: "2026-10-15T00:00:00.000Z", subject: "Publish" }]),
+    )
+    vi.mocked(garden.history.deployments).mockResolvedValueOnce(ok(deploymentHistory(commitId)))
+    vi.mocked(garden.history.openLink).mockResolvedValueOnce({
+      ok: false,
+      error: { code: "SERVICE_UNAVAILABLE", message: "无法打开 Actions 链接。" },
+    })
+    render(<App />)
+
+    progress.emit({ phase: "complete", message: "发布成功，正在等待部署。", percent: 100 })
+
+    expect(await screen.findByText("发布成功，部署已完成。")).toBeVisible()
+    await user.click(screen.getByRole("button", { name: "查看 Actions" }))
+    await waitFor(() => {
+      const status = screen.getByRole("status", { name: "发布状态" })
+      expect(status).toHaveTextContent("发布成功，部署已完成。")
+      expect(status).toHaveTextContent("无法打开 Actions 链接。")
+    })
   })
 
   it.each([

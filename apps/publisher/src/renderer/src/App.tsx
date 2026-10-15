@@ -889,7 +889,7 @@ export function PublisherApp({
   const openHistoryLink = useCallback(
     async (url: string): Promise<void> => {
       const result = await api.history.openLink({ url })
-      if (!result.ok) throw new Error(messageFor(result.error, "无法打开链接。"))
+      if (!result.ok) throw new Error(result.error.message || "无法打开链接。")
     },
     [api],
   )
@@ -1220,7 +1220,14 @@ export function PublisherApp({
                 className="publish-actions-link"
                 type="button"
                 onClick={() => {
-                  void api.history.openLink({ url: publishActionsUrl })
+                  void openHistoryLink(publishActionsUrl).catch((error: unknown) => {
+                    const failureMessage =
+                      error instanceof Error ? error.message : "无法打开 Actions 链接。"
+                    setPublishProgress((current) => {
+                      if (!current || current.message.includes(failureMessage)) return current
+                      return { ...current, message: `${current.message} ${failureMessage}` }
+                    })
+                  })
                 }}
               >
                 查看 Actions
