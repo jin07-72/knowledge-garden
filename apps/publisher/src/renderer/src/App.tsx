@@ -1220,7 +1220,14 @@ export function PublisherApp({
                 className="publish-actions-link"
                 type="button"
                 onClick={() => {
+                  const linkGeneration = publishDeploymentGeneration.current
                   void openHistoryLink(publishActionsUrl).catch((error: unknown) => {
+                    if (
+                      !appMounted.current ||
+                      linkGeneration !== publishDeploymentGeneration.current
+                    ) {
+                      return
+                    }
                     const failureMessage =
                       error instanceof Error ? error.message : "无法打开 Actions 链接。"
                     setPublishProgress((current) => {

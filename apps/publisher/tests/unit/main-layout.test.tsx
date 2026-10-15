@@ -1571,6 +1571,36 @@ describe("publisher main layout", () => {
     })
   })
 
+  it("ignores a stale Actions link failure after validation starts", async () => {
+    const user = userEvent.setup()
+    const progress = capturePublishProgress(garden)
+    const commitId = "a".repeat(40)
+    const openLink = deferred<IpcResult<void>>()
+    vi.mocked(garden.changes.list).mockResolvedValue(ok({ groups: [] }))
+    vi.mocked(garden.history.git).mockResolvedValueOnce(
+      ok([{ id: commitId, authoredAt: "2026-10-15T00:00:00.000Z", subject: "Publish" }]),
+    )
+    vi.mocked(garden.history.deployments).mockResolvedValueOnce(ok(deploymentHistory(commitId)))
+    vi.mocked(garden.history.openLink).mockReturnValueOnce(openLink.promise)
+    render(<App />)
+
+    progress.emit({ phase: "complete", message: "发布成功，正在等待部署。", percent: 100 })
+
+    expect(await screen.findByText("发布成功，部署已完成。")).toBeVisible()
+    await user.click(screen.getByRole("button", { name: "查看 Actions" }))
+    progress.emit({ phase: "validating", message: "正在验证…", percent: 10 })
+    expect(screen.queryByRole("button", { name: "查看 Actions" })).not.toBeInTheDocument()
+    expect(screen.getByText("正在验证…")).toBeVisible()
+
+    openLink.resolve({
+      ok: false,
+      error: { code: "SERVICE_UNAVAILABLE", message: "无法打开 Actions 链接。" },
+    })
+    await act(async () => void (await openLink.promise))
+    expect(screen.getByText("正在验证…")).toBeVisible()
+    expect(screen.queryByText("无法打开 Actions 链接。")).not.toBeInTheDocument()
+  })
+
   it.each([
     ["failed", "发布已完成，但部署失败。"],
     ["cancelled", "发布已完成，但部署已取消。"],
