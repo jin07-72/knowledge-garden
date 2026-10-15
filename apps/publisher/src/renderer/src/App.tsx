@@ -252,7 +252,11 @@ export function PublisherApp({
     publishDeploymentGeneration.current += 1
     publishDeploymentRequest.current = undefined
     publishCompletionHandled.current = false
-    if (requestId) void api.history.cancel({ requestId }).catch(() => undefined)
+    if (requestId) {
+      void Promise.resolve()
+        .then(() => api.history.cancel({ requestId }))
+        .catch(() => undefined)
+    }
   }, [api])
 
   const safePaneSizes = useMemo(
@@ -473,14 +477,6 @@ export function PublisherApp({
     void loadDomains()
   }, [loadDomains, loadNotes, registry.activeBlogId])
 
-  useEffect(() => {
-    if (publishBlogId.current === registry.activeBlogId) return
-    publishBlogId.current = registry.activeBlogId
-    cancelPublishDeployment()
-    setPublishProgress(undefined)
-    setPublishActionsUrl(undefined)
-  }, [cancelPublishDeployment, registry.activeBlogId])
-
   const applyPreview = useCallback((next: PreviewStatus): void => {
     setPreview((current) => {
       if (next.generation < current.generation) return current
@@ -542,6 +538,31 @@ export function PublisherApp({
     },
     [api],
   )
+
+  useEffect(() => {
+    if (publishBlogId.current === registry.activeBlogId) return
+    publishBlogId.current = registry.activeBlogId
+    publishAttempt.current += 1
+    changesRequest.current += 1
+    pendingPublishRequest.current = undefined
+    cancelPublishDeployment()
+    setPublishProgress(undefined)
+    setPublishActionsUrl(undefined)
+    setChangeReview(undefined)
+    setChangeCount(undefined)
+    setChangeReviewOpen(false)
+    setChangeReviewState("loading")
+    setPublishMessage("正在检查可发布变化…")
+
+    const activeBlogId = registry.activeBlogId
+    void Promise.resolve()
+      .then(() => api.changes.cancel())
+      .catch(() => undefined)
+      .then(() => {
+        if (!appMounted.current || publishBlogId.current !== activeBlogId) return
+        void loadChanges()
+      })
+  }, [api, cancelPublishDeployment, loadChanges, registry.activeBlogId])
 
   const applyPublishProgress = useCallback(
     (next: PublishProgress): void => {
@@ -1249,6 +1270,7 @@ export function PublisherApp({
           }}
           onPublish={async (changeGroupIds) => {
             cancelPublishDeployment()
+            setPublishProgress(undefined)
             setPublishActionsUrl(undefined)
             const attempt = ++publishAttempt.current
             try {
@@ -1287,6 +1309,7 @@ export function PublisherApp({
             const request = pendingPublishRequest.current
             if (!request) return
             cancelPublishDeployment()
+            setPublishProgress(undefined)
             setPublishActionsUrl(undefined)
             const attempt = ++publishAttempt.current
             try {
