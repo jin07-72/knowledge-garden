@@ -1215,6 +1215,17 @@ export function PublisherApp({
             <GitBranch size={14} aria-hidden="true" />
             <span>可发布变化：{changeCount === undefined ? "暂不可用" : changeCount}</span>
             <small>{publishProgress?.message ?? publishMessage}</small>
+            {publishActionsUrl ? (
+              <button
+                className="publish-actions-link"
+                type="button"
+                onClick={() => {
+                  void api.history.openLink({ url: publishActionsUrl })
+                }}
+              >
+                查看 Actions
+              </button>
+            ) : null}
           </div>
         </div>
         <button

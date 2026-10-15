@@ -1231,6 +1231,18 @@ button {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.publish-actions-link {
+  padding: 0;
+  border: 0;
+  color: #8bd5ca;
+  background: transparent;
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.publish-actions-link:hover {
+  color: #b7eee7;
+}
 .publish-button {
   min-height: 29px;
   padding: 0 13px;
@@ -2230,6 +2242,9 @@ button {
     padding: 7px 10px;
   }
   .publish-summary small {
+    display: none;
+  }
+  .publish-actions-link {
     display: none;
   }
 }

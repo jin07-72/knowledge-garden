@@ -1472,9 +1472,11 @@ describe("publisher main layout", () => {
   })
 
   it("rescans changes and reports the matching deployment after publication completes", async () => {
+    const user = userEvent.setup()
     let publishProgress: ((progress: PublishProgress) => void) | undefined
     const commitId = "a".repeat(40)
     const runUrl = "https://github.com/octocat/garden/actions/runs/42"
+    const deployments = deferred<IpcResult<DeploymentHistory>>()
     vi.mocked(garden.publish.onProgress).mockImplementation((listener) => {
       publishProgress = listener
       return () => undefined
@@ -1499,7 +1501,17 @@ describe("publisher main layout", () => {
     vi.mocked(garden.history.git).mockResolvedValueOnce(
       ok([{ id: commitId, authoredAt: "2026-10-15T00:00:00.000Z", subject: "Publish" }]),
     )
-    vi.mocked(garden.history.deployments).mockResolvedValueOnce(
+    vi.mocked(garden.history.deployments).mockReturnValueOnce(deployments.promise)
+    render(<App />)
+
+    expect(await screen.findByText("可发布变化：1")).toBeVisible()
+    act(() => {
+      publishProgress?.({ phase: "complete", message: "发布成功，正在等待部署。", percent: 100 })
+    })
+
+    expect(await screen.findByText("可发布变化：0")).toBeVisible()
+    expect(screen.queryByRole("button", { name: "查看 Actions" })).not.toBeInTheDocument()
+    deployments.resolve(
       ok({
         runs: [
           {
@@ -1515,15 +1527,14 @@ describe("publisher main layout", () => {
         liveSiteUrl: "https://octocat.github.io/garden/",
       }),
     )
-    render(<App />)
-
-    expect(await screen.findByText("可发布变化：1")).toBeVisible()
-    act(() => {
-      publishProgress?.({ phase: "complete", message: "发布成功，正在等待部署。", percent: 100 })
-    })
-
-    expect(await screen.findByText("可发布变化：0")).toBeVisible()
     expect(await screen.findByText("发布成功，部署已完成。")).toBeVisible()
+    const actions = screen.getByRole("button", { name: "查看 Actions" })
+    await user.click(actions)
+    expect(garden.history.openLink).toHaveBeenCalledWith({ url: runUrl })
+    act(() => {
+      publishProgress?.({ phase: "validating", message: "正在验证…", percent: 10 })
+    })
+    expect(screen.queryByRole("button", { name: "查看 Actions" })).not.toBeInTheDocument()
     const gitRequest = vi.mocked(garden.history.git).mock.calls.at(-1)?.[0]
     const deploymentRequest = vi.mocked(garden.history.deployments).mock.calls.at(-1)?.[0]
     expect(gitRequest).toEqual({
