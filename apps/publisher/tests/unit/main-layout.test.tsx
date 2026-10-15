@@ -815,6 +815,58 @@ describe("publisher main layout", () => {
     expect(within(screen.getByRole("article", { name: "生活" })).getByText("私密 1")).toBeVisible()
   })
 
+  it("defaults omitted note description and tags to 无", async () => {
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(await screen.findByRole("button", { name: "新建笔记" }))
+    const dialog = screen.getByRole("dialog", { name: "新建笔记" })
+    const description = within(dialog).getByRole("textbox", { name: "描述" })
+    const tags = within(dialog).getByRole("textbox", { name: "标签" })
+    const create = within(dialog).getByRole("button", { name: "创建" })
+
+    expect(description).not.toBeRequired()
+    expect(tags).not.toBeRequired()
+    expect(within(dialog).getAllByText("不填写默认为无")).toHaveLength(2)
+    expect(create).toBeDisabled()
+
+    await user.type(within(dialog).getByRole("textbox", { name: "标题" }), "无元数据笔记")
+    expect(create).toBeEnabled()
+    await user.click(create)
+
+    await waitFor(() => {
+      expect(garden.notes.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: "无元数据笔记",
+          description: "无",
+          tags: ["无"],
+        }),
+      )
+    })
+  })
+
+  it("defaults whitespace-only description and comma-only tags to 无", async () => {
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(await screen.findByRole("button", { name: "新建笔记" }))
+    const dialog = screen.getByRole("dialog", { name: "新建笔记" })
+    await user.type(within(dialog).getByRole("textbox", { name: "标题" }), "空白元数据笔记")
+    await user.type(within(dialog).getByRole("textbox", { name: "描述" }), "   ")
+    await user.type(within(dialog).getByRole("textbox", { name: "标签" }), " , ， ")
+    await user.click(within(dialog).getByRole("button", { name: "创建" }))
+
+    await waitFor(() => {
+      expect(garden.notes.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: "空白元数据笔记",
+          description: "无",
+          tags: ["无"],
+        }),
+      )
+    })
+  })
+
   it("keeps a busy create dialog modal and avoids updates after it unmounts", async () => {
     const user = userEvent.setup()
     const creation = deferred<Awaited<ReturnType<GardenApi["notes"]["create"]>>>()
