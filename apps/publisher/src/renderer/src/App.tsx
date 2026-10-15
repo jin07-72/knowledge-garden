@@ -237,6 +237,7 @@ export function PublisherApp({
   const notesRequest = useRef(0)
   const domainsRequest = useRef(0)
   const loadedBlogId = useRef(initialRegistry.activeBlogId)
+  const publishBlogId = useRef(initialRegistry.activeBlogId)
   const previewRequest = useRef(0)
   const changesRequest = useRef(0)
   const pendingPublishRequest = useRef<PublishRequest | undefined>(undefined)
@@ -313,6 +314,9 @@ export function PublisherApp({
   const switchBlog = useCallback(
     (id: string): void => {
       if (id === registry.activeBlogId || blogBusyRef.current) return
+      cancelPublishDeployment()
+      setPublishProgress(undefined)
+      setPublishActionsUrl(undefined)
       void runBlogOperation(async () => {
         flushSync(() => setSwitchPreparing(true))
         let restoreEditing = true
@@ -327,7 +331,7 @@ export function PublisherApp({
         }
       })
     },
-    [api, registry.activeBlogId, runBlogOperation],
+    [api, cancelPublishDeployment, registry.activeBlogId, runBlogOperation],
   )
 
   useEffect(
@@ -468,6 +472,14 @@ export function PublisherApp({
     void loadNotes()
     void loadDomains()
   }, [loadDomains, loadNotes, registry.activeBlogId])
+
+  useEffect(() => {
+    if (publishBlogId.current === registry.activeBlogId) return
+    publishBlogId.current = registry.activeBlogId
+    cancelPublishDeployment()
+    setPublishProgress(undefined)
+    setPublishActionsUrl(undefined)
+  }, [cancelPublishDeployment, registry.activeBlogId])
 
   const applyPreview = useCallback((next: PreviewStatus): void => {
     setPreview((current) => {
@@ -1236,6 +1248,8 @@ export function PublisherApp({
             )
           }}
           onPublish={async (changeGroupIds) => {
+            cancelPublishDeployment()
+            setPublishActionsUrl(undefined)
             const attempt = ++publishAttempt.current
             try {
               const saved = (await markdownEditor.current?.flush()) ?? true
@@ -1272,6 +1286,8 @@ export function PublisherApp({
           onRepairAndPublish={async () => {
             const request = pendingPublishRequest.current
             if (!request) return
+            cancelPublishDeployment()
+            setPublishActionsUrl(undefined)
             const attempt = ++publishAttempt.current
             try {
               const repaired = await api.publish.repairBranch()

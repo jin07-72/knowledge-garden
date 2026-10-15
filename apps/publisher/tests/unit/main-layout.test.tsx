@@ -112,6 +112,42 @@ function deferred<T>(): {
   }
 }
 
+function deploymentHistory(
+  headSha: string,
+  status: DeploymentHistory["runs"][number]["status"] = "succeeded",
+): DeploymentHistory {
+  return {
+    runs: [
+      {
+        id: "42",
+        headSha,
+        startedAt: "2026-10-15T00:00:01.000Z",
+        completedAt: "2026-10-15T00:00:02.000Z",
+        status,
+        url: "https://github.com/octocat/garden/actions/runs/42",
+      },
+    ],
+    actionsUrl: "https://github.com/octocat/garden/actions/workflows/deploy.yml",
+    liveSiteUrl: "https://octocat.github.io/garden/",
+  }
+}
+
+function capturePublishProgress(api: GardenApi): {
+  emit(progress: PublishProgress): void
+} {
+  let listener: ((progress: PublishProgress) => void) | undefined
+  vi.mocked(api.publish.onProgress).mockImplementation((next) => {
+    listener = next
+    return () => undefined
+  })
+  return {
+    emit(progress) {
+      if (!listener) throw new Error("Publish progress listener is not subscribed")
+      act(() => listener?.(progress))
+    },
+  }
+}
+
 const testRegistry: BlogRegistryStatus = {
   version: 1,
   activeAvailability: "available",
@@ -124,6 +160,21 @@ const testRegistry: BlogRegistryStatus = {
       canonicalPath: String.raw`C:\Users\11546\Desktop\web`,
       createdAt: "2026-10-01T00:00:00.000Z",
       lastOpenedAt: "2026-10-01T00:00:00.000Z",
+    },
+  ],
+}
+
+const twoBlogRegistry: BlogRegistryStatus = {
+  ...testRegistry,
+  blogs: [
+    ...testRegistry.blogs,
+    {
+      id: "study",
+      name: "Study Garden",
+      path: String.raw`C:\Users\11546\Desktop\study`,
+      canonicalPath: String.raw`C:\Users\11546\Desktop\study`,
+      createdAt: "2026-10-02T00:00:00.000Z",
+      lastOpenedAt: "2026-10-02T00:00:00.000Z",
     },
   ],
 }
@@ -1480,6 +1531,235 @@ describe("publisher main layout", () => {
       requestId: expect.stringMatching(/^publish-deployment-/),
     })
     expect(deploymentRequest).toEqual({ limit: 20, requestId: gitRequest?.requestId })
+  })
+
+  it.each([
+    ["failed", "发布已完成，但部署失败。"],
+    ["cancelled", "发布已完成，但部署已取消。"],
+  ] as const)(
+    "reports a matching %s deployment without claiming publication failed",
+    async (status, message) => {
+      const progress = capturePublishProgress(garden)
+      const commitId = "a".repeat(40)
+      vi.mocked(garden.changes.list).mockResolvedValue(ok({ groups: [] }))
+      vi.mocked(garden.history.git).mockResolvedValueOnce(
+        ok([{ id: commitId, authoredAt: "2026-10-15T00:00:00.000Z", subject: "Publish" }]),
+      )
+      vi.mocked(garden.history.deployments).mockResolvedValueOnce(
+        ok(deploymentHistory(commitId, status)),
+      )
+      render(<App />)
+
+      progress.emit({ phase: "complete", message: "发布成功，正在等待部署。", percent: 100 })
+
+      expect(await screen.findByText(message)).toBeVisible()
+      expect(screen.queryByText("发布失败")).not.toBeInTheDocument()
+    },
+  )
+
+  it("uses deployment uncertainty when deployment history rejects", async () => {
+    const progress = capturePublishProgress(garden)
+    const commitId = "a".repeat(40)
+    vi.mocked(garden.changes.list).mockResolvedValue(ok({ groups: [] }))
+    vi.mocked(garden.history.git).mockResolvedValueOnce(
+      ok([{ id: commitId, authoredAt: "2026-10-15T00:00:00.000Z", subject: "Publish" }]),
+    )
+    vi.mocked(garden.history.deployments).mockRejectedValueOnce(new Error("deployment unavailable"))
+    render(<App />)
+
+    progress.emit({ phase: "complete", message: "发布成功，正在等待部署。", percent: 100 })
+
+    expect(await screen.findByText("发布成功，暂时无法确认部署状态。")).toBeVisible()
+    expect(screen.queryByText("发布失败")).not.toBeInTheDocument()
+  })
+
+  it("uses deployment uncertainty when the returned run belongs to another commit", async () => {
+    const progress = capturePublishProgress(garden)
+    const commitId = "a".repeat(40)
+    vi.mocked(garden.changes.list).mockResolvedValue(ok({ groups: [] }))
+    vi.mocked(garden.history.git).mockResolvedValueOnce(
+      ok([{ id: commitId, authoredAt: "2026-10-15T00:00:00.000Z", subject: "Publish" }]),
+    )
+    vi.mocked(garden.history.deployments).mockResolvedValueOnce(
+      ok(deploymentHistory("b".repeat(40))),
+    )
+    render(<App />)
+
+    progress.emit({ phase: "complete", message: "发布成功，正在等待部署。", percent: 100 })
+
+    expect(await screen.findByText("发布成功，暂时无法确认部署状态。")).toBeVisible()
+    expect(screen.queryByText("发布成功，部署已完成。")).not.toBeInTheDocument()
+  })
+
+  it("starts only one deployment query for repeated complete events in one publication", async () => {
+    const progress = capturePublishProgress(garden)
+    const deployments = deferred<IpcResult<DeploymentHistory>>()
+    vi.mocked(garden.changes.list).mockResolvedValue(ok({ groups: [] }))
+    vi.mocked(garden.history.git).mockImplementation(() => new Promise(() => undefined))
+    vi.mocked(garden.history.deployments).mockReturnValueOnce(deployments.promise)
+    render(<App />)
+
+    progress.emit({ phase: "complete", message: "发布成功，正在等待部署。", percent: 100 })
+    progress.emit({ phase: "complete", message: "重复完成事件", percent: 100 })
+
+    await waitFor(() => expect(garden.history.deployments).toHaveBeenCalledOnce())
+  })
+
+  it("cancels and ignores a deployment result made stale by a new validation", async () => {
+    const progress = capturePublishProgress(garden)
+    const commitId = "a".repeat(40)
+    const deployments = deferred<IpcResult<DeploymentHistory>>()
+    vi.mocked(garden.changes.list).mockResolvedValue(ok({ groups: [] }))
+    vi.mocked(garden.history.git).mockResolvedValueOnce(
+      ok([{ id: commitId, authoredAt: "2026-10-15T00:00:00.000Z", subject: "Publish" }]),
+    )
+    vi.mocked(garden.history.deployments).mockReturnValueOnce(deployments.promise)
+    render(<App />)
+
+    progress.emit({ phase: "complete", message: "发布成功，正在等待部署。", percent: 100 })
+    await waitFor(() => expect(garden.history.deployments).toHaveBeenCalledOnce())
+    const requestId = vi.mocked(garden.history.deployments).mock.calls[0]?.[0]?.requestId
+
+    progress.emit({ phase: "validating", message: "正在验证…", percent: 10 })
+    expect(garden.history.cancel).toHaveBeenCalledWith({ requestId })
+
+    deployments.resolve(ok(deploymentHistory(commitId)))
+    await act(async () => void (await deployments.promise))
+    expect(screen.getByText("正在验证…")).toBeVisible()
+    expect(screen.queryByText("发布成功，部署已完成。")).not.toBeInTheDocument()
+  })
+
+  it("allows a second completion after validation to become the current deployment result", async () => {
+    const progress = capturePublishProgress(garden)
+    const firstCommit = "a".repeat(40)
+    const secondCommit = "b".repeat(40)
+    const firstDeployments = deferred<IpcResult<DeploymentHistory>>()
+    vi.mocked(garden.changes.list).mockResolvedValue(ok({ groups: [] }))
+    vi.mocked(garden.history.git)
+      .mockResolvedValueOnce(
+        ok([{ id: firstCommit, authoredAt: "2026-10-15T00:00:00.000Z", subject: "First" }]),
+      )
+      .mockResolvedValueOnce(
+        ok([{ id: secondCommit, authoredAt: "2026-10-15T00:01:00.000Z", subject: "Second" }]),
+      )
+    vi.mocked(garden.history.deployments)
+      .mockReturnValueOnce(firstDeployments.promise)
+      .mockResolvedValueOnce(ok(deploymentHistory(secondCommit)))
+    render(<App />)
+
+    progress.emit({ phase: "complete", message: "第一轮完成", percent: 100 })
+    await waitFor(() => expect(garden.history.deployments).toHaveBeenCalledOnce())
+    progress.emit({ phase: "validating", message: "正在验证…", percent: 10 })
+    progress.emit({ phase: "complete", message: "第二轮完成", percent: 100 })
+
+    await waitFor(() => expect(garden.history.deployments).toHaveBeenCalledTimes(2))
+    expect(await screen.findByText("发布成功，部署已完成。")).toBeVisible()
+
+    firstDeployments.resolve(ok(deploymentHistory(firstCommit, "failed")))
+    await act(async () => void (await firstDeployments.promise))
+    expect(screen.getByText("发布成功，部署已完成。")).toBeVisible()
+    expect(screen.queryByText("发布已完成，但部署失败。")).not.toBeInTheDocument()
+  })
+
+  it("cancels pending deployment tracking before switching blogs and ignores its late result", async () => {
+    const user = userEvent.setup()
+    const progress = capturePublishProgress(garden)
+    const commitId = "a".repeat(40)
+    const deployments = deferred<IpcResult<DeploymentHistory>>()
+    vi.mocked(garden.changes.list).mockResolvedValue(ok({ groups: [] }))
+    vi.mocked(garden.history.git).mockResolvedValueOnce(
+      ok([{ id: commitId, authoredAt: "2026-10-15T00:00:00.000Z", subject: "Publish" }]),
+    )
+    vi.mocked(garden.history.deployments).mockReturnValueOnce(deployments.promise)
+    render(<PublisherApp api={garden} initialRegistry={twoBlogRegistry} />)
+
+    progress.emit({ phase: "complete", message: "发布成功，正在等待部署。", percent: 100 })
+    await waitFor(() => expect(garden.history.deployments).toHaveBeenCalledOnce())
+    const requestId = vi.mocked(garden.history.deployments).mock.calls[0]?.[0]?.requestId
+
+    await user.click(screen.getByRole("button", { name: "切换博客：Knowledge Garden" }))
+    await user.click(screen.getByRole("menuitemradio", { name: /Study Garden/ }))
+
+    await waitFor(() =>
+      expect(garden.blogs.switch).toHaveBeenCalledWith({ id: "study", editorSaved: true }),
+    )
+    expect(garden.history.cancel).toHaveBeenCalledWith({ requestId })
+    expect(vi.mocked(garden.history.cancel).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(garden.blogs.switch).mock.invocationCallOrder[0],
+    )
+    expect(screen.queryByText("发布成功，正在部署…")).not.toBeInTheDocument()
+
+    deployments.resolve(ok(deploymentHistory(commitId)))
+    await act(async () => void (await deployments.promise))
+    expect(screen.queryByText("发布成功，部署已完成。")).not.toBeInTheDocument()
+  })
+
+  it("cancels deployment tracking when a registry update changes the active blog", async () => {
+    const user = userEvent.setup()
+    const progress = capturePublishProgress(garden)
+    const deployments = deferred<IpcResult<DeploymentHistory>>()
+    const activeStudyRegistry: BlogRegistryView = {
+      ...twoBlogRegistry,
+      activeBlogId: "study",
+    }
+    vi.mocked(garden.changes.list).mockResolvedValue(ok({ groups: [] }))
+    vi.mocked(garden.history.git).mockImplementation(() => new Promise(() => undefined))
+    vi.mocked(garden.history.deployments).mockReturnValueOnce(deployments.promise)
+    vi.mocked(garden.blogs.rename).mockResolvedValueOnce(ok(activeStudyRegistry))
+    render(<PublisherApp api={garden} initialRegistry={twoBlogRegistry} />)
+
+    progress.emit({ phase: "complete", message: "上一轮完成", percent: 100 })
+    await waitFor(() => expect(garden.history.deployments).toHaveBeenCalledOnce())
+    const requestId = vi.mocked(garden.history.deployments).mock.calls[0]?.[0]?.requestId
+
+    await user.click(screen.getByRole("button", { name: "切换博客：Knowledge Garden" }))
+    await user.click(screen.getByRole("menuitem", { name: "管理博客" }))
+    await user.click(screen.getByRole("button", { name: "重命名 Study Garden" }))
+    const name = screen.getByLabelText("博客名称")
+    await user.clear(name)
+    await user.type(name, "Study Notes")
+    await user.click(screen.getByRole("button", { name: "保存名称" }))
+
+    await waitFor(() => expect(garden.history.cancel).toHaveBeenCalledWith({ requestId }))
+    expect(screen.queryByText("发布成功，正在部署…")).not.toBeInTheDocument()
+  })
+
+  it("cancels pending deployment tracking before starting a new publication", async () => {
+    const user = userEvent.setup()
+    const progress = capturePublishProgress(garden)
+    const deployments = deferred<IpcResult<DeploymentHistory>>()
+    vi.mocked(garden.changes.list).mockResolvedValue(
+      ok({
+        groups: [
+          {
+            id: "change-1",
+            label: "一项变化",
+            kind: "modified",
+            selection: "default",
+            description: "公开文章已修改",
+            paths: ["content/technology/a.md"],
+            attachments: [],
+          },
+        ],
+      }),
+    )
+    vi.mocked(garden.history.git).mockImplementation(() => new Promise(() => undefined))
+    vi.mocked(garden.history.deployments).mockReturnValueOnce(deployments.promise)
+    vi.mocked(garden.publish.start).mockResolvedValueOnce(ok({ operationId: "publish-2" }))
+    render(<App />)
+
+    progress.emit({ phase: "complete", message: "上一轮完成", percent: 100 })
+    await waitFor(() => expect(garden.history.deployments).toHaveBeenCalledOnce())
+    const requestId = vi.mocked(garden.history.deployments).mock.calls[0]?.[0]?.requestId
+
+    await user.click(screen.getByRole("button", { name: "检查并发布" }))
+    await user.click(await screen.findByRole("button", { name: "验证并发布" }))
+
+    await waitFor(() => expect(garden.publish.start).toHaveBeenCalledOnce())
+    expect(garden.history.cancel).toHaveBeenCalledWith({ requestId })
+    expect(vi.mocked(garden.history.cancel).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(garden.publish.start).mock.invocationCallOrder[0],
+    )
   })
 
   it("cancels deployment tracking on unmount without late state updates", async () => {
