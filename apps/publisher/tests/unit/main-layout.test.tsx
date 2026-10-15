@@ -1533,6 +1533,12 @@ describe("publisher main layout", () => {
     await user.click(actions)
     expect(garden.history.openLink).toHaveBeenCalledWith({ url: runUrl })
     act(() => {
+      publishProgress?.({ phase: "complete", message: "发布成功，正在等待部署。", percent: 100 })
+    })
+    expect(screen.getByText("发布成功，部署已完成。")).toBeVisible()
+    expect(screen.queryByText("发布成功，正在等待部署。")).not.toBeInTheDocument()
+    expect(garden.history.deployments).toHaveBeenCalledOnce()
+    act(() => {
       publishProgress?.({ phase: "validating", message: "正在验证…", percent: 10 })
     })
     expect(screen.queryByRole("button", { name: "查看 Actions" })).not.toBeInTheDocument()

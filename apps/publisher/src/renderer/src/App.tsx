@@ -566,12 +566,13 @@ export function PublisherApp({
 
   const applyPublishProgress = useCallback(
     (next: PublishProgress): void => {
+      if (next.phase === "complete" && publishCompletionHandled.current) return
       if (next.phase === "validating") {
         cancelPublishDeployment()
         setPublishActionsUrl(undefined)
       }
       setPublishProgress(next)
-      if (next.phase !== "complete" || publishCompletionHandled.current) return
+      if (next.phase !== "complete") return
 
       publishCompletionHandled.current = true
       const generation = ++publishDeploymentGeneration.current
