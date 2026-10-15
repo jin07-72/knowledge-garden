@@ -225,12 +225,7 @@ function NewNoteDialog({
           <button
             type="submit"
             className="primary-button"
-            disabled={
-              busy ||
-              !title.trim() ||
-              !slug.trim() ||
-              !domain
-            }
+            disabled={busy || !title.trim() || !slug.trim() || !domain}
           >
             创建
           </button>

@@ -377,8 +377,7 @@ describe("publisher main layout", () => {
 
   it("reloads after recovered items and reports conflicts without a reload loop", async () => {
     let recoveryListener:
-      | ((update: { restored: readonly string[]; conflicts: readonly string[] }) => void)
-      | undefined
+      ((update: { restored: readonly string[]; conflicts: readonly string[] }) => void) | undefined
     vi.mocked(garden.notes.onRecovery).mockImplementation((listener) => {
       recoveryListener = listener
       return () => undefined
