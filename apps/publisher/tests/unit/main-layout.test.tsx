@@ -1473,10 +1473,60 @@ describe("publisher main layout", () => {
 
     expect(await screen.findByText("可发布变化：0")).toBeVisible()
     expect(await screen.findByText("发布成功，部署已完成。")).toBeVisible()
-    const gitRequest = vi.mocked(garden.history.git).mock.calls[0]?.[0]
-    const deploymentRequest = vi.mocked(garden.history.deployments).mock.calls[0]?.[0]
-    expect(gitRequest).toEqual({ limit: 1, requestId: expect.stringMatching(/^publish-deployment-/) })
+    const gitRequest = vi.mocked(garden.history.git).mock.calls.at(-1)?.[0]
+    const deploymentRequest = vi.mocked(garden.history.deployments).mock.calls.at(-1)?.[0]
+    expect(gitRequest).toEqual({
+      limit: 1,
+      requestId: expect.stringMatching(/^publish-deployment-/),
+    })
     expect(deploymentRequest).toEqual({ limit: 20, requestId: gitRequest?.requestId })
+  })
+
+  it("cancels deployment tracking on unmount without late state updates", async () => {
+    let publishProgress: ((progress: PublishProgress) => void) | undefined
+    const commitId = "a".repeat(40)
+    const deployments = deferred<IpcResult<DeploymentHistory>>()
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined)
+    vi.mocked(garden.publish.onProgress).mockImplementation((listener) => {
+      publishProgress = listener
+      return () => undefined
+    })
+    vi.mocked(garden.changes.list).mockResolvedValue(ok({ groups: [] }))
+    vi.mocked(garden.history.git).mockResolvedValueOnce(
+      ok([{ id: commitId, authoredAt: "2026-10-15T00:00:00.000Z", subject: "Publish" }]),
+    )
+    vi.mocked(garden.history.deployments).mockReturnValueOnce(deployments.promise)
+    const view = render(<App />)
+
+    act(() => {
+      publishProgress?.({ phase: "complete", message: "发布成功，正在等待部署。", percent: 100 })
+    })
+    await waitFor(() => expect(garden.history.deployments).toHaveBeenCalledOnce())
+    const requestId = vi.mocked(garden.history.deployments).mock.calls.at(-1)?.[0]?.requestId
+    expect(requestId).toMatch(/^publish-deployment-/)
+
+    view.unmount()
+    expect(garden.history.cancel).toHaveBeenCalledWith({ requestId })
+    await act(async () => {
+      deployments.resolve(
+        ok({
+          runs: [
+            {
+              id: "42",
+              headSha: commitId,
+              startedAt: "2026-10-15T00:00:01.000Z",
+              completedAt: "2026-10-15T00:00:02.000Z",
+              status: "succeeded",
+              url: "https://github.com/octocat/garden/actions/runs/42",
+            },
+          ],
+          actionsUrl: "https://github.com/octocat/garden/actions/workflows/deploy.yml",
+          liveSiteUrl: "https://octocat.github.io/garden/",
+        }),
+      )
+      await Promise.resolve()
+    })
+    expect(consoleError).not.toHaveBeenCalled()
   })
 
   it("ignores pending bootstrap results after unmount without console errors", async () => {

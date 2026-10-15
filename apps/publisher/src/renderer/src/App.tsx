@@ -488,43 +488,48 @@ export function PublisherApp({
     return previewStart.current
   }, [api])
 
-  const loadChanges = useCallback(async (expectedPublishGeneration?: number): Promise<void> => {
-    const request = ++changesRequest.current
-    const stale = (): boolean =>
-      request !== changesRequest.current ||
-      (expectedPublishGeneration !== undefined &&
-        expectedPublishGeneration !== publishDeploymentGeneration.current)
-    pendingPublishRequest.current = undefined
-    setPublishSubmitError(undefined)
-    setChangeReviewState("loading")
-    let result: Awaited<ReturnType<GardenApi["changes"]["list"]>>
-    try {
-      result = await api.changes.list()
-    } catch (error) {
+  const loadChanges = useCallback(
+    async (expectedPublishGeneration?: number): Promise<void> => {
+      const request = ++changesRequest.current
+      const stale = (): boolean =>
+        request !== changesRequest.current ||
+        (expectedPublishGeneration !== undefined &&
+          expectedPublishGeneration !== publishDeploymentGeneration.current)
+      pendingPublishRequest.current = undefined
+      setPublishSubmitError(undefined)
+      setChangeReviewState("loading")
+      let result: Awaited<ReturnType<GardenApi["changes"]["list"]>>
+      try {
+        result = await api.changes.list()
+      } catch (error) {
+        if (stale()) return
+        setChangeReview(undefined)
+        setChangeCount(undefined)
+        setChangeReviewState("error")
+        setPublishMessage(error instanceof Error ? error.message : "无法检查可发布变化")
+        return
+      }
       if (stale()) return
-      setChangeReview(undefined)
-      setChangeCount(undefined)
-      setChangeReviewState("error")
-      setPublishMessage(error instanceof Error ? error.message : "无法检查可发布变化")
-      return
-    }
-    if (stale()) return
-    if (!result.ok) {
-      setChangeReview(undefined)
-      setChangeCount(undefined)
-      setChangeReviewState("error")
-      setPublishMessage(messageFor(result.error, "发布检查暂不可用。"))
-      return
-    }
-    setChangeReview(result.value)
-    setChangeReviewState("ready")
-    const publishable = result.value.groups.filter((group) => group.selection === "default").length
-    setChangeCount(publishable)
-    setPublishMessage(
-      result.value.blockedReason ??
-        (result.value.groups.length === 0 ? "当前没有可发布变化" : "可查看并选择要发布的变化"),
-    )
-  }, [api])
+      if (!result.ok) {
+        setChangeReview(undefined)
+        setChangeCount(undefined)
+        setChangeReviewState("error")
+        setPublishMessage(messageFor(result.error, "发布检查暂不可用。"))
+        return
+      }
+      setChangeReview(result.value)
+      setChangeReviewState("ready")
+      const publishable = result.value.groups.filter(
+        (group) => group.selection === "default",
+      ).length
+      setChangeCount(publishable)
+      setPublishMessage(
+        result.value.blockedReason ??
+          (result.value.groups.length === 0 ? "当前没有可发布变化" : "可查看并选择要发布的变化"),
+      )
+    },
+    [api],
+  )
 
   const applyPublishProgress = useCallback(
     (next: PublishProgress): void => {
@@ -546,6 +551,7 @@ export function PublisherApp({
         api.history.deployments({ limit: 20, requestId }),
       ]).then(([gitOutcome, deploymentsOutcome]) => {
         if (
+          !appMounted.current ||
           generation !== publishDeploymentGeneration.current ||
           requestId !== publishDeploymentRequest.current
         ) {
@@ -630,8 +636,18 @@ export function PublisherApp({
       previewRequest.current += 1
       changesRequest.current += 1
       void api.changes.cancel()
+      cancelPublishDeployment()
     }
-  }, [api, applyPreview, applyPublishProgress, loadChanges, loadDomains, loadNotes, startPreview])
+  }, [
+    api,
+    applyPreview,
+    applyPublishProgress,
+    cancelPublishDeployment,
+    loadChanges,
+    loadDomains,
+    loadNotes,
+    startPreview,
+  ])
 
   useEffect(() => {
     if (!customPaneSizes) return
