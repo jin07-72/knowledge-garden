@@ -24,9 +24,20 @@ function withoutGitSuffix(url: URL): string {
 }
 
 function sshTarget(host: string, path: string): string | undefined {
-  if (!knownGitHosts.has(host.toLowerCase()) || !/^\/?[^/]+\/.+/.test(path)) return undefined
+  if (!knownGitHosts.has(host.toLowerCase())) return undefined
   const url = new URL(`https://${host.toLowerCase()}/${path.replace(/^\//, "")}`)
-  return withoutGitSuffix(url)
+  const target = withoutGitSuffix(url)
+  // Dot segments and the .git suffix can erase the repository component.
+  if (!/^\/[^/]+\/[^/]+(?:\/[^/]+)*\/?$/.test(url.pathname)) return undefined
+  return target
+}
+
+function repositoryAddress(
+  display: string,
+  url?: string,
+): BlogDisplayRecord["repository"] | undefined {
+  if (url && !safeCandidate(url)) return undefined
+  return url ? { display, url } : { display }
 }
 
 export function parseRepositoryRemote(
@@ -39,19 +50,19 @@ export function parseRepositoryRemote(
     if (/^https?:\/\//i.test(display)) {
       const url = new URL(display)
       if (url.username || url.password) return undefined
-      return { display, url: withoutGitSuffix(url) }
+      return repositoryAddress(display, withoutGitSuffix(url))
     }
     if (/^ssh:\/\//i.test(display)) {
       const url = new URL(display)
       if (url.password || !url.hostname || !/[^/]/.test(url.pathname)) return undefined
       const target = sshTarget(url.hostname, url.pathname)
-      return target ? { display, url: target } : { display }
+      return repositoryAddress(display, target)
     }
     if (display.includes("://")) return undefined
     const scp = /^(?:[a-z\d._-]+@)?([a-z\d.-]+):([^@?#]+)$/i.exec(display)
     if (!scp || (!display.includes("@") && !scp[1]!.includes("."))) return undefined
     const target = sshTarget(scp[1]!, scp[2]!)
-    return target ? { display, url: target } : { display }
+    return repositoryAddress(display, target)
   } catch {
     return undefined
   }
@@ -103,7 +114,7 @@ export function normalizePublicWebsite(input: string): string | undefined {
       if (!host.split(".").every((label) => /^[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?$/i.test(label)))
         return undefined
     }
-    return url.href
+    return safeCandidate(url.href) ? url.href : undefined
   } catch {
     return undefined
   }

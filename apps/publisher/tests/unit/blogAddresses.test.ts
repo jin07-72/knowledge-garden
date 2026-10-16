@@ -1,6 +1,8 @@
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import type { BlogRecord, BlogRegistryState } from "../../src/shared/contracts"
+import { IPC_CHANNELS } from "../../src/shared/contracts"
+import { IPC_SUCCESS_SCHEMAS } from "../../src/shared/ipcSchemas"
 import {
   BlogAddressError,
   createBlogAddressResolver,
@@ -11,7 +13,7 @@ import {
 const blog: BlogRecord = {
   id: "00000000-0000-4000-8000-000000000001",
   name: "Garden",
-  path: "display-path",
+  path: join("C:", "gardens", "display-path"),
   canonicalPath: join("C:", "gardens", "first"),
   createdAt: "2026-10-01T00:00:00.000Z",
   lastOpenedAt: "2026-10-01T00:00:00.000Z",
@@ -27,6 +29,9 @@ const resolverWith = (remote = "", config = "") =>
     runGit: async () => gitResult(remote),
     readText: async () => config,
   })
+const expandedWebsite = "https://example.com/" + "界".repeat(300)
+const nearLimitWebsite = "example.com/" + "a".repeat(2048 - "example.com/".length)
+const expandedSshRemote = "git@github.com:owner/" + "界".repeat(300)
 
 describe("repository remote policy", () => {
   it.each([
@@ -69,18 +74,22 @@ describe("repository remote policy", () => {
     "ssh://git@custom.example",
     "ssh://git@custom.example/",
     "ssh://git@custom.example/?repo=repo.git#repo",
+    expandedWebsite,
+    expandedSshRemote,
   ])("rejects unsafe or unavailable remote %j", (remote) => {
     expect(parseRepositoryRemote(remote)).toBeUndefined()
   })
 
-  it("does not convert SSH host lookalikes or paths missing owner/repository", () => {
-    for (const remote of [
-      "git@github.com.evil.example:a/b.git",
-      "git@github.com:repo.git",
-      "ssh://git@github.com/repo.git",
-    ]) {
-      expect(parseRepositoryRemote(remote)).toEqual({ display: remote })
-    }
+  it.each([
+    "git@github.com.evil.example:a/b.git",
+    "git@github.com:repo.git",
+    "ssh://git@github.com/repo.git",
+    "git@github.com:owner/..",
+    "git@github.com:owner/%2e%2e",
+    "git@github.com:owner/.git",
+    "ssh://git@github.com/owner//",
+  ])("does not convert SSH host lookalikes or missing owner/repository: %s", (remote) => {
+    expect(parseRepositoryRemote(remote)).toEqual({ display: remote })
   })
 })
 
@@ -140,6 +149,8 @@ describe("public website policy", () => {
     "https://example.com/\n",
     "https://example.com/\u0085",
     "https://example.com/" + "界".repeat(700),
+    expandedWebsite,
+    nearLimitWebsite,
   ])("rejects unsafe website %j", (input) => {
     expect(normalizePublicWebsite(input)).toBeUndefined()
   })
@@ -153,6 +164,35 @@ describe("public website policy", () => {
 })
 
 describe("blog address resolver", () => {
+  it.each([expandedWebsite, nearLimitWebsite])(
+    "keeps oversized normalized websites within the real IPC contract: %s",
+    async (websiteUrl) => {
+      for (const source of ["manual", "quartz"] as const) {
+        const resolver = resolverWith(expandedWebsite, `configuration:\n  baseUrl: ${websiteUrl}`)
+        const view = await resolver.describe(
+          state(source === "manual" ? { ...blog, websiteUrl } : blog),
+        )
+        const response = { ...view, activeAvailability: "available" }
+        expect(IPC_SUCCESS_SCHEMAS[IPC_CHANNELS.requests.blogsList].parse(response)).toEqual(
+          response,
+        )
+        expect(view.blogs[0]?.repository).toEqual({ display: "未配置仓库" })
+        expect(view.blogs[0]?.website).toEqual({ source: "unconfigured" })
+      }
+    },
+  )
+
+  it("keeps oversized SSH targets unconfigured and accepts URLs exactly at the limit", async () => {
+    const websiteUrl = "https://example.com/" + "a".repeat(2048 - "https://example.com/".length)
+    expect(normalizePublicWebsite(websiteUrl)).toBe(websiteUrl)
+    expect(parseRepositoryRemote(websiteUrl)?.url).toBe(websiteUrl)
+    const view = await resolverWith(expandedSshRemote).describe(state({ ...blog, websiteUrl }))
+    const response = { ...view, activeAvailability: "available" }
+    expect(IPC_SUCCESS_SCHEMAS[IPC_CHANNELS.requests.blogsList].parse(response)).toEqual(response)
+    expect(view.blogs[0]?.repository).toEqual({ display: "未配置仓库" })
+    expect(view.blogs[0]?.website).toEqual({ source: "manual", url: websiteUrl })
+  })
+
   it("provides the same pure website normalization and safe typed errors", () => {
     const resolver = resolverWith()
     expect(resolver.normalizeWebsite("example.com")).toBe("https://example.com/")
