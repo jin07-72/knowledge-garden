@@ -47,6 +47,8 @@ function managerProps(importState: BlogImportUiState = { view: "list", busy: fal
     onInstall: vi.fn(),
     onRename: vi.fn(),
     onOpenFolder: vi.fn(),
+    onOpenLink: vi.fn(),
+    onUpdateWebsite: vi.fn(),
     onRemove: vi.fn(),
     onSwitch: vi.fn(),
   }
@@ -450,6 +452,159 @@ describe("BlogSwitcher", () => {
 })
 
 describe("BlogManager", () => {
+  it("shows all address rows with stable unique descriptions and opens only available links", async () => {
+    const user = userEvent.setup()
+    const props = managerProps()
+    const view = render(<BlogManager {...props} />)
+    for (const blog of registry.blogs) {
+      const card = within(screen.getByRole("article", { name: new RegExp(blog.name) }))
+      for (const label of ["仓库", "网站", "本地"]) expect(card.getByText(label)).toBeVisible()
+      expect(card.getByTitle(blog.path)).toBeVisible()
+      expect(card.getByTitle(blog.repository.display)).toBeVisible()
+      expect(card.getByRole("button", { name: `编辑 ${blog.name} 的网站地址` })).toBeEnabled()
+    }
+    const ids = Array.from(document.querySelectorAll("dd[id]"), (node) => node.id)
+    expect(new Set(ids).size).toBe(6)
+    view.rerender(<BlogManager {...props} registry={{ ...registry }} />)
+    expect(Array.from(document.querySelectorAll("dd[id]"), (node) => node.id)).toEqual(ids)
+    for (const [kind, label, value] of [
+      ["repository", "仓库", registry.blogs[0].repository.display],
+      ["website", "网站", "https://knowledge.example.com/"],
+    ] as const) {
+      const button = screen.getByRole("button", { name: `打开 Knowledge Garden 的${label}` })
+      expect(button).toHaveAccessibleDescription(value)
+      await user.click(button)
+      expect(props.onOpenLink).toHaveBeenLastCalledWith("knowledge", kind)
+      expect(screen.queryByRole("button", { name: `打开 Study Garden 的${label}` })).toBeNull()
+    }
+  })
+
+  it.each(["manual", "quartz", "unconfigured"] as const)(
+    "initializes the %s editor accurately",
+    async (source) => {
+      const user = userEvent.setup()
+      const website =
+        source === "unconfigured" ? { source } : { source, url: "https://garden.example.com/" }
+      render(
+        <BlogManager
+          {...managerProps()}
+          registry={{ ...registry, blogs: [{ ...registry.blogs[0], website }] }}
+        />,
+      )
+      await user.click(screen.getByRole("button", { name: "编辑 Knowledge Garden 的网站地址" }))
+      expect(screen.getByRole("textbox", { name: "网站地址" })).toHaveValue(
+        source === "manual" ? website.url : "",
+      )
+      if (source === "quartz")
+        expect(screen.getByText("当前自动读取：https://garden.example.com/")).toBeVisible()
+      if (source === "unconfigured") expect(screen.getByText(/尚未配置网站地址/)).toBeVisible()
+    },
+  )
+
+  it("trims a submitted draft without normalizing and preserves it after failure", async () => {
+    const user = userEvent.setup()
+    const props = managerProps()
+    const view = render(<BlogManager {...props} />)
+    await user.click(screen.getByRole("button", { name: "编辑 Knowledge Garden 的网站地址" }))
+    const input = screen.getByRole("textbox", { name: "网站地址" })
+    await user.type(input, "  garden.example.com/path  ")
+    await user.click(screen.getByRole("button", { name: "保存网站地址" }))
+    expect(props.onUpdateWebsite).toHaveBeenCalledExactlyOnceWith(
+      "knowledge",
+      "garden.example.com/path",
+    )
+    expect(input).toHaveValue("  garden.example.com/path  ")
+    view.rerender(<BlogManager {...props} importState={{ view: "list", busy: true }} />)
+    view.rerender(
+      <BlogManager
+        {...props}
+        importState={{ view: "list", busy: false, error: "网站地址无效。" }}
+      />,
+    )
+    expect(screen.getByRole("alert")).toHaveTextContent("网站地址无效。")
+    expect(input).toHaveValue("  garden.example.com/path  ")
+    // A later unrelated successful operation must not discard the failed draft.
+    view.rerender(<BlogManager {...props} importState={{ view: "list", busy: true }} />)
+    view.rerender(<BlogManager {...props} registry={{ ...registry }} />)
+    expect(input).toHaveValue("  garden.example.com/path  ")
+  })
+
+  it.each([false, true])(
+    "closes only after a successful busy cycle and registry refresh (same value: %s)",
+    async (sameValue) => {
+      const user = userEvent.setup()
+      const props = managerProps()
+      const manual: BlogRegistryView = {
+        ...registry,
+        blogs: [
+          {
+            ...registry.blogs[0],
+            website: { source: "manual", url: "https://garden.example.com/" },
+          },
+        ],
+      }
+      const view = render(<BlogManager {...props} registry={manual} />)
+      await user.click(screen.getByRole("button", { name: "编辑 Knowledge Garden 的网站地址" }))
+      if (!sameValue) await user.clear(screen.getByRole("textbox", { name: "网站地址" }))
+      await user.click(screen.getByRole("button", { name: "保存网站地址" }))
+      expect(props.onUpdateWebsite).toHaveBeenCalledWith(
+        "knowledge",
+        sameValue ? "https://garden.example.com/" : null,
+      )
+      expect(screen.getByRole("textbox", { name: "网站地址" })).toBeVisible()
+      view.rerender(
+        <BlogManager {...props} registry={manual} importState={{ view: "list", busy: true }} />,
+      )
+      view.rerender(<BlogManager {...props} registry={manual} />)
+      expect(screen.getByRole("textbox", { name: "网站地址" })).toBeVisible()
+      view.rerender(<BlogManager {...props} registry={{ ...manual }} />)
+      expect(screen.queryByRole("textbox", { name: "网站地址" })).toBeNull()
+    },
+  )
+
+  it("allows one editor and restores the exact edit trigger on cancel", async () => {
+    const user = userEvent.setup()
+    const props = managerProps()
+    render(<BlogManager {...props} />)
+    await user.click(screen.getByRole("button", { name: "编辑 Knowledge Garden 的网站地址" }))
+    const trigger = screen.getByRole("button", { name: "编辑 Study Garden 的网站地址" })
+    await user.click(trigger)
+    expect(screen.getAllByRole("textbox", { name: "网站地址" })).toHaveLength(1)
+    expect(
+      within(screen.getByRole("article", { name: /Study Garden/ })).getByRole("textbox", {
+        name: "网站地址",
+      }),
+    ).toBeVisible()
+    await user.click(screen.getByRole("button", { name: "取消编辑网站地址" }))
+    expect(screen.queryByRole("textbox", { name: "网站地址" })).toBeNull()
+    expect(trigger).toHaveFocus()
+    expect(props.onUpdateWebsite).not.toHaveBeenCalled()
+  })
+
+  it("blocks address editing, open actions, and registry controls throughout busy operations", async () => {
+    const user = userEvent.setup()
+    const props = managerProps()
+    const view = render(<BlogManager {...props} />)
+    await user.click(screen.getByRole("button", { name: "编辑 Knowledge Garden 的网站地址" }))
+    view.rerender(<BlogManager {...props} importState={{ view: "list", busy: true }} />)
+    for (const button of document.querySelectorAll("button")) {
+      expect(button).toBeDisabled()
+      fireEvent.click(button)
+    }
+    fireEvent.submit(screen.getByRole("textbox", { name: "网站地址" }).closest("form")!)
+    for (const callback of [
+      props.onUpdateWebsite,
+      props.onOpenLink,
+      props.onRename,
+      props.onRemove,
+      props.onSwitch,
+      props.onChooseLocal,
+      props.onOpenFolder,
+      props.onClose,
+    ])
+      expect(callback).not.toHaveBeenCalled()
+  })
+
   it("offers recovery relocation only for a valid non-duplicate candidate", async () => {
     const user = userEvent.setup()
     const onRelocate = vi.fn()
@@ -765,5 +920,19 @@ describe("BlogManager", () => {
     expect(screen.getByRole("button", { name: "切换到 Study Garden" })).toBeDisabled()
     expect(screen.getByRole("button", { name: "关闭博客管理" })).toBeDisabled()
     expect(screen.getByLabelText("博客操作进行中")).toHaveFocus()
+  })
+
+  it("does not dispatch an already-filled clone form while busy", async () => {
+    const user = userEvent.setup()
+    const props = managerProps({ view: "clone", busy: false })
+    const view = render(<BlogManager {...props} />)
+    await user.type(
+      screen.getByRole("textbox", { name: "GitHub 仓库地址" }),
+      "https://github.com/me/garden",
+    )
+    await user.type(screen.getByRole("textbox", { name: "保存位置" }), "D:/Blogs/garden")
+    view.rerender(<BlogManager {...props} importState={{ view: "clone", busy: true }} />)
+    fireEvent.submit(screen.getByRole("textbox", { name: "保存位置" }).closest("form")!)
+    expect(props.onClone).not.toHaveBeenCalled()
   })
 })

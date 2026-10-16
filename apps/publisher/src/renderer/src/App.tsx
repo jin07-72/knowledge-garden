@@ -5,6 +5,7 @@ import type {
   AppError,
   BlogAddLocalRequest,
   BlogCloneRequest,
+  BlogLinkOpenRequest,
   BlogRegistryView,
   BlogRegistryStatus,
   ChangeReview,
@@ -13,6 +14,7 @@ import type {
   DomainRenameRequest,
   DomainSummary,
   GardenApi,
+  IpcResult,
   NoteCreateRequest,
   NoteDocument,
   NoteSummary,
@@ -185,6 +187,7 @@ export function PublisherApp({
   const [blogBusy, setBlogBusy] = useState(false)
   const [switchPreparing, setSwitchPreparing] = useState(false)
   const blogBusyRef = useRef(false)
+  const registryRequest = useRef(0)
   const [importState, setImportState] = useState<BlogImportUiState>({
     view: "list",
     busy: false,
@@ -309,9 +312,10 @@ export function PublisherApp({
   )
 
   const refreshBlogs = useCallback(async (): Promise<BlogRegistryView> => {
+    const request = ++registryRequest.current
     const result = await api.blogs.list()
     if (!result.ok) throw new Error(result.error.message)
-    if (appMounted.current) setRegistry(result.value)
+    if (appMounted.current && request === registryRequest.current) setRegistry(result.value)
     return result.value
   }, [api])
 
@@ -918,9 +922,10 @@ export function PublisherApp({
 
   const addLocalBlog = (request: BlogAddLocalRequest): void => {
     void runBlogOperation(async () => {
+      const generation = ++registryRequest.current
       const result = await api.blogs.addLocal(request)
       if (!result.ok) throw new Error(result.error.message)
-      if (appMounted.current) {
+      if (appMounted.current && generation === registryRequest.current) {
         setRegistry(result.value)
         setImportState({ view: "list", busy: true })
       }
@@ -953,12 +958,24 @@ export function PublisherApp({
     })
   }
 
-  const updateRegistry = (operation: () => ReturnType<GardenApi["blogs"]["rename"]>): void => {
+  const updateRegistry = (operation: () => Promise<IpcResult<BlogRegistryView>>): void => {
     void runBlogOperation(async () => {
+      const request = ++registryRequest.current
       const result = await operation()
       if (!result.ok) throw new Error(result.error.message)
-      if (appMounted.current) setRegistry(result.value)
+      if (appMounted.current && request === registryRequest.current) setRegistry(result.value)
     })
+  }
+
+  const openBlogLink = (id: string, kind: BlogLinkOpenRequest["kind"]): void => {
+    void runBlogOperation(async () => {
+      const result = await api.blogs.openLink({ id, kind })
+      if (!result.ok) throw new Error(result.error.message)
+    })
+  }
+
+  const updateBlogWebsite = (id: string, websiteUrl: string | null): void => {
+    updateRegistry(() => api.blogs.updateWebsite({ id, websiteUrl }))
   }
 
   const applyDomainMutation = async (
@@ -998,6 +1015,7 @@ export function PublisherApp({
           registry={registry}
           disabled={blogBusy}
           onSwitch={switchBlog}
+          onOpenLink={openBlogLink}
           onAddLocal={chooseLocalBlog}
           onClone={() => {
             setManagerOpen(true)
@@ -1437,6 +1455,8 @@ export function PublisherApp({
         onClone={cloneBlog}
         onInstall={installBlog}
         onRename={(id, name) => updateRegistry(() => api.blogs.rename({ id, name }))}
+        onOpenLink={openBlogLink}
+        onUpdateWebsite={updateBlogWebsite}
         onOpenFolder={(id) => {
           void runBlogOperation(async () => {
             const result = await api.blogs.openFolder({ id })
@@ -1666,6 +1686,19 @@ function BlogRecovery({
         registry={registry}
         importState={importState}
         recoveryBlogId={activeId}
+        onOpenLink={(id, kind) =>
+          run(async () => {
+            const result = await api.blogs.openLink({ id, kind })
+            if (!result.ok) throw new Error(result.error.message)
+          })
+        }
+        onUpdateWebsite={(id, websiteUrl) =>
+          run(async () => {
+            const result = await api.blogs.updateWebsite({ id, websiteUrl })
+            if (!result.ok) throw new Error(result.error.message)
+            if (mounted.current) setRegistry(result.value)
+          })
+        }
         onClose={() => undefined}
         onChooseLocal={chooseLocal}
         onAddLocal={() => undefined}
@@ -1789,6 +1822,8 @@ function CorruptRegistryRecovery({
         registry={emptyRegistry}
         importState={importState}
         registryRecovery
+        onOpenLink={() => undefined}
+        onUpdateWebsite={() => undefined}
         onRetryRecovery={onRetry}
         onClose={() => undefined}
         onChooseLocal={chooseLocal}

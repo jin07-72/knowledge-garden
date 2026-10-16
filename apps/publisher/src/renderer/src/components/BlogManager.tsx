@@ -8,15 +8,17 @@ import {
   Trash2,
   X,
 } from "lucide-react"
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useId, useRef, useState } from "react"
 import type {
   BlogAddLocalRequest,
   BlogCandidateSelection,
   BlogCloneRequest,
   BlogImportProgress,
+  BlogLinkOpenRequest,
   BlogRegistryView,
 } from "../../../shared/contracts"
 import { ModalShell } from "./ModalShell"
+import { BlogAddressRows } from "./BlogAddressRows"
 
 export interface BlogImportUiState {
   readonly view: "list" | "local" | "clone"
@@ -37,6 +39,8 @@ export interface BlogManagerProps {
   readonly onInstall: (path: string) => void
   readonly onRename: (id: string, name: string) => void
   readonly onOpenFolder: (id: string) => void
+  readonly onOpenLink: (id: string, kind: BlogLinkOpenRequest["kind"]) => void
+  readonly onUpdateWebsite: (id: string, websiteUrl: string | null) => void
   readonly onRemove: (id: string) => void
   readonly onSwitch: (id: string) => void
   readonly onCancelImport?: () => void
@@ -66,6 +70,8 @@ export function BlogManager({
   onInstall,
   onRename,
   onOpenFolder,
+  onOpenLink,
+  onUpdateWebsite,
   onRemove,
   onSwitch,
   onCancelImport,
@@ -84,6 +90,13 @@ export function BlogManager({
   const [renaming, setRenaming] = useState<string>()
   const [renameValue, setRenameValue] = useState("")
   const [removing, setRemoving] = useState<string>()
+  const [editingWebsite, setEditingWebsite] = useState<string>()
+  const [websiteValue, setWebsiteValue] = useState("")
+  const websiteSubmission = useRef<{ registry: BlogRegistryView; sawBusy: boolean } | undefined>(
+    undefined,
+  )
+  const websiteOrigin = useRef<HTMLButtonElement | null>(null)
+  const restoreWebsiteFocus = useRef(false)
   const closeButton = useRef<HTMLButtonElement>(null)
   const busyFocus = useRef<HTMLDivElement>(null)
   const removeOriginId = useRef<string | undefined>(undefined)
@@ -98,6 +111,9 @@ export function BlogManager({
       setLocalName("")
       setCloneRequest({ url: "", destination: "", name: "" })
       setRenameValue("")
+      setEditingWebsite(undefined)
+      setWebsiteValue("")
+      websiteSubmission.current = undefined
     }
   }, [open])
   useEffect(() => {
@@ -108,6 +124,28 @@ export function BlogManager({
     ).find((button) => button.dataset.removeBlogId === removeOriginId.current)
     origin?.focus()
   }, [removing])
+  useEffect(() => {
+    if (editingWebsite !== undefined || !restoreWebsiteFocus.current) return
+    restoreWebsiteFocus.current = false
+    websiteOrigin.current?.focus()
+  }, [editingWebsite])
+  useEffect(() => {
+    const submission = websiteSubmission.current
+    if (!submission) return
+    if (importState.busy) {
+      submission.sawBusy = true
+      return
+    }
+    if (!submission.sawBusy) return
+    if (importState.error) {
+      websiteSubmission.current = undefined
+    } else if (registry !== submission.registry) {
+      websiteSubmission.current = undefined
+      restoreWebsiteFocus.current = true
+      setEditingWebsite(undefined)
+      setWebsiteValue("")
+    }
+  }, [importState.busy, importState.error, registry])
 
   if (!open) return null
   const busy = importState.busy
@@ -170,6 +208,30 @@ export function BlogManager({
             renaming={renaming}
             renameValue={renameValue}
             removing={removing}
+            editingWebsite={editingWebsite}
+            websiteValue={websiteValue}
+            onWebsiteValue={setWebsiteValue}
+            onStartWebsite={(id, trigger) => {
+              if (busy) return
+              const blog = registry.blogs.find((entry) => entry.id === id)
+              websiteOrigin.current = trigger
+              websiteSubmission.current = undefined
+              setEditingWebsite(id)
+              setWebsiteValue(blog?.website.source === "manual" ? blog.website.url : "")
+            }}
+            onSaveWebsite={(id) => {
+              if (busy) return
+              websiteSubmission.current = { registry, sawBusy: false }
+              onUpdateWebsite(id, websiteValue.trim() || null)
+            }}
+            onCancelWebsite={() => {
+              if (busy) return
+              websiteSubmission.current = undefined
+              restoreWebsiteFocus.current = true
+              setEditingWebsite(undefined)
+              setWebsiteValue("")
+            }}
+            onOpenLink={onOpenLink}
             onStartRename={(id, name) => {
               setRenaming(id)
               setRenameValue(name)
@@ -177,7 +239,7 @@ export function BlogManager({
             onRenameValue={setRenameValue}
             onSaveRename={(id) => {
               const name = renameValue.trim()
-              if (!name) return
+              if (busy || !name) return
               onRename(id, name)
               setRenaming(undefined)
             }}
@@ -261,7 +323,7 @@ export function BlogManager({
                     onSubmit={(event) => {
                       event.preventDefault()
                       const name = localName.trim()
-                      if (name) onAddLocal({ path: selection.path, name })
+                      if (!busy && name) onAddLocal({ path: selection.path, name })
                     }}
                   >
                     <label>
@@ -296,7 +358,7 @@ export function BlogManager({
               className="blog-clone-form"
               onSubmit={(event) => {
                 event.preventDefault()
-                if (cloneRequest.url.trim() && cloneRequest.destination.trim()) {
+                if (!busy && cloneRequest.url.trim() && cloneRequest.destination.trim()) {
                   onClone({
                     url: cloneRequest.url.trim(),
                     destination: cloneRequest.destination.trim(),
@@ -402,6 +464,13 @@ function BlogList({
   renaming,
   renameValue,
   removing,
+  editingWebsite,
+  websiteValue,
+  onWebsiteValue,
+  onStartWebsite,
+  onSaveWebsite,
+  onCancelWebsite,
+  onOpenLink,
   onStartRename,
   onRenameValue,
   onSaveRename,
@@ -418,6 +487,13 @@ function BlogList({
   readonly renaming?: string
   readonly renameValue: string
   readonly removing?: string
+  readonly editingWebsite?: string
+  readonly websiteValue: string
+  readonly onWebsiteValue: (value: string) => void
+  readonly onStartWebsite: (id: string, trigger: HTMLButtonElement) => void
+  readonly onSaveWebsite: (id: string) => void
+  readonly onCancelWebsite: () => void
+  readonly onOpenLink: BlogManagerProps["onOpenLink"]
   readonly onStartRename: (id: string, name: string) => void
   readonly onRenameValue: (value: string) => void
   readonly onSaveRename: (id: string) => void
@@ -429,6 +505,7 @@ function BlogList({
   readonly recoveryBlogId?: string
   readonly onRecover: () => void
 }): React.JSX.Element {
+  const addressPrefix = useId()
   return (
     <div className="blog-manager-list">
       {registry.blogs.map((blog) => {
@@ -448,8 +525,62 @@ function BlogList({
                   </span>
                 ) : null}
               </div>
-              <code title={blog.path}>{blog.path}</code>
             </div>
+            <BlogAddressRows
+              blog={blog}
+              idPrefix={`${addressPrefix}-${blog.id}`}
+              disabled={busy}
+              onOpenLink={(kind) => onOpenLink(blog.id, kind)}
+            />
+            <button
+              type="button"
+              className="secondary-button blog-website-edit"
+              aria-label={`编辑 ${blog.name} 的网站地址`}
+              disabled={busy}
+              onClick={(event) => onStartWebsite(blog.id, event.currentTarget)}
+            >
+              <Pencil size={14} aria-hidden="true" /> 编辑网站地址
+            </button>
+            {editingWebsite === blog.id ? (
+              <form
+                className="blog-website-form"
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  if (!busy) onSaveWebsite(blog.id)
+                }}
+              >
+                {blog.website.source === "quartz" ? (
+                  <p>当前自动读取：{blog.website.url}</p>
+                ) : blog.website.source === "unconfigured" ? (
+                  <p>尚未配置网站地址。可以输入网站地址，或在 Quartz 配置中设置 baseUrl。</p>
+                ) : null}
+                <label>
+                  网站地址
+                  <input
+                    autoFocus
+                    value={websiteValue}
+                    disabled={busy}
+                    aria-describedby={`${addressPrefix}-${blog.id}-website-help`}
+                    onChange={(event) => onWebsiteValue(event.currentTarget.value)}
+                  />
+                </label>
+                <p id={`${addressPrefix}-${blog.id}-website-help`}>
+                  留空保存可清除手动地址，恢复自动读取。
+                </p>
+                <button type="submit" className="primary-button" disabled={busy}>
+                  保存网站地址
+                </button>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={busy}
+                  aria-label="取消编辑网站地址"
+                  onClick={onCancelWebsite}
+                >
+                  取消
+                </button>
+              </form>
+            ) : null}
             {renaming === blog.id ? (
               <form
                 className="blog-rename-form"

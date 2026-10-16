@@ -160,6 +160,8 @@ const testRegistry: BlogRegistryStatus = {
       canonicalPath: String.raw`C:\Users\11546\Desktop\web`,
       createdAt: "2026-10-01T00:00:00.000Z",
       lastOpenedAt: "2026-10-01T00:00:00.000Z",
+      repository: { display: "https://github.com/me/garden", url: "https://github.com/me/garden" },
+      website: { source: "manual", url: "https://garden.example.com/" },
     },
   ],
 }
@@ -175,6 +177,8 @@ const twoBlogRegistry: BlogRegistryStatus = {
       canonicalPath: String.raw`C:\Users\11546\Desktop\study`,
       createdAt: "2026-10-02T00:00:00.000Z",
       lastOpenedAt: "2026-10-02T00:00:00.000Z",
+      repository: { display: "未配置仓库" },
+      website: { source: "unconfigured" },
     },
   ],
 }
@@ -205,6 +209,8 @@ function createGardenMock(): GardenApi {
       relocate: vi.fn(async () => unavailable<BlogRegistryView>("博客服务将在后续任务中提供。")),
       remove: vi.fn(async () => unavailable<BlogRegistryView>("博客服务将在后续任务中提供。")),
       openFolder: vi.fn(async () => ok(undefined)),
+      openLink: vi.fn(async () => ok(undefined)),
+      updateWebsite: vi.fn(async () => ok(testRegistry)),
       switch: vi.fn(async () => ok(undefined)),
       onImportProgress: vi.fn(() => () => undefined),
     },
@@ -302,6 +308,166 @@ function createGardenMock(): GardenApi {
 }
 
 describe("publisher main layout", () => {
+  async function openBlogManager(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByRole("button", { name: /切换博客：/ }))
+    await user.click(screen.getByRole("menuitem", { name: "管理博客" }))
+    return screen.getByRole("dialog", { name: "管理博客" })
+  }
+
+  it("opens summary, menu, and manager addresses using only blog ID and kind", async () => {
+    const user = userEvent.setup()
+    const api = createGardenMock()
+    render(<PublisherApp api={api} initialRegistry={testRegistry} />)
+    await user.click(screen.getByRole("button", { name: "打开 Knowledge Garden 的仓库" }))
+    expect(api.blogs.openLink).toHaveBeenLastCalledWith({
+      id: testRegistry.activeBlogId,
+      kind: "repository",
+    })
+    await user.click(screen.getByRole("button", { name: /切换博客：/ }))
+    await user.click(screen.getByRole("menuitem", { name: "打开 Knowledge Garden 的网站" }))
+    expect(api.blogs.openLink).toHaveBeenLastCalledWith({
+      id: testRegistry.activeBlogId,
+      kind: "website",
+    })
+    const dialog = await openBlogManager(user)
+    await user.click(within(dialog).getByRole("button", { name: "打开 Knowledge Garden 的网站" }))
+    expect(api.blogs.openLink).toHaveBeenCalledTimes(3)
+    expect(api.blogs.openLink).toHaveBeenLastCalledWith({
+      id: testRegistry.activeBlogId,
+      kind: "website",
+    })
+  })
+
+  it("shows safe open failures in the manager without losing registry addresses", async () => {
+    const user = userEvent.setup()
+    const api = createGardenMock()
+    vi.mocked(api.blogs.openLink).mockResolvedValue({
+      ok: false,
+      error: { code: "INTERNAL_ERROR", message: "无法打开网站，请重试。" },
+    })
+    render(<PublisherApp api={api} initialRegistry={testRegistry} />)
+    await user.click(screen.getByRole("button", { name: "打开 Knowledge Garden 的网站" }))
+    const dialog = await screen.findByRole("dialog", { name: "管理博客" })
+    expect(within(dialog).getByRole("alert")).toHaveTextContent("无法打开网站，请重试。")
+    expect(within(dialog).getByTitle("https://garden.example.com/")).toBeVisible()
+  })
+
+  it.each(["manual", "quartz", "unconfigured"] as const)(
+    "refreshes every website instance after a %s save result",
+    async (source) => {
+      const user = userEvent.setup()
+      const api = createGardenMock()
+      const pending = deferred<IpcResult<BlogRegistryView>>()
+      vi.mocked(api.blogs.updateWebsite).mockReturnValue(pending.promise)
+      render(<PublisherApp api={api} initialRegistry={testRegistry} />)
+      const dialog = await openBlogManager(user)
+      await user.click(
+        within(dialog).getByRole("button", { name: "编辑 Knowledge Garden 的网站地址" }),
+      )
+      const input = screen.getByRole("textbox", { name: "网站地址" })
+      expect(input).toHaveValue("https://garden.example.com/")
+      await user.clear(input)
+      if (source === "manual") await user.type(input, "  normalized.example.com/blog  ")
+      await user.click(screen.getByRole("button", { name: "保存网站地址" }))
+      expect(api.blogs.updateWebsite).toHaveBeenCalledExactlyOnceWith({
+        id: testRegistry.activeBlogId,
+        websiteUrl: source === "manual" ? "normalized.example.com/blog" : null,
+      })
+      expect(input).toBeDisabled()
+      const website =
+        source === "unconfigured"
+          ? { source }
+          : { source, url: "https://normalized.example.com/blog" }
+      await act(async () =>
+        pending.resolve(ok({ ...testRegistry, blogs: [{ ...testRegistry.blogs[0], website }] })),
+      )
+      await waitFor(() => expect(screen.queryByRole("textbox", { name: "网站地址" })).toBeNull())
+      const label = source === "unconfigured" ? "未配置网站" : "https://normalized.example.com/blog"
+      expect(screen.getAllByTitle(label)).toHaveLength(2)
+      await user.click(screen.getByRole("button", { name: "关闭博客管理" }))
+      await user.click(screen.getByRole("button", { name: /切换博客：/ }))
+      expect(within(screen.getByRole("menu")).getByTitle(label)).toBeVisible()
+    },
+  )
+
+  it("retains an invalid website draft and safe backend error", async () => {
+    const user = userEvent.setup()
+    const api = createGardenMock()
+    vi.mocked(api.blogs.updateWebsite).mockResolvedValue({
+      ok: false,
+      error: { code: "INVALID_INPUT", message: "网站地址必须使用 HTTP 或 HTTPS。" },
+    })
+    render(<PublisherApp api={api} initialRegistry={testRegistry} />)
+    await openBlogManager(user)
+    await user.click(screen.getByRole("button", { name: "编辑 Knowledge Garden 的网站地址" }))
+    const input = screen.getByRole("textbox", { name: "网站地址" })
+    await user.clear(input)
+    await user.type(input, "  javascript:bad  ")
+    await user.click(screen.getByRole("button", { name: "保存网站地址" }))
+    expect(await screen.findByText("网站地址必须使用 HTTP 或 HTTPS。")).toBeVisible()
+    expect(input).toHaveValue("  javascript:bad  ")
+    expect(input).toBeEnabled()
+  })
+
+  it("ignores an older startup list after a newer website mutation and serializes mutations", async () => {
+    const user = userEvent.setup()
+    const stale = deferred<IpcResult<BlogRegistryStatus>>()
+    vi.mocked(garden.blogs.list).mockReturnValueOnce(stale.promise)
+    const saved: BlogRegistryView = {
+      ...testRegistry,
+      blogs: [
+        {
+          ...testRegistry.blogs[0],
+          website: { source: "manual", url: "https://new.example.com/" },
+        },
+      ],
+    }
+    const updating = deferred<IpcResult<BlogRegistryView>>()
+    vi.mocked(garden.blogs.updateWebsite).mockReturnValue(updating.promise)
+    render(
+      <StrictMode>
+        <StartupApp />
+      </StrictMode>,
+    )
+    await screen.findByRole("button", { name: /切换博客：/ })
+    await openBlogManager(user)
+    await user.click(screen.getByRole("button", { name: "编辑 Knowledge Garden 的网站地址" }))
+    const input = screen.getByRole("textbox", { name: "网站地址" })
+    await user.clear(input)
+    await user.type(input, "new.example.com")
+    await user.click(screen.getByRole("button", { name: "保存网站地址" }))
+    fireEvent.submit(input.closest("form")!)
+    fireEvent.click(screen.getByRole("button", { name: "重命名 Knowledge Garden" }))
+    expect(garden.blogs.updateWebsite).toHaveBeenCalledTimes(1)
+    expect(garden.blogs.rename).not.toHaveBeenCalled()
+    await act(async () => updating.resolve(ok(saved)))
+    await waitFor(() => expect(screen.queryByRole("textbox", { name: "网站地址" })).toBeNull())
+    await act(async () => stale.resolve(ok(testRegistry)))
+    expect(screen.getAllByTitle("https://new.example.com/")).toHaveLength(2)
+    expect(screen.queryByTitle("https://garden.example.com/")).toBeNull()
+  })
+
+  it("supports website editing and safe link opening for registered recovery blogs", async () => {
+    const user = userEvent.setup()
+    vi.mocked(garden.blogs.list).mockResolvedValue(
+      ok({ ...testRegistry, activeAvailability: "unavailable" }),
+    )
+    render(<StartupApp />)
+    const dialog = await screen.findByRole("dialog", { name: "博客恢复" })
+    await user.click(within(dialog).getByRole("button", { name: "打开 Knowledge Garden 的网站" }))
+    expect(garden.blogs.openLink).toHaveBeenCalledWith({
+      id: testRegistry.activeBlogId,
+      kind: "website",
+    })
+    await user.click(screen.getByRole("button", { name: "编辑 Knowledge Garden 的网站地址" }))
+    await user.clear(screen.getByRole("textbox", { name: "网站地址" }))
+    await user.click(screen.getByRole("button", { name: "保存网站地址" }))
+    expect(garden.blogs.updateWebsite).toHaveBeenCalledWith({
+      id: testRegistry.activeBlogId,
+      websiteUrl: null,
+    })
+  })
+
   let garden: GardenApi
   const App = (): React.JSX.Element => <PublisherApp api={garden} initialRegistry={testRegistry} />
 
@@ -2149,6 +2315,8 @@ describe("publisher main layout", () => {
           canonicalPath: String.raw`C:\Users\me\knowledge-garden`,
           createdAt: "2026-10-01T00:00:00.000Z",
           lastOpenedAt: "2026-10-01T00:00:00.000Z",
+          repository: { display: "未配置仓库" },
+          website: { source: "unconfigured" },
         },
       ],
     }
@@ -2158,6 +2326,7 @@ describe("publisher main layout", () => {
           registry={registry}
           disabled={false}
           onSwitch={vi.fn()}
+          onOpenLink={vi.fn()}
           onAddLocal={vi.fn()}
           onClone={vi.fn()}
           onManage={vi.fn()}
@@ -2168,8 +2337,8 @@ describe("publisher main layout", () => {
     expect(screen.getByRole("button", { name: "切换博客：Knowledge Garden" })).toBeVisible()
     expect(screen.getByText("Knowledge Garden")).toBeVisible()
     const path = screen.getByText(String.raw`C:\Users\me\knowledge-garden`)
-    expect(path.tagName).toBe("SMALL")
-    expect(path.parentElement).toHaveClass("blog-switcher-copy")
+    expect(path).toHaveClass("blog-address-value")
+    expect(path.closest("dl")).toHaveClass("blog-address-rows")
 
     const stylesheet = readFileSync(resolve(process.cwd(), "src/renderer/src/app.css"), "utf8")
     const narrowRules = stylesheet.slice(

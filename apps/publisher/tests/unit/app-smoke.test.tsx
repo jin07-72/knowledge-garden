@@ -28,6 +28,8 @@ const registry: BlogRegistryStatus = {
       canonicalPath: String.raw`C:\Users\me\knowledge-garden`,
       createdAt: "2026-10-01T00:00:00.000Z",
       lastOpenedAt: "2026-10-01T00:00:00.000Z",
+      repository: { display: "未配置仓库" },
+      website: { source: "unconfigured" },
     },
     {
       id: "study",
@@ -36,6 +38,8 @@ const registry: BlogRegistryStatus = {
       canonicalPath: String.raw`D:\Blogs\study`,
       createdAt: "2026-10-01T00:00:00.000Z",
       lastOpenedAt: "2026-10-01T00:00:00.000Z",
+      repository: { display: "未配置仓库" },
+      website: { source: "unconfigured" },
     },
   ],
 }
@@ -80,6 +84,8 @@ function gardenApi(): GardenApi {
       relocate: vi.fn(async () => ok(registry)),
       remove: vi.fn(async () => ok(registry)),
       openFolder: vi.fn(async () => ok(undefined)),
+      openLink: vi.fn(async () => ok(undefined)),
+      updateWebsite: vi.fn(async () => ok(registry)),
       switch: vi.fn(async () => ok(undefined)),
       onImportProgress: vi.fn(() => () => undefined),
     },
