@@ -16,6 +16,11 @@ const registry: BlogRegistryView = {
       canonicalPath: String.raw`C:\Users\me\knowledge-garden`,
       createdAt: "2026-10-01T00:00:00.000Z",
       lastOpenedAt: "2026-10-01T00:00:00.000Z",
+      repository: {
+        display: "https://github.com/me/knowledge",
+        url: "https://github.com/me/knowledge",
+      },
+      website: { source: "quartz", url: "https://knowledge.example.com/" },
     },
     {
       id: "study",
@@ -24,6 +29,8 @@ const registry: BlogRegistryView = {
       canonicalPath: String.raw`D:\Blogs\study`,
       createdAt: "2026-10-01T00:00:00.000Z",
       lastOpenedAt: "2026-10-01T00:00:00.000Z",
+      repository: { display: "git@private.example.com:me/study.git" },
+      website: { source: "unconfigured" },
     },
   ],
 }
@@ -47,6 +54,18 @@ function managerProps(importState: BlogImportUiState = { view: "list", busy: fal
 
 afterEach(() => cleanup())
 
+function switcherProps() {
+  return {
+    registry,
+    disabled: false,
+    onSwitch: vi.fn(),
+    onOpenLink: vi.fn(),
+    onAddLocal: vi.fn(),
+    onClone: vi.fn(),
+    onManage: vi.fn(),
+  }
+}
+
 describe("BlogSwitcher", () => {
   it("exposes an accessible radio menu, current marker, paths, and typed actions", async () => {
     const user = userEvent.setup()
@@ -59,6 +78,7 @@ describe("BlogSwitcher", () => {
         registry={registry}
         disabled={false}
         onSwitch={onSwitch}
+        onOpenLink={vi.fn()}
         onAddLocal={onAddLocal}
         onClone={onClone}
         onManage={onManage}
@@ -78,7 +98,7 @@ describe("BlogSwitcher", () => {
     expect(within(menu).getByText("当前")).toBeVisible()
     const study = within(menu).getByRole("menuitemradio", { name: /Study Garden/ })
     expect(study).toHaveAttribute("aria-checked", "false")
-    expect(study).toHaveTextContent(String.raw`D:\Blogs\study`)
+    expect(within(menu).getByText(String.raw`D:\Blogs\study`)).toBeVisible()
     await user.click(study)
     expect(onSwitch).toHaveBeenCalledWith("study")
     expect(screen.queryByRole("menu", { name: "选择博客" })).not.toBeInTheDocument()
@@ -105,6 +125,7 @@ describe("BlogSwitcher", () => {
         registry={registry}
         disabled={false}
         onSwitch={vi.fn()}
+        onOpenLink={vi.fn()}
         onAddLocal={vi.fn()}
         onClone={vi.fn()}
         onManage={vi.fn()}
@@ -115,7 +136,7 @@ describe("BlogSwitcher", () => {
     await user.keyboard("{ArrowDown}")
     expect(screen.getByRole("menuitemradio", { name: /Knowledge Garden/ })).toHaveFocus()
     await user.keyboard("{ArrowDown}")
-    expect(screen.getByRole("menuitemradio", { name: /Study Garden/ })).toHaveFocus()
+    expect(screen.getByRole("menuitem", { name: "打开 Knowledge Garden 的仓库" })).toHaveFocus()
     await user.keyboard("{Escape}")
     expect(screen.queryByRole("menu")).not.toBeInTheDocument()
     expect(trigger).toHaveFocus()
@@ -135,6 +156,7 @@ describe("BlogSwitcher", () => {
             registry={registry}
             disabled={false}
             onSwitch={vi.fn()}
+            onOpenLink={vi.fn()}
             onAddLocal={vi.fn()}
             onClone={vi.fn()}
             onManage={vi.fn()}
@@ -160,6 +182,7 @@ describe("BlogSwitcher", () => {
         registry={registry}
         disabled={false}
         onSwitch={vi.fn()}
+        onOpenLink={vi.fn()}
         onAddLocal={vi.fn()}
         onClone={vi.fn()}
         onManage={vi.fn()}
@@ -191,6 +214,7 @@ describe("BlogSwitcher", () => {
         registry={registry}
         disabled
         onSwitch={vi.fn()}
+        onOpenLink={vi.fn()}
         onAddLocal={vi.fn()}
         onClone={vi.fn()}
         onManage={vi.fn()}
@@ -198,6 +222,140 @@ describe("BlogSwitcher", () => {
     )
     expect(screen.getByRole("button", { name: /切换博客/ })).toBeDisabled()
     expect(screen.queryByRole("menu")).not.toBeInTheDocument()
+  })
+
+  it("shows three labelled address rows and full values in the summary and every menu blog", async () => {
+    const user = userEvent.setup()
+    render(<BlogSwitcher {...switcherProps()} />)
+    for (const label of ["仓库", "网站", "本地"]) {
+      expect(screen.getByText(label, { exact: true })).toBeVisible()
+    }
+    for (const value of [
+      registry.blogs[0].repository.display,
+      "https://knowledge.example.com/",
+      registry.blogs[0].path,
+    ]) {
+      expect(screen.getByTitle(value)).toHaveTextContent(value)
+    }
+    expect(screen.getByRole("button", { name: "打开 Knowledge Garden 的仓库" })).toBeEnabled()
+    expect(screen.getByRole("button", { name: "打开 Knowledge Garden 的网站" })).toBeEnabled()
+    await user.click(screen.getByRole("button", { name: /切换博客/ }))
+    const menu = screen.getByRole("menu")
+    for (const label of ["仓库", "网站", "本地"]) {
+      expect(within(menu).getAllByText(label, { exact: true })).toHaveLength(2)
+    }
+    for (const blog of registry.blogs) {
+      expect(within(menu).getByTitle(blog.repository.display)).toHaveTextContent(
+        blog.repository.display,
+      )
+      expect(within(menu).getByTitle(blog.path)).toHaveTextContent(blog.path)
+    }
+    expect(within(menu).getByTitle("https://knowledge.example.com/")).toBeVisible()
+    expect(within(menu).getByTitle("未配置网站")).toBeVisible()
+    expect(within(menu).queryByRole("menuitem", { name: "打开 Study Garden 的仓库" })).toBeNull()
+    expect(within(menu).queryByRole("menuitem", { name: "打开 Study Garden 的网站" })).toBeNull()
+    expect(document.querySelector("button button, button a, a button")).toBeNull()
+  })
+
+  it.each(["manual", "quartz"] as const)(
+    "opens %s website and repository by id and kind from summary and menu",
+    async (source) => {
+      const user = userEvent.setup()
+      const props = switcherProps()
+      const configured: BlogRegistryView = {
+        ...registry,
+        blogs: [{ ...registry.blogs[0], website: { source, url: "https://garden.example.com/" } }],
+      }
+      render(<BlogSwitcher {...props} registry={configured} />)
+      for (const [kind, label] of [
+        ["repository", "仓库"],
+        ["website", "网站"],
+      ] as const) {
+        await user.click(screen.getByRole("button", { name: `打开 Knowledge Garden 的${label}` }))
+        expect(props.onOpenLink).toHaveBeenLastCalledWith("knowledge", kind)
+        await user.click(screen.getByRole("button", { name: /切换博客/ }))
+        await user.click(
+          within(screen.getByRole("menu")).getByRole("menuitem", {
+            name: `打开 Knowledge Garden 的${label}`,
+          }),
+        )
+        expect(props.onOpenLink).toHaveBeenLastCalledWith("knowledge", kind)
+        expect(screen.queryByRole("menu")).toBeNull()
+      }
+      expect(props.onOpenLink).toHaveBeenCalledTimes(4)
+      expect(props.onSwitch).not.toHaveBeenCalled()
+      await user.click(screen.getByRole("button", { name: /切换博客/ }))
+      await user.click(screen.getByRole("menuitemradio", { name: /Knowledge Garden/ }))
+      expect(props.onSwitch).toHaveBeenCalledExactlyOnceWith("knowledge")
+      expect(props.onOpenLink).toHaveBeenCalledTimes(4)
+      expect(props.onAddLocal).not.toHaveBeenCalled()
+      expect(props.onClone).not.toHaveBeenCalled()
+      expect(props.onManage).not.toHaveBeenCalled()
+    },
+  )
+
+  it("includes available links in a contiguous roving sequence and opens upward at the end", async () => {
+    const user = userEvent.setup()
+    render(<BlogSwitcher {...switcherProps()} />)
+    const trigger = screen.getByRole("button", { name: /切换博客/ })
+    trigger.focus()
+    await user.keyboard("{ArrowUp}")
+    expect(screen.getByRole("menuitem", { name: "管理博客" })).toHaveFocus()
+    await user.keyboard("{Home}")
+    const menu = screen.getByRole("menu")
+    const expected = [
+      within(menu).getByRole("menuitemradio", { name: /Knowledge Garden/ }),
+      within(menu).getByRole("menuitem", { name: "打开 Knowledge Garden 的仓库" }),
+      within(menu).getByRole("menuitem", { name: "打开 Knowledge Garden 的网站" }),
+      within(menu).getByRole("menuitemradio", { name: /Study Garden/ }),
+      within(menu).getByRole("menuitem", { name: "添加本地博客" }),
+      within(menu).getByRole("menuitem", { name: "从 GitHub 下载" }),
+      within(menu).getByRole("menuitem", { name: "管理博客" }),
+    ]
+    expect(menu.querySelectorAll("[data-menu-index]")).toHaveLength(expected.length)
+    for (const [index, item] of expected.entries()) {
+      expect(item).toHaveAttribute("data-menu-index", String(index))
+      expect(item).toHaveFocus()
+      expect(expected.filter((button) => button.tabIndex === 0)).toEqual([item])
+      await user.keyboard("{ArrowDown}")
+    }
+    expect(expected[0]).toHaveFocus()
+    for (const item of [...expected].reverse()) {
+      await user.keyboard("{ArrowUp}")
+      expect(item).toHaveFocus()
+    }
+  })
+
+  it("opens on the active switch action after preceding blogs with links", async () => {
+    const user = userEvent.setup()
+    render(<BlogSwitcher {...switcherProps()} registry={{ ...registry, activeBlogId: "study" }} />)
+    await user.click(screen.getByRole("button", { name: /切换博客/ }))
+    expect(screen.getByRole("menuitemradio", { name: /Study Garden/ })).toHaveFocus()
+  })
+
+  it("disables every address and menu action when busy, including keyboard dispatch", async () => {
+    const user = userEvent.setup()
+    const props = switcherProps()
+    const view = render(<BlogSwitcher {...props} />)
+    await user.click(screen.getByRole("button", { name: /切换博客/ }))
+    const first = screen.getByRole("menuitemradio", { name: /Knowledge Garden/ })
+    view.rerender(<BlogSwitcher {...props} disabled />)
+    for (const button of document.querySelectorAll("button")) {
+      expect(button).toBeDisabled()
+      fireEvent.click(button)
+    }
+    fireEvent.keyDown(first, { key: "Enter" })
+    fireEvent.keyDown(first, { key: " " })
+    fireEvent.keyDown(first, { key: "ArrowDown" })
+    for (const callback of [
+      props.onOpenLink,
+      props.onSwitch,
+      props.onAddLocal,
+      props.onClone,
+      props.onManage,
+    ]) {
+      expect(callback).not.toHaveBeenCalled()
+    }
   })
 })
 

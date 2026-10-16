@@ -1,11 +1,13 @@
 import { Check, ChevronDown, FolderPlus, GitFork, Settings2 } from "lucide-react"
 import { useEffect, useRef, useState } from "react"
-import type { BlogRegistryView } from "../../../shared/contracts"
+import type { BlogLinkOpenRequest, BlogRegistryView } from "../../../shared/contracts"
+import { BlogAddressRows } from "./BlogAddressRows"
 
 export interface BlogSwitcherProps {
   readonly registry: BlogRegistryView
   readonly disabled: boolean
   readonly onSwitch: (id: string) => void
+  readonly onOpenLink: (id: string, kind: BlogLinkOpenRequest["kind"]) => void
   readonly onAddLocal: () => void
   readonly onClone: () => void
   readonly onManage: () => void
@@ -15,15 +17,30 @@ export function BlogSwitcher({
   registry,
   disabled,
   onSwitch,
+  onOpenLink,
   onAddLocal,
   onClone,
   onManage,
 }: BlogSwitcherProps): React.JSX.Element {
   const [open, setOpen] = useState(false)
-  const activeIndex = Math.max(
-    0,
-    registry.blogs.findIndex((blog) => blog.id === registry.activeBlogId),
-  )
+  const actions: {
+    id?: string
+    kind: "switch" | BlogLinkOpenRequest["kind"] | "addLocal" | "clone" | "manage"
+  }[] = [
+    ...registry.blogs.flatMap((blog) => [
+      { id: blog.id, kind: "switch" as const },
+      ...(blog.repository.url ? [{ id: blog.id, kind: "repository" as const }] : []),
+      ...(blog.website.source !== "unconfigured"
+        ? [{ id: blog.id, kind: "website" as const }]
+        : []),
+    ]),
+    { kind: "addLocal" },
+    { kind: "clone" },
+    { kind: "manage" },
+  ]
+  const actionIndex = (kind: (typeof actions)[number]["kind"], id?: string): number =>
+    actions.findIndex((action) => action.kind === kind && action.id === id)
+  const activeIndex = Math.max(0, actionIndex("switch", registry.activeBlogId))
   const [focusIndex, setFocusIndex] = useState(activeIndex)
   const root = useRef<HTMLDivElement>(null)
   const trigger = useRef<HTMLButtonElement>(null)
@@ -32,13 +49,14 @@ export function BlogSwitcher({
 
   useEffect(() => {
     if (!open) return
-    root.current?.querySelector<HTMLElement>(`[data-menu-index="${focusIndex}"]`)?.focus()
+    if (!disabled)
+      root.current?.querySelector<HTMLElement>(`[data-menu-index="${focusIndex}"]`)?.focus()
     const closeOutside = (event: PointerEvent): void => {
       if (!root.current?.contains(event.target as Node)) setOpen(false)
     }
     document.addEventListener("pointerdown", closeOutside)
     return () => document.removeEventListener("pointerdown", closeOutside)
-  }, [focusIndex, open])
+  }, [disabled, focusIndex, open])
 
   const openAndFocus = (index = activeIndex): void => {
     if (disabled) return
@@ -47,37 +65,53 @@ export function BlogSwitcher({
   }
 
   const finish = (action: () => void): void => {
+    if (disabled) return
     setOpen(false)
+    trigger.current?.focus()
     action()
   }
 
+  const menuButtonProps = (index: number) => ({
+    "data-menu-index": index,
+    tabIndex: !disabled && focusIndex === index ? 0 : -1,
+    onFocus: () => setFocusIndex(index),
+  })
+
   return (
     <div ref={root} className="blog-switcher">
-      <button
-        ref={trigger}
-        type="button"
-        className="blog-switcher-trigger"
-        aria-label={`切换博客：${active?.name ?? "未选择博客"}`}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        disabled={disabled || !active}
-        onClick={() => {
-          if (open) setOpen(false)
-          else openAndFocus()
-        }}
-        onKeyDown={(event) => {
-          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-            event.preventDefault()
-            openAndFocus(event.key === "ArrowUp" ? registry.blogs.length + 2 : activeIndex)
-          }
-        }}
-      >
-        <span className="blog-switcher-copy">
-          <strong>{active?.name ?? "未选择博客"}</strong>
-          {active ? <small title={active.path}>{active.path}</small> : null}
-        </span>
-        <ChevronDown size={15} aria-hidden="true" />
-      </button>
+      <div className="blog-switcher-summary">
+        <button
+          ref={trigger}
+          type="button"
+          className="blog-switcher-trigger"
+          aria-label={`切换博客：${active?.name ?? "未选择博客"}`}
+          aria-haspopup="menu"
+          aria-expanded={open}
+          disabled={disabled || !active}
+          onClick={() => {
+            if (open) setOpen(false)
+            else openAndFocus()
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+              event.preventDefault()
+              openAndFocus(event.key === "ArrowUp" ? actions.length - 1 : activeIndex)
+            }
+          }}
+        >
+          <span className="blog-switcher-copy">
+            <strong>{active?.name ?? "未选择博客"}</strong>
+          </span>
+          <ChevronDown size={15} aria-hidden="true" />
+        </button>
+        {active ? (
+          <BlogAddressRows
+            blog={active}
+            disabled={disabled}
+            onOpenLink={(kind) => finish(() => onOpenLink(active.id, kind))}
+          />
+        ) : null}
+      </div>
 
       {open ? (
         <div
@@ -92,12 +126,17 @@ export function BlogSwitcher({
               return
             }
             if (event.key === "Tab") {
-              queueMicrotask(() => setOpen(false))
+              if (event.shiftKey) {
+                event.preventDefault()
+                setOpen(false)
+                trigger.current?.focus()
+              } else queueMicrotask(() => setOpen(false))
               return
             }
+            if (disabled) return
             if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return
             event.preventDefault()
-            const count = registry.blogs.length + 3
+            const count = actions.length
             const next =
               event.key === "Home"
                 ? 0
@@ -113,61 +152,67 @@ export function BlogSwitcher({
             {registry.blogs.map((blog) => {
               const current = blog.id === registry.activeBlogId
               return (
-                <button
+                <div
                   key={blog.id}
-                  type="button"
-                  role="menuitemradio"
-                  aria-checked={current}
-                  data-menu-index={registry.blogs.indexOf(blog)}
-                  tabIndex={focusIndex === registry.blogs.indexOf(blog) ? 0 : -1}
-                  disabled={disabled}
-                  onFocus={() => setFocusIndex(registry.blogs.indexOf(blog))}
-                  onClick={() => finish(() => onSwitch(blog.id))}
+                  className="blog-switcher-option"
+                  role="group"
+                  aria-label={blog.name}
                 >
-                  <span className="blog-menu-check" aria-hidden="true">
-                    {current ? <Check size={14} /> : null}
-                  </span>
-                  <span className="blog-menu-copy">
-                    <span>
-                      <strong>{blog.name}</strong>
-                      {current ? <em>当前</em> : null}
+                  <button
+                    {...menuButtonProps(actionIndex("switch", blog.id))}
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={current}
+                    disabled={disabled}
+                    onClick={() => finish(() => onSwitch(blog.id))}
+                  >
+                    <span className="blog-menu-check" aria-hidden="true">
+                      {current ? <Check size={14} /> : null}
                     </span>
-                    <small title={blog.path}>{blog.path}</small>
-                  </span>
-                </button>
+                    <span className="blog-menu-copy">
+                      <span>
+                        <strong>{blog.name}</strong>
+                        {current ? <em>当前</em> : null}
+                      </span>
+                    </span>
+                  </button>
+                  <BlogAddressRows
+                    blog={blog}
+                    disabled={disabled}
+                    onOpenLink={(kind) => finish(() => onOpenLink(blog.id, kind))}
+                    getLinkButtonProps={(kind) => ({
+                      role: "menuitem",
+                      ...menuButtonProps(actionIndex(kind, blog.id)),
+                    })}
+                  />
+                </div>
               )
             })}
           </div>
           <div className="blog-switcher-actions">
             <button
+              {...menuButtonProps(actionIndex("addLocal"))}
               type="button"
               role="menuitem"
-              data-menu-index={registry.blogs.length}
-              tabIndex={focusIndex === registry.blogs.length ? 0 : -1}
               disabled={disabled}
-              onFocus={() => setFocusIndex(registry.blogs.length)}
               onClick={() => finish(onAddLocal)}
             >
               <FolderPlus size={15} aria-hidden="true" /> 添加本地博客
             </button>
             <button
+              {...menuButtonProps(actionIndex("clone"))}
               type="button"
               role="menuitem"
-              data-menu-index={registry.blogs.length + 1}
-              tabIndex={focusIndex === registry.blogs.length + 1 ? 0 : -1}
               disabled={disabled}
-              onFocus={() => setFocusIndex(registry.blogs.length + 1)}
               onClick={() => finish(onClone)}
             >
               <GitFork size={15} aria-hidden="true" /> 从 GitHub 下载
             </button>
             <button
+              {...menuButtonProps(actionIndex("manage"))}
               type="button"
               role="menuitem"
-              data-menu-index={registry.blogs.length + 2}
-              tabIndex={focusIndex === registry.blogs.length + 2 ? 0 : -1}
               disabled={disabled}
-              onFocus={() => setFocusIndex(registry.blogs.length + 2)}
               onClick={() => finish(onManage)}
             >
               <Settings2 size={15} aria-hidden="true" /> 管理博客
