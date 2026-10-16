@@ -12,10 +12,13 @@ import {
 import { randomUUID } from "node:crypto"
 import { basename, dirname, isAbsolute, join, resolve } from "node:path"
 import { z } from "zod"
-import type { BlogRecord, BlogRegistryView } from "../../shared/contracts"
+import type {
+  BlogRecord,
+  BlogRegistryState as ContractBlogRegistryState,
+} from "../../shared/contracts"
 
 export type { BlogRecord } from "../../shared/contracts"
-export type BlogRegistryState = BlogRegistryView
+export type BlogRegistryState = ContractBlogRegistryState
 
 export interface BlogRegistry {
   load(): Promise<BlogRegistryState>
@@ -25,6 +28,7 @@ export interface BlogRegistry {
   activate(id: string): Promise<BlogRegistryState>
   remove(id: string): Promise<BlogRegistryState>
   relocate(id: string, path: string): Promise<BlogRegistryState>
+  setWebsiteUrl(id: string, websiteUrl?: string): Promise<BlogRegistryState>
 }
 
 const identifierSchema = z.string().uuid()
@@ -45,6 +49,26 @@ const pathSchema = z
   .max(16_384)
   .refine((value) => !value.includes("\u0000"), "Invalid path")
 const timestampSchema = z.string().datetime({ offset: true })
+const websiteUrlSchema = z
+  .string()
+  .refine((value) => Buffer.byteLength(value, "utf8") <= 2_048, "Website URL is too long")
+  .refine(
+    (value) => !/[\u0000-\u001f\u007f-\u009f]/.test(value),
+    "Website URL contains control characters",
+  )
+  .refine((value) => {
+    try {
+      const parsed = new URL(value)
+      return (
+        (parsed.protocol === "http:" || parsed.protocol === "https:") &&
+        parsed.username.length === 0 &&
+        parsed.password.length === 0 &&
+        parsed.toString() === value
+      )
+    } catch {
+      return false
+    }
+  }, "Website URL must be a normalized absolute HTTP(S) URL without credentials")
 const leaseSchema = z
   .object({
     version: z.literal(1),
@@ -79,6 +103,7 @@ const blogRecordSchema = z
     canonicalPath: pathSchema.refine(isAbsolute, "Canonical path must be absolute"),
     createdAt: timestampSchema,
     lastOpenedAt: timestampSchema,
+    websiteUrl: websiteUrlSchema.optional(),
   })
   .strict()
 
@@ -145,6 +170,12 @@ function validIdentifier(id: string): string {
   const parsed = identifierSchema.safeParse(id)
   if (!parsed.success) throw new Error("Invalid blog id")
   return id
+}
+
+function validWebsiteUrl(websiteUrl: string): string {
+  const parsed = websiteUrlSchema.safeParse(websiteUrl)
+  if (!parsed.success) throw new Error("Invalid website URL")
+  return parsed.data
 }
 
 function isMissingFile(error: unknown): boolean {
@@ -713,6 +744,23 @@ export function createBlogRegistry(options: {
           blogs: state.blogs.map((candidate) =>
             candidate.id === blog.id ? { ...candidate, ...location } : candidate,
           ),
+        }
+        await persist(file, next)
+        return next
+      })
+    },
+
+    async setWebsiteUrl(id, websiteUrl) {
+      return runExclusive(async (file) => {
+        const state = await readState(file)
+        const blog = await requireBlog(state, id)
+        const updated =
+          websiteUrl === undefined
+            ? (({ websiteUrl: _removed, ...withoutWebsiteUrl }) => withoutWebsiteUrl)(blog)
+            : { ...blog, websiteUrl: validWebsiteUrl(websiteUrl) }
+        const next: BlogRegistryState = {
+          ...state,
+          blogs: state.blogs.map((candidate) => (candidate.id === blog.id ? updated : candidate)),
         }
         await persist(file, next)
         return next
