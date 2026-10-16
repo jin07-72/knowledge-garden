@@ -43,7 +43,7 @@ export function parseRepositoryRemote(
     }
     if (/^ssh:\/\//i.test(display)) {
       const url = new URL(display)
-      if (url.password) return undefined
+      if (url.password || !url.hostname || !/[^/]/.test(url.pathname)) return undefined
       const target = sshTarget(url.hostname, url.pathname)
       return target ? { display, url: target } : { display }
     }
@@ -91,7 +91,8 @@ export function normalizePublicWebsite(input: string): string | undefined {
     const url = new URL(/^[a-z][a-z\d+.-]*:\/\//i.test(input) ? input : `https://${input}`)
     if ((url.protocol !== "https:" && url.protocol !== "http:") || url.username || url.password)
       return undefined
-    const host = url.hostname.replace(/^\[|\]$/g, "")
+    // A single terminal DNS root dot is valid; keep it in the serialized URL.
+    const host = url.hostname.replace(/^\[|\]$/g, "").replace(/\.$/, "")
     const ipVersion = isIP(host)
     if (ipVersion === 4) {
       if (blockedIpv4(host)) return undefined

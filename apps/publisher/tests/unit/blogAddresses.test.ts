@@ -44,12 +44,13 @@ describe("repository remote policy", () => {
     expect(parseRepositoryRemote(remote)).toEqual({ display: remote, url })
   })
 
-  it.each(["git@custom.example:acme/garden.git", "ssh://git@custom.example/acme/garden.git"])(
-    "keeps custom SSH display-only: %s",
-    (remote) => {
-      expect(parseRepositoryRemote(remote)).toEqual({ display: remote })
-    },
-  )
+  it.each([
+    "git@custom.example:acme/garden.git",
+    "ssh://git@custom.example/acme/garden.git",
+    "ssh://git@custom.example/repo.git",
+  ])("keeps custom SSH display-only: %s", (remote) => {
+    expect(parseRepositoryRemote(remote)).toEqual({ display: remote })
+  })
 
   it.each([
     "",
@@ -64,12 +65,20 @@ describe("repository remote policy", () => {
     "javascript:alert(1)",
     "ftp://user:secret@example.com/a/b",
     "git:secret@github.com:acme/garden.git",
+    "ssh:///owner/repo.git",
+    "ssh://git@custom.example",
+    "ssh://git@custom.example/",
+    "ssh://git@custom.example/?repo=repo.git#repo",
   ])("rejects unsafe or unavailable remote %j", (remote) => {
     expect(parseRepositoryRemote(remote)).toBeUndefined()
   })
 
   it("does not convert SSH host lookalikes or paths missing owner/repository", () => {
-    for (const remote of ["git@github.com.evil.example:a/b.git", "git@github.com:garden.git"]) {
+    for (const remote of [
+      "git@github.com.evil.example:a/b.git",
+      "git@github.com:repo.git",
+      "ssh://git@github.com/repo.git",
+    ]) {
       expect(parseRepositoryRemote(remote)).toEqual({ display: remote })
     }
   })
@@ -83,6 +92,7 @@ describe("public website policy", () => {
     ["https://8.8.8.8", "https://8.8.8.8/"],
     ["https://[2606:4700:4700::1111]/", "https://[2606:4700:4700::1111]/"],
     ["example.com:8443/garden", "https://example.com:8443/garden"],
+    ["https://example.com./path?q=a#anchor", "https://example.com./path?q=a#anchor"],
   ])("normalizes %s", (input, expected) => {
     expect(normalizePublicWebsite(input)).toBe(expected)
   })
@@ -98,6 +108,11 @@ describe("public website policy", () => {
     "sub.localhost",
     "https://LOCALHOST./",
     "https://sub.localhost./",
+    "https://notes.localhost./",
+    "https://notes.localhost\u3002/",
+    "https://example.com../",
+    "https://127.0.0.1./",
+    "https://192.168.1.1./",
     "127.0.0.1",
     "127.255.255.255",
     "10.0.0.1",
