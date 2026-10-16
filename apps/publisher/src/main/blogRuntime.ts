@@ -8,16 +8,20 @@ import type {
   BlogIdRequest,
   BlogImportProgress,
   BlogImportReceipt,
+  BlogLinkOpenRequest,
   BlogPathRequest,
   BlogRecord,
+  BlogRegistryState,
   BlogRegistryView,
   BlogRegistryStatus,
   BlogRelocateRequest,
   BlogRenameRequest,
   BlogSwitchRequest,
+  BlogWebsiteUpdateRequest,
 } from "../shared/contracts"
 import type { BlogRegistry } from "./services/blogRegistry"
 import { BlogImportError, type BlogImportService } from "./services/blogImport"
+import { BlogAddressError, type BlogAddressResolver } from "./services/blogAddresses"
 
 export interface BlogRuntime {
   active(): Promise<BlogRecord>
@@ -25,8 +29,8 @@ export interface BlogRuntime {
 }
 
 export interface BlogRuntimeRegistry {
-  load(): Promise<BlogRegistryView>
-  activate(id: string): Promise<BlogRegistryView>
+  load(): Promise<BlogRegistryState>
+  activate(id: string): Promise<BlogRegistryState>
 }
 
 export interface BlogRuntimeDependencies {
@@ -220,6 +224,8 @@ export interface BlogManagementServices {
   rename(request: BlogRenameRequest): Promise<BlogRegistryView>
   relocate(request: BlogRelocateRequest): Promise<BlogRegistryView>
   remove(request: BlogIdRequest): Promise<BlogRegistryView>
+  updateWebsite(request: BlogWebsiteUpdateRequest): Promise<BlogRegistryView>
+  openLink(request: BlogLinkOpenRequest): Promise<void>
   openFolder(request: BlogIdRequest): Promise<void>
   switch(request: BlogSwitchRequest): Promise<void>
   subscribeProgress(listener: (progress: BlogImportProgress) => void): () => void
@@ -251,6 +257,8 @@ export async function runBlogManagementShutdown(options: {
 
 export function createBlogManagementAdapter(dependencies: {
   readonly registry: BlogRegistry
+  readonly addresses: BlogAddressResolver
+  readonly openExternal: (url: string) => Promise<void>
   readonly importer: BlogImportService | (() => BlogImportService)
   readonly inspect: (path: string) => Promise<BlogCandidateInspection>
   readonly chooseDirectory: () => Promise<string | undefined>
@@ -258,6 +266,8 @@ export function createBlogManagementAdapter(dependencies: {
   readonly switchTo: (request: { readonly id: string; readonly editorSaved: true }) => Promise<void>
 }): BlogManagementAdapter {
   const listeners = new Set<(progress: BlogImportProgress) => void>()
+  const view = (state: BlogRegistryState): Promise<BlogRegistryView> =>
+    dependencies.addresses.describe(state)
   let activeImport:
     | {
         readonly controller: AbortController
@@ -364,7 +374,10 @@ export function createBlogManagementAdapter(dependencies: {
             // Availability is intentionally coarse; inspection errors never cross the IPC boundary.
           }
         }
-        return { ...state, activeAvailability: available ? "available" : "unavailable" }
+        return {
+          ...(await view(state)),
+          activeAvailability: available ? "available" : "unavailable",
+        }
       },
       async chooseLocal() {
         const path = await dependencies.chooseDirectory()
@@ -373,11 +386,11 @@ export function createBlogManagementAdapter(dependencies: {
       },
       async addLocal(request) {
         await validWorkspace(request.path)
-        return dependencies.registry.add(request)
+        return view(await dependencies.registry.add(request))
       },
       async recoverLocal(request) {
         await validWorkspace(request.path)
-        return dependencies.registry.recover(request)
+        return view(await dependencies.registry.recover(request))
       },
       clone: (request) =>
         runImport(async (service, signal) => {
@@ -392,12 +405,29 @@ export function createBlogManagementAdapter(dependencies: {
         await current?.settled
       },
       install: (request) => runImport((service, signal) => service.install(request.path, signal)),
-      rename: (request) => dependencies.registry.rename(request.id, request.name),
+      rename: async (request) => view(await dependencies.registry.rename(request.id, request.name)),
       async relocate(request) {
         await validWorkspace(request.path)
-        return dependencies.registry.relocate(request.id, request.path)
+        return view(await dependencies.registry.relocate(request.id, request.path))
       },
-      remove: (request) => dependencies.registry.remove(request.id),
+      remove: async (request) => view(await dependencies.registry.remove(request.id)),
+      async updateWebsite(request) {
+        let normalized: string | undefined
+        if (request.websiteUrl !== null) {
+          normalized = dependencies.addresses.normalizeWebsite(request.websiteUrl)
+          if (normalized === undefined) throw new BlogAddressError("INVALID_WEBSITE")
+        }
+        return view(await dependencies.registry.setWebsiteUrl(request.id, normalized))
+      },
+      async openLink(request) {
+        const state = await dependencies.registry.load()
+        const url = await dependencies.addresses.resolveLink(state, request.id, request.kind)
+        try {
+          await dependencies.openExternal(url)
+        } catch {
+          throw new Error("The blog link could not be opened.")
+        }
+      },
       async openFolder(request) {
         const state = await dependencies.registry.load()
         const blog = state.blogs.find((candidate) => candidate.id === request.id)

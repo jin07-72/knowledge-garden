@@ -11,7 +11,8 @@ import {
   resolveBlogRegistryFile,
   resolveE2eCloneSource,
 } from "../../src/main/blogRuntime"
-import type { BlogRecord, BlogRegistryView } from "../../src/shared/contracts"
+import type { BlogRecord, BlogRegistryState, BlogRegistryView } from "../../src/shared/contracts"
+import { BlogAddressError, normalizePublicWebsite } from "../../src/main/services/blogAddresses"
 import { BlogImportError } from "../../src/main/services/blogImport"
 import { createPublisherCloseCoordinator } from "../../src/main/publisherServices"
 
@@ -45,8 +46,60 @@ const second: BlogRecord = {
   canonicalPath: String.raw`C:\Blogs\second`,
 }
 
-function state(activeBlogId = first.id): BlogRegistryView {
+function state(activeBlogId = first.id): BlogRegistryState {
   return { version: 1, activeBlogId, blogs: [first, second] }
+}
+
+function displayState(current: BlogRegistryState): BlogRegistryView {
+  return {
+    ...current,
+    blogs: current.blogs.map(({ websiteUrl, ...blog }) => ({
+      ...blog,
+      repository: {
+        display: "git@github.com:owner/garden.git",
+        url: "https://github.com/owner/garden",
+      },
+      website: websiteUrl ? { source: "manual", url: websiteUrl } : { source: "unconfigured" },
+    })),
+  }
+}
+
+function addressDependencies() {
+  return {
+    addresses: {
+      normalizeWebsite: vi.fn(normalizePublicWebsite),
+      describe: vi.fn(async (current: BlogRegistryState) => displayState(current)),
+      resolveLink: vi.fn(async () => "https://garden.example/"),
+    },
+    openExternal: vi.fn(async (_url: string) => undefined),
+  }
+}
+
+function managementFixture() {
+  const registry = {
+    load: vi.fn(async () => state()),
+    add: vi.fn(async (_request: { name: string; path: string }) => state()),
+    recover: vi.fn(async () => state()),
+    rename: vi.fn(async () => state()),
+    activate: vi.fn(async () => state()),
+    remove: vi.fn(async () => state()),
+    relocate: vi.fn(async () => state()),
+    setWebsiteUrl: vi.fn(async (_id: string, _websiteUrl?: string) => state()),
+  }
+  const dependencies = {
+    ...addressDependencies(),
+    registry,
+    importer: { clone: vi.fn(), install: vi.fn() },
+    inspect: vi.fn(async (path: string) => ({
+      valid: true as const,
+      canonicalPath: path,
+      needsInstall: false,
+    })),
+    chooseDirectory: vi.fn(),
+    openFolder: vi.fn(),
+    switchTo: vi.fn(),
+  }
+  return { ...dependencies, ...createBlogManagementAdapter(dependencies) }
 }
 
 describe("blog runtime", () => {
@@ -380,6 +433,225 @@ describe("relaunch scheduler", () => {
 })
 
 describe("blog management adapter", () => {
+  it.each(["available", "unavailable"] as const)(
+    "describes the loaded state when the active workspace is %s",
+    async (availability) => {
+      const fixture = managementFixture()
+      const current = state()
+      fixture.registry.load.mockResolvedValue(current)
+      if (availability === "unavailable") fixture.inspect.mockRejectedValue(new Error("missing"))
+
+      await expect(fixture.services.list()).resolves.toEqual({
+        ...displayState(current),
+        activeAvailability: availability,
+      })
+      expect(fixture.registry.load).toHaveBeenCalledOnce()
+      expect(fixture.addresses.describe).toHaveBeenCalledExactlyOnceWith(current)
+    },
+  )
+
+  it("does not conceal unexpected view generation failures", async () => {
+    const fixture = managementFixture()
+    const error = new Error("unexpected resolver bug")
+    fixture.addresses.describe.mockRejectedValue(error)
+    await expect(fixture.services.list()).rejects.toBe(error)
+  })
+
+  it.each([
+    {
+      method: "addLocal",
+      operation: "add",
+      request: { name: "New", path: second.path },
+      args: [{ name: "New", path: second.path }],
+    },
+    {
+      method: "recoverLocal",
+      operation: "recover",
+      request: { name: "New", path: second.path },
+      args: [{ name: "New", path: second.path }],
+    },
+    {
+      method: "rename",
+      operation: "rename",
+      request: { id: second.id, name: "New" },
+      args: [second.id, "New"],
+    },
+    {
+      method: "relocate",
+      operation: "relocate",
+      request: { id: second.id, path: second.path },
+      args: [second.id, second.path],
+    },
+    { method: "remove", operation: "remove", request: { id: second.id }, args: [second.id] },
+  ] as const)(
+    "returns the current described view after $method",
+    async ({ method, operation, request, args }) => {
+      const fixture = managementFixture()
+      const updated: BlogRegistryState = {
+        version: 1,
+        activeBlogId: second.id,
+        blogs: [{ ...second, name: "New" }],
+      }
+      fixture.registry[operation].mockResolvedValue(updated)
+
+      const result = await fixture.services[method](request as never)
+
+      expect(result).toEqual(displayState(updated))
+      expect(fixture.registry[operation]).toHaveBeenCalledExactlyOnceWith(...args)
+      expect(fixture.addresses.describe).toHaveBeenCalledExactlyOnceWith(updated)
+      expect(fixture.registry[operation].mock.invocationCallOrder[0]).toBeLessThan(
+        fixture.addresses.describe.mock.invocationCallOrder[0]!,
+      )
+      expect(fixture.registry.load).not.toHaveBeenCalled()
+    },
+  )
+
+  it("persists a clone while returning its receipt and describes it on the next list", async () => {
+    const fixture = managementFixture()
+    const receipt = {
+      canonicalPath: String.raw`C:\Blogs\cloned`,
+      owner: "owner",
+      repository: "repo",
+    }
+    const cloned: BlogRecord = {
+      ...second,
+      id: "33333333-3333-4333-8333-333333333333",
+      name: "Clone",
+      path: receipt.canonicalPath,
+      canonicalPath: receipt.canonicalPath,
+    }
+    let current = state()
+    fixture.registry.load.mockImplementation(async () => current)
+    fixture.registry.add.mockImplementation(async () => {
+      current = { ...current, blogs: [...current.blogs, cloned] }
+      return current
+    })
+    fixture.importer.clone.mockResolvedValue(receipt)
+
+    await expect(
+      fixture.services.clone({
+        name: "Clone",
+        url: "https://github.com/owner/repo",
+        destination: receipt.canonicalPath,
+      }),
+    ).resolves.toBe(receipt)
+    expect(fixture.registry.add).toHaveBeenCalledExactlyOnceWith({
+      name: "Clone",
+      path: receipt.canonicalPath,
+    })
+    expect(fixture.addresses.describe).not.toHaveBeenCalled()
+    await expect(fixture.services.list()).resolves.toEqual({
+      ...displayState(current),
+      activeAvailability: "available",
+    })
+    expect(fixture.addresses.describe).toHaveBeenCalledExactlyOnceWith(current)
+  })
+
+  it("normalizes a website exactly once before persisting and describing the updated state", async () => {
+    const fixture = managementFixture()
+    const updated: BlogRegistryState = {
+      ...state(),
+      blogs: [{ ...first, websiteUrl: "https://garden.example/" }, second],
+    }
+    fixture.registry.setWebsiteUrl.mockResolvedValue(updated)
+
+    await expect(
+      fixture.services.updateWebsite({ id: first.id, websiteUrl: "garden.example" }),
+    ).resolves.toEqual(displayState(updated))
+    expect(fixture.addresses.normalizeWebsite).toHaveBeenCalledExactlyOnceWith("garden.example")
+    expect(fixture.registry.setWebsiteUrl).toHaveBeenCalledExactlyOnceWith(
+      first.id,
+      "https://garden.example/",
+    )
+    expect(fixture.addresses.describe).toHaveBeenCalledExactlyOnceWith(updated)
+    expect(fixture.addresses.normalizeWebsite.mock.invocationCallOrder[0]).toBeLessThan(
+      fixture.registry.setWebsiteUrl.mock.invocationCallOrder[0]!,
+    )
+    expect(fixture.registry.setWebsiteUrl.mock.invocationCallOrder[0]).toBeLessThan(
+      fixture.addresses.describe.mock.invocationCallOrder[0]!,
+    )
+  })
+
+  it("clears a website without normalizing null and describes the cleared state", async () => {
+    const fixture = managementFixture()
+    const updated = state()
+    fixture.registry.setWebsiteUrl.mockResolvedValue(updated)
+
+    await expect(
+      fixture.services.updateWebsite({ id: first.id, websiteUrl: null }),
+    ).resolves.toEqual(displayState(updated))
+    expect(fixture.addresses.normalizeWebsite).not.toHaveBeenCalled()
+    expect(fixture.registry.setWebsiteUrl).toHaveBeenCalledExactlyOnceWith(first.id, undefined)
+    expect(fixture.addresses.describe).toHaveBeenCalledExactlyOnceWith(updated)
+  })
+
+  it.each(["", "   ", "javascript:alert(1)"])(
+    "rejects invalid non-null website %j before mutation",
+    async (websiteUrl) => {
+      const fixture = managementFixture()
+      fixture.addresses.normalizeWebsite.mockReturnValue(undefined)
+
+      await expect(fixture.services.updateWebsite({ id: first.id, websiteUrl })).rejects.toEqual(
+        new BlogAddressError("INVALID_WEBSITE"),
+      )
+      expect(fixture.addresses.normalizeWebsite).toHaveBeenCalledExactlyOnceWith(websiteUrl)
+      expect(fixture.registry.setWebsiteUrl).not.toHaveBeenCalled()
+      expect(fixture.addresses.describe).not.toHaveBeenCalled()
+    },
+  )
+
+  it("reloads and resolves every open request and passes only the trusted result to the opener", async () => {
+    const fixture = managementFixture()
+    const initial = state()
+    const changed: BlogRegistryState = {
+      ...state(),
+      blogs: [{ ...first, websiteUrl: "https://changed.example/" }, second],
+    }
+    fixture.registry.load.mockResolvedValueOnce(initial).mockResolvedValueOnce(changed)
+    fixture.addresses.resolveLink
+      .mockResolvedValueOnce("https://github.com/owner/current")
+      .mockResolvedValueOnce("https://changed.example/")
+
+    await fixture.services.openLink({
+      id: first.id,
+      kind: "repository",
+      url: "https://untrusted.example/",
+    } as never)
+    await fixture.services.openLink({ id: first.id, kind: "website" })
+
+    expect(fixture.registry.load).toHaveBeenCalledTimes(2)
+    expect(fixture.addresses.resolveLink).toHaveBeenNthCalledWith(
+      1,
+      initial,
+      first.id,
+      "repository",
+    )
+    expect(fixture.addresses.resolveLink).toHaveBeenNthCalledWith(2, changed, first.id, "website")
+    expect(fixture.openExternal.mock.calls).toEqual([
+      ["https://github.com/owner/current"],
+      ["https://changed.example/"],
+    ])
+    expect(fixture.addresses.describe).not.toHaveBeenCalled()
+  })
+
+  it("does not open a link when fresh resolution fails", async () => {
+    const fixture = managementFixture()
+    const error = new BlogAddressError("LINK_UNAVAILABLE")
+    fixture.addresses.resolveLink.mockRejectedValue(error)
+
+    await expect(fixture.services.openLink({ id: first.id, kind: "website" })).rejects.toBe(error)
+    expect(fixture.openExternal).not.toHaveBeenCalled()
+  })
+
+  it("reports external opener failure without exposing the target or raw error", async () => {
+    const fixture = managementFixture()
+    fixture.openExternal.mockRejectedValue(new Error("Could not launch https://garden.example/"))
+
+    await expect(fixture.services.openLink({ id: first.id, kind: "website" })).rejects.toEqual(
+      new Error("The blog link could not be opened."),
+    )
+  })
+
   it("reports active workspace availability without exposing inspection failures", async () => {
     const registry = {
       load: vi.fn(async () => state()),
@@ -389,6 +661,7 @@ describe("blog management adapter", () => {
       remove: vi.fn(async () => state()),
       relocate: vi.fn(async () => state()),
       recover: vi.fn(async () => state()),
+      setWebsiteUrl: vi.fn(async () => state()),
     }
     const inspect = vi
       .fn()
@@ -400,6 +673,7 @@ describe("blog management adapter", () => {
         needsInstall: false,
       })
     const adapter = createBlogManagementAdapter({
+      ...addressDependencies(),
       registry,
       importer: { clone: vi.fn(), install: vi.fn() },
       inspect,
@@ -428,8 +702,10 @@ describe("blog management adapter", () => {
       remove: vi.fn(async () => state()),
       relocate: vi.fn(async () => state()),
       recover: vi.fn(async () => state()),
+      setWebsiteUrl: vi.fn(async () => state()),
     }
     const adapter = createBlogManagementAdapter({
+      ...addressDependencies(),
       registry,
       importer: { clone: vi.fn(), install: vi.fn() },
       inspect: vi.fn(),
@@ -439,7 +715,7 @@ describe("blog management adapter", () => {
     })
 
     await expect(adapter.services.list()).resolves.toEqual({
-      ...state(),
+      ...displayState(state()),
       activeAvailability: "unavailable",
     })
     await expect(adapter.services.chooseLocal()).resolves.toBeUndefined()
@@ -455,6 +731,7 @@ describe("blog management adapter", () => {
       remove: vi.fn(async () => state()),
       relocate: vi.fn(async () => state()),
       recover: vi.fn(async () => state()),
+      setWebsiteUrl: vi.fn(async () => state()),
     }
     const inspect = vi.fn(async (path: string) => ({
       valid: true as const,
@@ -467,6 +744,7 @@ describe("blog management adapter", () => {
       repository: "repo",
     }))
     const adapter = createBlogManagementAdapter({
+      ...addressDependencies(),
       registry,
       importer: { clone, install: vi.fn() },
       inspect,
@@ -516,6 +794,7 @@ describe("blog management adapter", () => {
       remove: vi.fn(async () => state()),
       relocate: vi.fn(async () => state()),
       recover: vi.fn(async () => state()),
+      setWebsiteUrl: vi.fn(async () => state()),
     }
     const clone = vi.fn(async () => ({
       canonicalPath: String.raw`C:\Blogs\learning-notes`,
@@ -523,6 +802,7 @@ describe("blog management adapter", () => {
       repository: "learning-notes",
     }))
     const adapter = createBlogManagementAdapter({
+      ...addressDependencies(),
       registry,
       importer: { clone, install: vi.fn() },
       inspect: vi.fn(),
@@ -556,9 +836,11 @@ describe("blog management adapter", () => {
       remove: vi.fn(async () => state()),
       relocate: vi.fn(async () => state()),
       recover: vi.fn(async () => state()),
+      setWebsiteUrl: vi.fn(async () => state()),
     }
     const clone = vi.fn()
     const adapter = createBlogManagementAdapter({
+      ...addressDependencies(),
       registry,
       importer: { clone, install: vi.fn() },
       inspect: vi.fn(),
@@ -596,6 +878,7 @@ describe("blog management adapter", () => {
     })
     const switchTo = vi.fn(async () => undefined)
     const adapter = createBlogManagementAdapter({
+      ...addressDependencies(),
       registry: {
         load: async () => state(),
         add: vi.fn(),
@@ -604,6 +887,7 @@ describe("blog management adapter", () => {
         remove: vi.fn(),
         relocate: vi.fn(),
         recover: vi.fn(),
+        setWebsiteUrl: vi.fn(),
       },
       importer: { clone, install: vi.fn() },
       inspect: vi.fn(),
@@ -635,6 +919,7 @@ describe("blog management adapter", () => {
       })
     })
     const adapter = createBlogManagementAdapter({
+      ...addressDependencies(),
       registry: {
         load: async () => state(),
         add: vi.fn(),
@@ -643,6 +928,7 @@ describe("blog management adapter", () => {
         remove: vi.fn(),
         relocate: vi.fn(),
         recover: vi.fn(),
+        setWebsiteUrl: vi.fn(),
       },
       importer: { clone, install: vi.fn() },
       inspect: vi.fn(),
@@ -690,6 +976,7 @@ describe("blog management adapter", () => {
     }
     const install = vi.fn(async () => installed)
     const adapter = createBlogManagementAdapter({
+      ...addressDependencies(),
       registry: {
         load: async () => state(),
         add: vi.fn(),
@@ -698,6 +985,7 @@ describe("blog management adapter", () => {
         remove: vi.fn(),
         relocate: vi.fn(),
         recover: vi.fn(),
+        setWebsiteUrl: vi.fn(),
       },
       importer: { clone: vi.fn(), install },
       inspect: vi.fn(),
@@ -728,6 +1016,7 @@ describe("blog management adapter", () => {
       needsInstall: false,
     }))
     const adapter = createBlogManagementAdapter({
+      ...addressDependencies(),
       registry: {
         load: async () => state(),
         add: vi.fn(),
@@ -736,6 +1025,7 @@ describe("blog management adapter", () => {
         remove: vi.fn(),
         relocate: vi.fn(),
         recover: vi.fn(),
+        setWebsiteUrl: vi.fn(),
       },
       importer: { clone: vi.fn(), install },
       inspect: vi.fn(),
@@ -763,6 +1053,7 @@ describe("blog management adapter", () => {
       needsInstall: false,
     }))
     const adapter = createBlogManagementAdapter({
+      ...addressDependencies(),
       registry: {
         load: async () => state(),
         add: vi.fn(),
@@ -771,6 +1062,7 @@ describe("blog management adapter", () => {
         remove: vi.fn(),
         relocate: vi.fn(),
         recover: vi.fn(),
+        setWebsiteUrl: vi.fn(),
       },
       importer: { clone: vi.fn(), install },
       inspect: vi.fn(),
@@ -809,6 +1101,7 @@ describe("blog management adapter", () => {
       })
     })
     const adapter = createBlogManagementAdapter({
+      ...addressDependencies(),
       registry: {
         load: async () => state(),
         add: vi.fn(),
@@ -817,6 +1110,7 @@ describe("blog management adapter", () => {
         remove: vi.fn(),
         relocate: vi.fn(),
         recover: vi.fn(),
+        setWebsiteUrl: vi.fn(),
       },
       importer: { clone, install: vi.fn() },
       inspect: vi.fn(),
@@ -862,6 +1156,7 @@ describe("blog management adapter", () => {
       })
     })
     const adapter = createBlogManagementAdapter({
+      ...addressDependencies(),
       registry: {
         load: async () => state(),
         add: vi.fn(),
@@ -870,6 +1165,7 @@ describe("blog management adapter", () => {
         remove: vi.fn(),
         relocate: vi.fn(),
         recover: vi.fn(),
+        setWebsiteUrl: vi.fn(),
       },
       importer: { clone, install: vi.fn() },
       inspect: vi.fn(),
@@ -943,6 +1239,7 @@ describe("blog management adapter", () => {
       })
     })
     const adapter = createBlogManagementAdapter({
+      ...addressDependencies(),
       registry: {
         load: async () => state(),
         add: vi.fn(),
@@ -951,6 +1248,7 @@ describe("blog management adapter", () => {
         remove: vi.fn(),
         relocate: vi.fn(),
         recover: vi.fn(),
+        setWebsiteUrl: vi.fn(),
       },
       importer: { clone, install: vi.fn() },
       inspect: vi.fn(),
@@ -979,6 +1277,7 @@ describe("blog management adapter", () => {
   it("latches an uncertain import rejection that settles before shutdown starts", async () => {
     let rejectClone!: (error: Error) => void
     const adapter = createBlogManagementAdapter({
+      ...addressDependencies(),
       registry: {
         load: async () => state(),
         add: vi.fn(),
@@ -987,6 +1286,7 @@ describe("blog management adapter", () => {
         remove: vi.fn(),
         relocate: vi.fn(),
         recover: vi.fn(),
+        setWebsiteUrl: vi.fn(),
       },
       importer: {
         clone: () =>

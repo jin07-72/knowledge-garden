@@ -1,5 +1,6 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, net, shell } from "electron"
 import { existsSync } from "node:fs"
+import { readFile } from "node:fs/promises"
 import { isAbsolute, join, resolve } from "node:path"
 import { randomUUID } from "node:crypto"
 import { DEFAULT_GARDEN_PATH, IPC_CHANNELS } from "../shared/contracts"
@@ -41,6 +42,7 @@ import {
 import type { PreviewStatus, PublishProgress } from "../shared/contracts"
 import { resolveMainRuntimeFiles } from "./mainRuntime"
 import { createBlogRegistry } from "./services/blogRegistry"
+import { createBlogAddressResolver } from "./services/blogAddresses"
 import {
   createBlogImportService,
   inspectBlogCandidate,
@@ -264,6 +266,15 @@ app.whenReady().then(async () => {
     legacyPath: legacyWorkspace,
   })
   const importRunner = createSystemBoundedCommandRunner()
+  const addresses = createBlogAddressResolver({
+    runGit: (workspace) =>
+      importRunner.run({
+        executable: "git",
+        args: ["remote", "get-url", "origin"],
+        cwd: workspace,
+      }),
+    readText: (file) => readFile(file, "utf8"),
+  })
   const scheduleRelaunch = createRelaunchScheduler({
     isPackaged: app.isPackaged,
     e2e,
@@ -304,6 +315,10 @@ app.whenReady().then(async () => {
   })
   blogManagement = createBlogManagementAdapter({
     registry,
+    addresses,
+    openExternal: async (url) => {
+      await shell.openExternal(url)
+    },
     importer: () => importer,
     inspect: (path) => inspectBlogCandidate(path, { runner: importRunner }),
     chooseDirectory: async () => {
