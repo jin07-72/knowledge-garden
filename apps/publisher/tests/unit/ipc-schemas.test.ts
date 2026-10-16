@@ -19,10 +19,12 @@ import {
   blogCloneRequestSchema,
   blogIdRequestSchema,
   blogImportProgressSchema,
+  blogLinkOpenRequestSchema,
   blogPathRequestSchema,
   blogRelocateRequestSchema,
   blogRenameRequestSchema,
   blogSwitchRequestSchema,
+  blogWebsiteUpdateRequestSchema,
   domainCreateSchema,
   domainRemoveSchema,
   domainRenameSchema,
@@ -115,6 +117,8 @@ const blog = {
   canonicalPath: String.raw`C:\\Blogs\\quartz`,
   createdAt: "2026-10-01T00:00:00.000Z",
   lastOpenedAt: "2026-10-01T00:00:00.000Z",
+  repository: { display: "openai/quartz", url: "https://github.com/openai/quartz" },
+  website: { source: "manual", url: "https://example.com/garden/" },
   ...privateField,
 }
 const blogRegistry = { version: 1, activeBlogId: blogId, blogs: [blog], ...privateField }
@@ -296,6 +300,8 @@ const validByChannel: Record<string, unknown> = {
   [IPC_CHANNELS.requests.blogsRelocate]: blogRegistry,
   [IPC_CHANNELS.requests.blogsRemove]: blogRegistry,
   [IPC_CHANNELS.requests.blogsOpenFolder]: undefined,
+  [IPC_CHANNELS.requests.blogsUpdateWebsite]: blogRegistry,
+  [IPC_CHANNELS.requests.blogsOpenLink]: undefined,
   [IPC_CHANNELS.requests.blogsSwitch]: undefined,
 }
 
@@ -898,6 +904,72 @@ describe("IPC success schemas", () => {
     expect(blogSwitchRequestSchema.safeParse({ id, editorSaved: true }).success).toBe(true)
     expect(blogSwitchRequestSchema.safeParse({ id }).success).toBe(false)
     expect(blogSwitchRequestSchema.safeParse({ id, editorSaved: false }).success).toBe(false)
+  })
+
+  it("strictly validates manual blog website updates", () => {
+    const id = "11111111-1111-4111-8111-111111111111"
+
+    expect(blogWebsiteUpdateRequestSchema.safeParse({ id, websiteUrl: null }).success).toBe(true)
+    expect(
+      blogWebsiteUpdateRequestSchema.safeParse({
+        id,
+        websiteUrl: "https://example.com/garden/",
+      }).success,
+    ).toBe(true)
+    expect(
+      blogWebsiteUpdateRequestSchema.safeParse({ id, websiteUrl: null, extra: true }).success,
+    ).toBe(false)
+  })
+
+  it("allows only repository and website blog links", () => {
+    const id = "11111111-1111-4111-8111-111111111111"
+
+    expect(blogLinkOpenRequestSchema.safeParse({ id, kind: "repository" }).success).toBe(true)
+    expect(blogLinkOpenRequestSchema.safeParse({ id, kind: "local" }).success).toBe(false)
+  })
+
+  it("strips unknown display address fields and requires configured website URLs", () => {
+    const schema = IPC_SUCCESS_SCHEMAS[IPC_CHANNELS.requests.blogsList]
+    const displayBlog = {
+      ...blog,
+      repository: {
+        display: "openai/quartz",
+        url: "https://github.com/openai/quartz",
+        privateToken: "must-not-cross",
+      },
+      website: {
+        source: "manual",
+        url: "https://example.com/garden/",
+        privateToken: "must-not-cross",
+      },
+      privateToken: "must-not-cross",
+    }
+
+    expect(schema.parse({ ...blogRegistry, blogs: [displayBlog], activeAvailability: "available" }))
+      .toEqual({
+        version: 1,
+        activeBlogId: blogId,
+        activeAvailability: "available",
+        blogs: [
+          {
+            id: blogId,
+            name: "Quartz",
+            path: String.raw`C:\\Blogs\\quartz`,
+            canonicalPath: String.raw`C:\\Blogs\\quartz`,
+            createdAt: "2026-10-01T00:00:00.000Z",
+            lastOpenedAt: "2026-10-01T00:00:00.000Z",
+            repository: { display: "openai/quartz", url: "https://github.com/openai/quartz" },
+            website: { source: "manual", url: "https://example.com/garden/" },
+          },
+        ],
+      })
+    expect(
+      schema.safeParse({
+        ...blogRegistry,
+        blogs: [{ ...blog, website: { source: "manual" } }],
+        activeAvailability: "available",
+      }).success,
+    ).toBe(false)
   })
 
   it("fails closed when blog response paths or names are unsafe", () => {

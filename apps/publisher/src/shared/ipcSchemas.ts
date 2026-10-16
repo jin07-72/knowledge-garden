@@ -72,6 +72,14 @@ const blogUrlSchema = z
   .min(1)
   .refine((value) => utf8ByteLength(value) <= 2_048)
   .refine((value) => parseGitHubRepositoryUrl(value) !== undefined)
+const websiteUrlSchema = z
+  .url()
+  .max(2_048)
+  .refine((value) => !controlCharacterPattern.test(value))
+const websiteUpdateUrlSchema = z
+  .string()
+  .max(2_048)
+  .refine((value) => !controlCharacterPattern.test(value))
 
 const RESERVED_DOMAIN_SLUGS = new Set(["index", "content", "private", "garden-publisher"])
 export const domainSlugSchema = z
@@ -117,6 +125,12 @@ export const blogRelocateRequestSchema = z
   .strict()
 export const blogSwitchRequestSchema = z
   .object({ id: blogIdSchema, editorSaved: z.literal(true) })
+  .strict()
+export const blogWebsiteUpdateRequestSchema = z
+  .object({ id: blogIdSchema, websiteUrl: websiteUpdateUrlSchema.nullable() })
+  .strict()
+export const blogLinkOpenRequestSchema = z
+  .object({ id: blogIdSchema, kind: z.enum(["repository", "website"]) })
   .strict()
 
 // Domain failures may contain workspace paths and transaction diagnostics internally.
@@ -676,13 +690,31 @@ const blogRecordSchema = z
     canonicalPath: blogPathSchema,
     createdAt: z.string().datetime(),
     lastOpenedAt: z.string().datetime(),
+    websiteUrl: websiteUrlSchema.optional(),
+  })
+  .strip()
+const blogDisplayRecordSchema = z
+  .object({
+    id: blogIdSchema,
+    name: blogResponseNameSchema,
+    path: blogPathSchema,
+    canonicalPath: blogPathSchema,
+    createdAt: z.string().datetime(),
+    lastOpenedAt: z.string().datetime(),
+    repository: z
+      .object({ display: z.string().min(1).max(2_048), url: websiteUrlSchema.optional() })
+      .strip(),
+    website: z.discriminatedUnion("source", [
+      z.object({ source: z.enum(["manual", "quartz"]), url: websiteUrlSchema }).strip(),
+      z.object({ source: z.literal("unconfigured") }).strip(),
+    ]),
   })
   .strip()
 const blogRegistryViewSchema = z
   .object({
     version: z.literal(1),
     activeBlogId: blogIdSchema,
-    blogs: z.array(blogRecordSchema).min(1).max(1_000),
+    blogs: z.array(blogDisplayRecordSchema).min(1).max(1_000),
   })
   .strip()
 const blogRegistryStatusSchema = blogRegistryViewSchema.extend({
@@ -777,6 +809,8 @@ export const IPC_SUCCESS_SCHEMAS = {
   [IPC_CHANNELS.requests.blogsRelocate]: blogRegistryViewSchema,
   [IPC_CHANNELS.requests.blogsRemove]: blogRegistryViewSchema,
   [IPC_CHANNELS.requests.blogsOpenFolder]: z.undefined(),
+  [IPC_CHANNELS.requests.blogsUpdateWebsite]: blogRegistryViewSchema,
+  [IPC_CHANNELS.requests.blogsOpenLink]: z.undefined(),
   [IPC_CHANNELS.requests.blogsSwitch]: z.undefined(),
 } satisfies Record<RequestChannel, z.ZodType>
 

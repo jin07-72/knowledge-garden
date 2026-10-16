@@ -330,12 +330,26 @@ export interface BlogRecord {
   readonly canonicalPath: string
   readonly createdAt: string
   readonly lastOpenedAt: string
+  readonly websiteUrl?: string
+}
+
+export interface BlogRegistryState {
+  readonly version: 1
+  readonly activeBlogId: string
+  readonly blogs: readonly BlogRecord[]
+}
+
+export interface BlogDisplayRecord extends Omit<BlogRecord, "websiteUrl"> {
+  readonly repository: { readonly display: string; readonly url?: string }
+  readonly website:
+    | { readonly source: "manual" | "quartz"; readonly url: string }
+    | { readonly source: "unconfigured" }
 }
 
 export interface BlogRegistryView {
   readonly version: 1
   readonly activeBlogId: string
-  readonly blogs: readonly BlogRecord[]
+  readonly blogs: readonly BlogDisplayRecord[]
 }
 
 export interface BlogRegistryStatus extends BlogRegistryView {
@@ -421,6 +435,14 @@ export interface BlogSwitchRequest extends BlogIdRequest {
   readonly editorSaved: true
 }
 
+export interface BlogWebsiteUpdateRequest extends BlogIdRequest {
+  readonly websiteUrl: string | null
+}
+
+export interface BlogLinkOpenRequest extends BlogIdRequest {
+  readonly kind: "repository" | "website"
+}
+
 export type BlogImportPhase = "cloning" | "installing" | "validating" | "complete"
 
 export interface BlogImportProgress {
@@ -477,6 +499,8 @@ export const IPC_CHANNELS = {
     blogsRelocate: "garden:blogs:relocate",
     blogsRemove: "garden:blogs:remove",
     blogsOpenFolder: "garden:blogs:open-folder",
+    blogsUpdateWebsite: "garden:blogs:update-website",
+    blogsOpenLink: "garden:blogs:open-link",
     blogsSwitch: "garden:blogs:switch",
   },
   events: {
@@ -689,6 +713,8 @@ export interface GardenApi {
     relocate(request: BlogRelocateRequest): Promise<IpcResult<BlogRegistryView>>
     remove(request: BlogIdRequest): Promise<IpcResult<BlogRegistryView>>
     openFolder(request: BlogIdRequest): Promise<IpcResult<void>>
+    updateWebsite(request: BlogWebsiteUpdateRequest): Promise<IpcResult<BlogRegistryView>>
+    openLink(request: BlogLinkOpenRequest): Promise<IpcResult<void>>
     switch(request: BlogSwitchRequest): Promise<IpcResult<void>>
     onImportProgress(listener: (progress: BlogImportProgress) => void): Unsubscribe
   }
