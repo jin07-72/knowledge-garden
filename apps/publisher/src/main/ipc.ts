@@ -10,12 +10,14 @@ import {
   type BlogIdRequest,
   type BlogImportProgress,
   type BlogImportReceipt,
+  type BlogLinkOpenRequest,
   type BlogPathRequest,
   type BlogRegistryView,
   type BlogRegistryStatus,
   type BlogRelocateRequest,
   type BlogRenameRequest,
   type BlogSwitchRequest,
+  type BlogWebsiteUpdateRequest,
   type ChangeReview,
   type CloseAckRequest,
   type DeploymentHistory,
@@ -66,10 +68,12 @@ import {
   blogCloneRequestSchema,
   blogIdRequestSchema,
   blogImportProgressSchema,
+  blogLinkOpenRequestSchema,
   blogPathRequestSchema,
   blogRelocateRequestSchema,
   blogRenameRequestSchema,
   blogSwitchRequestSchema,
+  blogWebsiteUpdateRequestSchema,
   domainCreateSchema,
   domainRemoveSchema,
   domainRenameSchema,
@@ -84,6 +88,7 @@ import {
   trashRecoveryUpdateSchema,
 } from "../shared/ipcSchemas"
 import { BlogImportError, type BlogImportErrorCode } from "./services/blogImport"
+import { BlogAddressError } from "./services/blogAddresses"
 
 type RequestHandler = (event: unknown, request?: unknown) => Promise<unknown>
 
@@ -164,6 +169,8 @@ export interface PublisherIpcServices {
     cancelImport(): Promise<void>
     install(request: BlogPathRequest): Promise<BlogCandidateInspection>
     rename(request: BlogRenameRequest): Promise<BlogRegistryView>
+    updateWebsite(request: BlogWebsiteUpdateRequest): Promise<BlogRegistryView>
+    openLink(request: BlogLinkOpenRequest): Promise<void>
     relocate(request: BlogRelocateRequest): Promise<BlogRegistryView>
     remove(request: BlogIdRequest): Promise<BlogRegistryView>
     openFolder(request: BlogIdRequest): Promise<void>
@@ -336,6 +343,20 @@ function serializeFailure(error: unknown, isBlogImportChannel = false): IpcResul
       const mapped = blogImportFailureMap.get(error.code)
       if (mapped) return { ok: false, error: mapped }
     }
+    if (error instanceof BlogAddressError) {
+      return error.code === "INVALID_WEBSITE"
+        ? {
+            ok: false,
+            error: { code: "INVALID_INPUT", message: "The website address is invalid." },
+          }
+        : {
+            ok: false,
+            error: {
+              code: "BLOG_LINK_UNAVAILABLE",
+              message: "The requested blog link is unavailable.",
+            },
+          }
+    }
     try {
       if (
         typeof error === "object" &&
@@ -484,6 +505,24 @@ function blogRequestHandlers(
       ),
     ],
     [
+      IPC_CHANNELS.requests.blogsUpdateWebsite,
+      secureHandler(
+        IPC_CHANNELS.requests.blogsUpdateWebsite,
+        blogWebsiteUpdateRequestSchema,
+        isTrustedSender,
+        (request) => services.updateWebsite(request),
+      ),
+    ],
+    [
+      IPC_CHANNELS.requests.blogsOpenLink,
+      secureHandler(
+        IPC_CHANNELS.requests.blogsOpenLink,
+        blogLinkOpenRequestSchema,
+        isTrustedSender,
+        (request) => services.openLink(request),
+      ),
+    ],
+    [
       IPC_CHANNELS.requests.blogsRelocate,
       secureHandler(
         IPC_CHANNELS.requests.blogsRelocate,
@@ -526,6 +565,24 @@ function unavailableBlogRequestHandlers(
   isTrustedSender: (event: unknown) => boolean,
 ): ReadonlyArray<readonly [string, RequestHandler]> {
   return [
+    [
+      IPC_CHANNELS.requests.blogsUpdateWebsite,
+      secureHandler(
+        IPC_CHANNELS.requests.blogsUpdateWebsite,
+        blogWebsiteUpdateRequestSchema,
+        isTrustedSender,
+        serviceUnavailable,
+      ),
+    ],
+    [
+      IPC_CHANNELS.requests.blogsOpenLink,
+      secureHandler(
+        IPC_CHANNELS.requests.blogsOpenLink,
+        blogLinkOpenRequestSchema,
+        isTrustedSender,
+        serviceUnavailable,
+      ),
+    ],
     [
       IPC_CHANNELS.requests.blogsList,
       secureHandler(

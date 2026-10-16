@@ -39,6 +39,16 @@ import {
 
 const privateField = { privateSource: "must-not-cross" }
 
+describe("public blog address failures", () => {
+  it("accepts the unavailable link error", () => {
+    const failure = {
+      code: "BLOG_LINK_UNAVAILABLE",
+      message: "The requested blog link is unavailable.",
+    } as const satisfies AppError
+    expect(appErrorSchema.safeParse(failure)).toEqual({ success: true, data: failure })
+  })
+})
+
 const publishBranchRepairErrors = [
   { code: "PUBLISH_BRANCH_REPAIR_REQUIRED", message: "Branch repair is required." },
   { code: "PUBLISH_BRANCH_REPAIR_BLOCKED", message: "Branch repair is blocked." },

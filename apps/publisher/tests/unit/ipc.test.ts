@@ -3,6 +3,7 @@ import {
   IPC_CHANNELS,
   type AppError,
   type BlogImportProgress,
+  type BlogRegistryView,
   type PreviewStatus,
   type PublishProgress,
 } from "../../src/shared/contracts"
@@ -15,6 +16,7 @@ import {
   type PublisherIpcServices,
 } from "../../src/main/ipc"
 import { BlogImportError, type BlogImportErrorCode } from "../../src/main/services/blogImport"
+import { BlogAddressError } from "../../src/main/services/blogAddresses"
 import { createGardenApi, type IpcRendererPort } from "../../src/preload/gardenApi"
 import type { GardenApi as SharedGardenApi } from "../../src/shared/contracts"
 
@@ -136,6 +138,8 @@ function services(): PublisherIpcServices & {
       cancelImport: call("blogsCancelImport"),
       install: call("blogsInstall"),
       rename: call("blogsRename"),
+      updateWebsite: call("blogsUpdateWebsite"),
+      openLink: call("blogsOpenLink"),
       relocate: call("blogsRelocate"),
       remove: call("blogsRemove"),
       openFolder: call("blogsOpenFolder"),
@@ -164,6 +168,30 @@ function services(): PublisherIpcServices & {
 }
 
 const trustedEvent = { sender: { id: 7, isDestroyed: () => false } }
+const blogId = "11111111-1111-4111-8111-111111111111"
+const blogRegistryView: BlogRegistryView = {
+  version: 1,
+  activeBlogId: blogId,
+  blogs: [
+    {
+      id: blogId,
+      name: "Garden",
+      path: "C:/Blogs/garden",
+      canonicalPath: "C:/Blogs/garden",
+      createdAt: "2026-10-01T00:00:00.000Z",
+      lastOpenedAt: "2026-10-01T00:00:00.000Z",
+      repository: {
+        display: "https://github.com/example/garden",
+        url: "https://github.com/example/garden",
+      },
+      website: { source: "manual", url: "https://garden.example/" },
+    },
+  ],
+}
+const blogAddressRequests = [
+  ["blogsUpdateWebsite", { id: blogId, websiteUrl: "https://garden.example/" }],
+  ["blogsOpenLink", { id: blogId, kind: "website" }],
+] as const
 
 function setup() {
   const ipc = new FakeIpcMain()
@@ -196,6 +224,138 @@ function setup() {
 }
 
 describe("secure publisher IPC", () => {
+  it.each(["https://garden.example/", null])(
+    "routes website update %s and validates its registry view",
+    async (websiteUrl) => {
+      const { ipc, servicePorts } = setup()
+      const request = { id: blogId, websiteUrl }
+      servicePorts.calls.blogsUpdateWebsite.mockResolvedValueOnce({
+        ...blogRegistryView,
+        secret: "discard",
+      })
+      await expect(
+        ipc.invoke(IPC_CHANNELS.requests.blogsUpdateWebsite, trustedEvent, request),
+      ).resolves.toEqual({ ok: true, value: blogRegistryView })
+      expect(servicePorts.calls.blogsUpdateWebsite).toHaveBeenCalledExactlyOnceWith(request)
+    },
+  )
+
+  it.each(["website", "repository"] as const)(
+    "routes the %s link kind and validates void success",
+    async (kind) => {
+      const { ipc, servicePorts } = setup()
+      const request = { id: blogId, kind }
+      servicePorts.calls.blogsOpenLink.mockResolvedValueOnce(undefined)
+      await expect(
+        ipc.invoke(IPC_CHANNELS.requests.blogsOpenLink, trustedEvent, request),
+      ).resolves.toEqual({ ok: true, value: undefined })
+      expect(servicePorts.calls.blogsOpenLink).toHaveBeenCalledExactlyOnceWith(request)
+    },
+  )
+
+  it.each([
+    ["blogsUpdateWebsite", { id: "not-a-uuid", websiteUrl: null }],
+    ["blogsUpdateWebsite", { id: blogId }],
+    ["blogsUpdateWebsite", { id: blogId, websiteUrl: 12 }],
+    ["blogsUpdateWebsite", { id: blogId, websiteUrl: "https://garden.example/\n" }],
+    ["blogsUpdateWebsite", { id: blogId, websiteUrl: "https://garden.example/\u0085" }],
+    ["blogsUpdateWebsite", { id: blogId, websiteUrl: "x".repeat(2_049) }],
+    ["blogsUpdateWebsite", { id: blogId, websiteUrl: null, extra: true }],
+    ["blogsOpenLink", { id: "not-a-uuid", kind: "website" }],
+    ["blogsOpenLink", { id: blogId, kind: "shell" }],
+    ["blogsOpenLink", { id: blogId }],
+    ["blogsOpenLink", { id: blogId, kind: "website", url: "https://attacker.example/" }],
+    ["blogsOpenLink", { id: blogId, kind: "repository", extra: true }],
+  ] as const)("rejects malformed %s input before dispatch: %j", async (call, request) => {
+    const { ipc, servicePorts } = setup()
+    await expect(ipc.invoke(IPC_CHANNELS.requests[call], trustedEvent, request)).resolves.toEqual({
+      ok: false,
+      error: { code: "INVALID_INPUT", message: "The request is invalid." },
+    })
+    expect(servicePorts.calls[call]).not.toHaveBeenCalled()
+  })
+
+  it.each(blogAddressRequests)(
+    "rejects a trusted but destroyed sender on %s",
+    async (call, request) => {
+      const ipc = new FakeIpcMain()
+      const servicePorts = services()
+      registerBlogManagementIpc({
+        ipcMain: ipc,
+        services: servicePorts.blogs!,
+        isTrustedSender: () => true,
+        eventTargets: () => [],
+      })
+      await expect(
+        ipc.invoke(IPC_CHANNELS.requests[call], { sender: { isDestroyed: () => true } }, request),
+      ).resolves.toEqual({
+        ok: false,
+        error: { code: "IPC_UNAUTHORIZED", message: "This application window is not authorized." },
+      })
+      expect(servicePorts.calls[call]).not.toHaveBeenCalled()
+    },
+  )
+
+  it.each(blogAddressRequests)(
+    "replaces malformed successful %s responses",
+    async (call, request) => {
+      const { ipc, servicePorts } = setup()
+      servicePorts.calls[call].mockResolvedValueOnce({ secret: "https://private.example/token" })
+      await expect(ipc.invoke(IPC_CHANNELS.requests[call], trustedEvent, request)).resolves.toEqual(
+        {
+          ok: false,
+          error: {
+            code: "INTERNAL_ERROR",
+            message: "The application could not complete the request.",
+          },
+        },
+      )
+    },
+  )
+
+  it.each(blogAddressRequests)(
+    "maps only genuine BlogAddressError instances on %s",
+    async (call, request) => {
+      const { ipc, servicePorts } = setup()
+      const mappings = [
+        ["INVALID_WEBSITE", "INVALID_INPUT", "The website address is invalid."],
+        ["LINK_UNAVAILABLE", "BLOG_LINK_UNAVAILABLE", "The requested blog link is unavailable."],
+      ] as const
+      for (const [internalCode, code, message] of mappings) {
+        servicePorts.calls[call].mockRejectedValueOnce(new BlogAddressError(internalCode))
+        await expect(
+          ipc.invoke(IPC_CHANNELS.requests[call], trustedEvent, request),
+        ).resolves.toEqual({ ok: false, error: { code, message } })
+      }
+    },
+  )
+
+  it.each(blogAddressRequests)(
+    "hides unknown errors and spoofed address codes on %s",
+    async (call, request) => {
+      const { ipc, servicePorts } = setup()
+      const rawUrl = "https://private.example/token?secret=private"
+      for (const error of [
+        new Error(`secret ${rawUrl}`),
+        { code: "INVALID_WEBSITE", message: rawUrl },
+        { code: "LINK_UNAVAILABLE", message: rawUrl },
+        Object.assign(new Error(rawUrl), { code: "INVALID_WEBSITE" }),
+      ]) {
+        servicePorts.calls[call].mockRejectedValueOnce(error)
+        const result = await ipc.invoke(IPC_CHANNELS.requests[call], trustedEvent, request)
+        expect(result).toEqual({
+          ok: false,
+          error: {
+            code: "INTERNAL_ERROR",
+            message: "The application could not complete the request.",
+          },
+        })
+        expect(JSON.stringify(result)).not.toContain("secret")
+        expect(JSON.stringify(result)).not.toContain(rawUrl)
+      }
+    },
+  )
+
   it("invokes the finite no-argument branch repair service for a trusted sender", async () => {
     const { ipc, servicePorts } = setup()
     const receipt = { branch: "main", upstream: "origin/main", head: "a".repeat(40) }
@@ -304,14 +464,40 @@ describe("secure publisher IPC", () => {
       eventTargets: () => [],
     })
 
-    expect(ipc.handlers.has(IPC_CHANNELS.requests.blogsList)).toBe(true)
+    expect([...ipc.handlers.keys()].sort()).toEqual(
+      Object.values(IPC_CHANNELS.requests)
+        .filter((channel) => channel.startsWith("garden:blogs:"))
+        .sort(),
+    )
     expect(ipc.handlers.has(IPC_CHANNELS.requests.notesList)).toBe(false)
     expect(servicePorts.blogSubscriptions()).toBe(1)
     await ipc.invoke(IPC_CHANNELS.requests.blogsList, trustedEvent)
     expect(servicePorts.calls.blogsList).toHaveBeenCalledOnce()
     dispose()
     expect(servicePorts.blogSubscriptions()).toBe(0)
+    expect(ipc.handlers.size).toBe(0)
   })
+
+  it.each(blogAddressRequests)(
+    "rolls back blog registration if %s is already registered",
+    (call) => {
+      const ipc = new FakeIpcMain()
+      const occupied = vi.fn(async () => undefined)
+      const channel = IPC_CHANNELS.requests[call]
+      ipc.handle(channel, occupied)
+      const servicePorts = services()
+      expect(() =>
+        registerBlogManagementIpc({
+          ipcMain: ipc,
+          services: servicePorts.blogs!,
+          isTrustedSender: () => true,
+          eventTargets: () => [],
+        }),
+      ).toThrow(`duplicate handler: ${channel}`)
+      expect([...ipc.handlers.entries()]).toEqual([[channel, occupied]])
+      expect(servicePorts.blogSubscriptions()).toBe(0)
+    },
+  )
 
   it("adds workspace IPC later without replacing independently registered blog recovery IPC", () => {
     const ipc = new FakeIpcMain()
@@ -350,6 +536,8 @@ describe("secure publisher IPC", () => {
         {
           id,
           name: "Renamed",
+          repository: { display: "未配置仓库" },
+          website: { source: "unconfigured" },
           path: String.raw`C:\\Blogs\\quartz`,
           canonicalPath: String.raw`C:\\Blogs\\quartz`,
           createdAt: "2026-10-01T00:00:00.000Z",
@@ -657,6 +845,27 @@ describe("secure publisher IPC", () => {
       ok: false,
       error: { code: "SERVICE_UNAVAILABLE", message: "Blog management is not available." },
     })
+    expect([...ipc.handlers.keys()].sort()).toEqual(
+      Object.values(IPC_CHANNELS.requests)
+        .filter((channel) => channel !== IPC_CHANNELS.requests.lifecycleCloseAck)
+        .sort(),
+    )
+    for (const [call, request] of blogAddressRequests) {
+      await expect(ipc.invoke(IPC_CHANNELS.requests[call], trustedEvent, request)).resolves.toEqual(
+        {
+          ok: false,
+          error: { code: "SERVICE_UNAVAILABLE", message: "Blog management is not available." },
+        },
+      )
+      await expect(ipc.invoke(IPC_CHANNELS.requests[call], {}, request)).resolves.toMatchObject({
+        ok: false,
+        error: { code: "IPC_UNAUTHORIZED" },
+      })
+      await expect(
+        ipc.invoke(IPC_CHANNELS.requests[call], trustedEvent, { ...request, extra: true }),
+      ).resolves.toMatchObject({ ok: false, error: { code: "INVALID_INPUT" } })
+      expect(servicePorts.calls[call]).not.toHaveBeenCalled()
+    }
   })
 
   it("forwards only validated blog progress and cleans the blog subscription", () => {
@@ -1272,6 +1481,8 @@ describe("secure publisher IPC", () => {
       [IPC_CHANNELS.requests.blogsCancelImport, undefined, "blogsCancelImport"],
       [IPC_CHANNELS.requests.blogsInstall, { path: destination }, "blogsInstall"],
       [IPC_CHANNELS.requests.blogsRename, { id, name: "Quartz" }, "blogsRename"],
+      [IPC_CHANNELS.requests.blogsUpdateWebsite, { id, websiteUrl: null }, "blogsUpdateWebsite"],
+      [IPC_CHANNELS.requests.blogsOpenLink, { id, kind: "website" }, "blogsOpenLink"],
       [IPC_CHANNELS.requests.blogsRelocate, { id, path: destination }, "blogsRelocate"],
       [IPC_CHANNELS.requests.blogsRemove, { id }, "blogsRemove"],
       [IPC_CHANNELS.requests.blogsOpenFolder, { id }, "blogsOpenFolder"],
@@ -1565,6 +1776,79 @@ class FakeIpcRenderer implements IpcRendererPort {
 }
 
 describe("preload garden API", () => {
+  it("preserves safe blog address errors through main and preload", async () => {
+    const { ipc, servicePorts } = setup()
+    const renderer = new FakeIpcRenderer()
+    renderer.invoke = (channel, request) => ipc.invoke(channel, trustedEvent, request)
+    const api = createGardenApi(renderer)
+    servicePorts.calls.blogsUpdateWebsite.mockRejectedValueOnce(
+      new BlogAddressError("INVALID_WEBSITE"),
+    )
+    await expect(api.blogs.updateWebsite({ id: blogId, websiteUrl: "invalid" })).resolves.toEqual({
+      ok: false,
+      error: { code: "INVALID_INPUT", message: "The website address is invalid." },
+    })
+    servicePorts.calls.blogsOpenLink.mockRejectedValueOnce(new BlogAddressError("LINK_UNAVAILABLE"))
+    await expect(api.blogs.openLink({ id: blogId, kind: "website" })).resolves.toEqual({
+      ok: false,
+      error: { code: "BLOG_LINK_UNAVAILABLE", message: "The requested blog link is unavailable." },
+    })
+  })
+
+  it.each(["https://garden.example/", null])(
+    "maps website update %s to its channel and validates the view",
+    async (websiteUrl) => {
+      const ipc = new FakeIpcRenderer()
+      ipc.invoke = vi.fn(async () => ({
+        ok: true,
+        value: { ...blogRegistryView, secret: "discard" },
+      }))
+      const request = { id: blogId, websiteUrl }
+      await expect(createGardenApi(ipc).blogs.updateWebsite(request)).resolves.toEqual({
+        ok: true,
+        value: blogRegistryView,
+      })
+      expect(ipc.invoke).toHaveBeenCalledExactlyOnceWith(
+        IPC_CHANNELS.requests.blogsUpdateWebsite,
+        request,
+      )
+    },
+  )
+
+  it.each(["website", "repository"] as const)(
+    "maps opening a %s link to its channel and validates void",
+    async (kind) => {
+      const ipc = new FakeIpcRenderer()
+      ipc.invoke = vi.fn(async () => ({ ok: true, value: undefined }))
+      const request = { id: blogId, kind }
+      await expect(createGardenApi(ipc).blogs.openLink(request)).resolves.toEqual({
+        ok: true,
+        value: undefined,
+      })
+      expect(ipc.invoke).toHaveBeenCalledExactlyOnceWith(
+        IPC_CHANNELS.requests.blogsOpenLink,
+        request,
+      )
+    },
+  )
+
+  it("rejects malformed responses from both blog address capabilities", async () => {
+    const ipc = new FakeIpcRenderer()
+    ipc.invoke = vi.fn(async () => ({
+      ok: true,
+      value: { secret: "https://private.example/token" },
+    }))
+    const api = createGardenApi(ipc)
+    const expected = {
+      ok: false,
+      error: { code: "INTERNAL_ERROR", message: "The application returned an invalid response." },
+    }
+    await expect(api.blogs.updateWebsite({ id: blogId, websiteUrl: null })).resolves.toEqual(
+      expected,
+    )
+    await expect(api.blogs.openLink({ id: blogId, kind: "website" })).resolves.toEqual(expected)
+  })
+
   it("exposes validated branch repair through the exact no-argument channel", async () => {
     const ipc = new FakeIpcRenderer()
     const receipt = { branch: "main", upstream: "origin/main", head: "a".repeat(40) }
@@ -1591,6 +1875,29 @@ describe("preload garden API", () => {
     expect(api).not.toHaveProperty("fs")
     expect(api).not.toHaveProperty("shell")
     expect(api).not.toHaveProperty("exec")
+    expect(Object.isFrozen(api.notes.recovery)).toBe(true)
+    expect(Object.keys(api.blogs).sort()).toEqual(
+      [
+        "list",
+        "chooseLocal",
+        "addLocal",
+        "recoverLocal",
+        "clone",
+        "cancelImport",
+        "install",
+        "rename",
+        "relocate",
+        "remove",
+        "openFolder",
+        "switch",
+        "onImportProgress",
+        "updateWebsite",
+        "openLink",
+      ].sort(),
+    )
+    for (const capability of ["shell", "path", "openExternal", "url", "invoke"]) {
+      expect(api.blogs).not.toHaveProperty(capability)
+    }
     expect(Object.keys(api).sort()).toEqual(
       [
         "blogs",
@@ -1661,6 +1968,8 @@ describe("preload garden API", () => {
     await api.blogs.cancelImport()
     await api.blogs.install({ path: String.raw`C:\\Blogs\\quartz` })
     await api.blogs.rename({ id: "11111111-1111-4111-8111-111111111111", name: "Quartz" })
+    await api.blogs.updateWebsite({ id: blogId, websiteUrl: "https://garden.example/" })
+    await api.blogs.openLink({ id: blogId, kind: "repository" })
     await api.blogs.relocate({
       id: "11111111-1111-4111-8111-111111111111",
       path: String.raw`C:\\Blogs\\moved`,

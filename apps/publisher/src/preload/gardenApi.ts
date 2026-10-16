@@ -7,12 +7,14 @@ import {
   type BlogIdRequest,
   type BlogImportProgress,
   type BlogImportReceipt,
+  type BlogLinkOpenRequest,
   type BlogPathRequest,
   type BlogRegistryView,
   type BlogRegistryStatus,
   type BlogRelocateRequest,
   type BlogRenameRequest,
   type BlogSwitchRequest,
+  type BlogWebsiteUpdateRequest,
   type GardenApi as BaseGardenApi,
   type ChangeReview,
   type BeforeCloseRequest,
@@ -148,6 +150,10 @@ export function createGardenApi(ipc: IpcRendererPort): GardenApi {
       invoke<BlogCandidateInspection>(ipc, IPC_CHANNELS.requests.blogsInstall, request),
     rename: (request: BlogRenameRequest) =>
       invoke<BlogRegistryView>(ipc, IPC_CHANNELS.requests.blogsRename, request),
+    updateWebsite: (request: BlogWebsiteUpdateRequest) =>
+      invoke<BlogRegistryView>(ipc, IPC_CHANNELS.requests.blogsUpdateWebsite, request),
+    openLink: (request: BlogLinkOpenRequest) =>
+      invoke<void>(ipc, IPC_CHANNELS.requests.blogsOpenLink, request),
     relocate: (request: BlogRelocateRequest) =>
       invoke<BlogRegistryView>(ipc, IPC_CHANNELS.requests.blogsRelocate, request),
     remove: (request: BlogIdRequest) =>
