@@ -1,7 +1,7 @@
 import { Check, ChevronDown, FolderPlus, GitFork, Settings2 } from "lucide-react"
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useId, useRef, useState } from "react"
 import type { BlogLinkOpenRequest, BlogRegistryView } from "../../../shared/contracts"
-import { BlogAddressRows } from "./BlogAddressRows"
+import { BlogAddressRows, getBlogAddressIds } from "./BlogAddressRows"
 
 export interface BlogSwitcherProps {
   readonly registry: BlogRegistryView
@@ -22,6 +22,8 @@ export function BlogSwitcher({
   onClone,
   onManage,
 }: BlogSwitcherProps): React.JSX.Element {
+  const instanceId = useId()
+  const summaryId = `${instanceId}-summary`
   const [open, setOpen] = useState(false)
   const actions: {
     id?: string
@@ -85,6 +87,9 @@ export function BlogSwitcher({
           type="button"
           className="blog-switcher-trigger"
           aria-label={`切换博客：${active?.name ?? "未选择博客"}`}
+          aria-describedby={
+            active ? Object.values(getBlogAddressIds(summaryId)).join(" ") : undefined
+          }
           aria-haspopup="menu"
           aria-expanded={open}
           disabled={disabled || !active}
@@ -106,6 +111,7 @@ export function BlogSwitcher({
         </button>
         {active ? (
           <BlogAddressRows
+            idPrefix={summaryId}
             blog={active}
             disabled={disabled}
             onOpenLink={(kind) => finish(() => onOpenLink(active.id, kind))}
@@ -151,18 +157,15 @@ export function BlogSwitcher({
           <div className="blog-switcher-options">
             {registry.blogs.map((blog) => {
               const current = blog.id === registry.activeBlogId
+              const addressId = `${instanceId}-menu-${encodeURIComponent(blog.id)}`
               return (
-                <div
-                  key={blog.id}
-                  className="blog-switcher-option"
-                  role="group"
-                  aria-label={blog.name}
-                >
+                <div key={blog.id} className="blog-switcher-option" role="none">
                   <button
                     {...menuButtonProps(actionIndex("switch", blog.id))}
                     type="button"
                     role="menuitemradio"
                     aria-checked={current}
+                    aria-describedby={Object.values(getBlogAddressIds(addressId)).join(" ")}
                     disabled={disabled}
                     onClick={() => finish(() => onSwitch(blog.id))}
                   >
@@ -177,6 +180,7 @@ export function BlogSwitcher({
                     </span>
                   </button>
                   <BlogAddressRows
+                    idPrefix={addressId}
                     blog={blog}
                     disabled={disabled}
                     onOpenLink={(kind) => finish(() => onOpenLink(blog.id, kind))}

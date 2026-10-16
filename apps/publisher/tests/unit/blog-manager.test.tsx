@@ -67,6 +67,96 @@ function switcherProps() {
 }
 
 describe("BlogSwitcher", () => {
+  it("keeps all mutually exclusive radio choices in the same menu scope", async () => {
+    const user = userEvent.setup()
+    render(<BlogSwitcher {...switcherProps()} />)
+    await user.click(screen.getByRole("button", { name: /切换博客/ }))
+    const menu = screen.getByRole("menu")
+    const choices = within(menu).getAllByRole("menuitemradio")
+    expect(choices).toHaveLength(registry.blogs.length)
+    for (const choice of choices) {
+      expect(choice.closest('[role="group"], [role="radiogroup"], [role="menu"]')).toBe(menu)
+    }
+  })
+
+  it("describes switch and link buttons with full addresses and unique stable value IDs", async () => {
+    const user = userEvent.setup()
+    const props = switcherProps()
+    const view = render(<BlogSwitcher {...props} />)
+    const trigger = screen.getByRole("button", { name: /切换博客/ })
+    const configuredDescription = `${registry.blogs[0].repository.display} https://knowledge.example.com/ ${registry.blogs[0].path}`
+    expect(trigger).toHaveAccessibleDescription(configuredDescription)
+    const topRepo = screen.getByRole("button", { name: "打开 Knowledge Garden 的仓库" })
+    const topSite = screen.getByRole("button", { name: "打开 Knowledge Garden 的网站" })
+    expect(topRepo).toHaveAccessibleDescription(registry.blogs[0].repository.display)
+    expect(topSite).toHaveAccessibleDescription("https://knowledge.example.com/")
+    const originalDescriptionIds = trigger.getAttribute("aria-describedby")
+    await user.click(trigger)
+    const menu = screen.getByRole("menu")
+    expect(
+      within(menu).getByRole("menuitemradio", { name: /Knowledge Garden/ }),
+    ).toHaveAccessibleDescription(configuredDescription)
+    expect(
+      within(menu).getByRole("menuitemradio", { name: /Study Garden/ }),
+    ).toHaveAccessibleDescription(
+      `${registry.blogs[1].repository.display} 未配置网站 ${registry.blogs[1].path}`,
+    )
+    const menuRepo = within(menu).getByRole("menuitem", { name: "打开 Knowledge Garden 的仓库" })
+    const menuSite = within(menu).getByRole("menuitem", { name: "打开 Knowledge Garden 的网站" })
+    for (const [button, value] of [
+      [topRepo, registry.blogs[0].repository.display],
+      [topSite, "https://knowledge.example.com/"],
+      [menuRepo, registry.blogs[0].repository.display],
+      [menuSite, "https://knowledge.example.com/"],
+    ] as const) {
+      expect(button).toHaveAccessibleDescription(value)
+      const valueNode = document.getElementById(button.getAttribute("aria-describedby")!)
+      expect(valueNode?.tagName).toBe("DD")
+      expect(valueNode).toHaveTextContent(value)
+    }
+    const valueIds = Array.from(document.querySelectorAll("dd[id]"), (node) => node.id)
+    expect(valueIds).toHaveLength(9)
+    expect(new Set(valueIds).size).toBe(valueIds.length)
+    view.rerender(<BlogSwitcher {...props} />)
+    expect(trigger).toHaveAttribute("aria-describedby", originalDescriptionIds)
+    expect(Array.from(document.querySelectorAll("dd[id]"), (node) => node.id)).toEqual(valueIds)
+  })
+
+  it("opens the inactive blog's repository and website without switching", async () => {
+    const user = userEvent.setup()
+    const props = switcherProps()
+    const configured: BlogRegistryView = {
+      ...registry,
+      blogs: [
+        registry.blogs[0],
+        {
+          ...registry.blogs[1],
+          repository: {
+            display: "https://github.com/me/study",
+            url: "https://github.com/me/study",
+          },
+          website: { source: "manual", url: "https://study.example.com/" },
+        },
+      ],
+    }
+    render(<BlogSwitcher {...props} registry={configured} />)
+    for (const [kind, label] of [
+      ["repository", "仓库"],
+      ["website", "网站"],
+    ] as const) {
+      await user.click(screen.getByRole("button", { name: /切换博客/ }))
+      await user.click(
+        within(screen.getByRole("menu")).getByRole("menuitem", {
+          name: `打开 Study Garden 的${label}`,
+        }),
+      )
+      expect(props.onOpenLink).toHaveBeenLastCalledWith("study", kind)
+      expect(screen.queryByRole("menu")).toBeNull()
+    }
+    expect(props.onOpenLink).toHaveBeenCalledTimes(2)
+    expect(props.onSwitch).not.toHaveBeenCalled()
+  })
+
   it("exposes an accessible radio menu, current marker, paths, and typed actions", async () => {
     const user = userEvent.setup()
     const onSwitch = vi.fn()
