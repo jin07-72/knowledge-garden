@@ -175,6 +175,65 @@ describe("blog registry", () => {
     })
   })
 
+  it("rolls back an already-published website URL when directory sync fails", async () => {
+    const directory = await createDirectory("garden-blog-registry-state-")
+    const legacyPath = await createGarden("legacy")
+    const file = join(directory, "blogs.v1.json")
+    let failDirectorySyncOnce = false
+    const fileSystem = {
+      open: async (path: string, flags: "r" | "wx", mode?: number) => {
+        const handle = await openFile(path, flags, mode)
+        if (!failDirectorySyncOnce || flags !== "r" || path !== directory) return handle
+        return {
+          writeFile: handle.writeFile.bind(handle),
+          sync: async () => {
+            failDirectorySyncOnce = false
+            throw new Error("simulated post-publish sync failure")
+          },
+          close: handle.close.bind(handle),
+        }
+      },
+    }
+    const registry = createBlogRegistry({ file, legacyPath, fileSystem })
+    const state = await registry.load()
+    await registry.setWebsiteUrl(state.activeBlogId, "https://garden.example/original/")
+    const previous = await readFile(file)
+    failDirectorySyncOnce = true
+
+    await expect(
+      registry.setWebsiteUrl(state.activeBlogId, "https://garden.example/replacement/"),
+    ).rejects.toThrow("simulated post-publish sync failure")
+
+    await expect(readFile(file)).resolves.toEqual(previous)
+    await expect(createBlogRegistry({ file, legacyPath }).load()).resolves.toMatchObject({
+      blogs: [{ websiteUrl: "https://garden.example/original/" }],
+    })
+  })
+
+  it("rejects invalid website URLs at the mutation boundary without changing the registry", async () => {
+    const directory = await createDirectory("garden-blog-registry-state-")
+    const legacyPath = await createGarden("legacy")
+    const file = join(directory, "blogs.v1.json")
+    const registry = createRegistry(file, legacyPath)
+    const state = await registry.load()
+    const previous = await readFile(file, "utf8")
+    const invalidUrls = [
+      "/notes/",
+      "ftp://garden.example/",
+      "https://user:password@garden.example/",
+      "https://garden.example/\u0000notes",
+      `https://garden.example/${"a".repeat(2_048)}`,
+      "HTTPS://garden.example/",
+    ]
+
+    for (const websiteUrl of invalidUrls) {
+      await expect(registry.setWebsiteUrl(state.activeBlogId, websiteUrl)).rejects.toThrow(
+        "Invalid website URL",
+      )
+      await expect(readFile(file, "utf8")).resolves.toBe(previous)
+    }
+  })
+
   it("rejects persisted website URLs outside the strict stored URL schema", async () => {
     const directory = await createDirectory("garden-blog-registry-state-")
     const legacyPath = await createGarden("legacy")
@@ -215,6 +274,22 @@ describe("blog registry", () => {
       persisted.blogs[0].websiteUrl = websiteUrl
       await writeFile(file, JSON.stringify(persisted))
 
+      await expect(createRegistry(file, legacyPath).load()).resolves.toMatchObject({
+        blogs: [{ websiteUrl }],
+      })
+    }
+  })
+
+  it("persists normalized localhost and private-network website URLs", async () => {
+    const directory = await createDirectory("garden-blog-registry-state-")
+    const legacyPath = await createGarden("legacy")
+    const file = join(directory, "blogs.v1.json")
+    const registry = createRegistry(file, legacyPath)
+    const state = await registry.load()
+
+    for (const websiteUrl of ["http://localhost:3000/", "https://192.168.1.20/notes/"]) {
+      const updated = await registry.setWebsiteUrl(state.activeBlogId, websiteUrl)
+      expect(updated.blogs[0]).toMatchObject({ websiteUrl })
       await expect(createRegistry(file, legacyPath).load()).resolves.toMatchObject({
         blogs: [{ websiteUrl }],
       })

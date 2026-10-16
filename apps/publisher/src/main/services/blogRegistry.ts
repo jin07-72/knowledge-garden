@@ -492,6 +492,26 @@ export function createBlogRegistry(options: {
     )
   }
 
+  async function persistWebsiteUpdate(
+    file: string,
+    source: Buffer,
+    state: BlogRegistryState,
+  ): Promise<void> {
+    try {
+      await persist(file, state)
+    } catch (persistError) {
+      try {
+        const current = await readFile(file).catch(() => undefined)
+        if (current === undefined || !Buffer.from(current).equals(source)) {
+          await persistBytes(file, source)
+        }
+      } catch (rollbackError) {
+        throw rollbackFailure(persistError, rollbackError)
+      }
+      throw persistError
+    }
+  }
+
   async function migrateLegacy(file: string): Promise<BlogRegistryState> {
     const location = await canonicalize(options.legacyPath)
     const createdAt = timestamp()
@@ -753,6 +773,7 @@ export function createBlogRegistry(options: {
     async setWebsiteUrl(id, websiteUrl) {
       return runExclusive(async (file) => {
         const state = await readState(file)
+        const source = await readFile(file)
         const blog = await requireBlog(state, id)
         const updated =
           websiteUrl === undefined
@@ -762,7 +783,7 @@ export function createBlogRegistry(options: {
           ...state,
           blogs: state.blogs.map((candidate) => (candidate.id === blog.id ? updated : candidate)),
         }
-        await persist(file, next)
+        await persistWebsiteUpdate(file, source, next)
         return next
       })
     },
