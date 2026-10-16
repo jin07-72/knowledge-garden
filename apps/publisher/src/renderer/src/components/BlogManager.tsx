@@ -95,7 +95,7 @@ export function BlogManager({
   const websiteSubmission = useRef<{ registry: BlogRegistryView; sawBusy: boolean } | undefined>(
     undefined,
   )
-  const websiteOrigin = useRef<HTMLButtonElement | null>(null)
+  const websiteOriginId = useRef<string | undefined>(undefined)
   const restoreWebsiteFocus = useRef(false)
   const closeButton = useRef<HTMLButtonElement>(null)
   const busyFocus = useRef<HTMLDivElement>(null)
@@ -114,6 +114,8 @@ export function BlogManager({
       setEditingWebsite(undefined)
       setWebsiteValue("")
       websiteSubmission.current = undefined
+      websiteOriginId.current = undefined
+      restoreWebsiteFocus.current = false
     }
   }, [open])
   useEffect(() => {
@@ -127,8 +129,12 @@ export function BlogManager({
   useEffect(() => {
     if (editingWebsite !== undefined || !restoreWebsiteFocus.current) return
     restoreWebsiteFocus.current = false
-    websiteOrigin.current?.focus()
-  }, [editingWebsite])
+    if (!open || view !== "list") return
+    const origin = Array.from(
+      busyFocus.current?.querySelectorAll<HTMLButtonElement>("[data-edit-website-id]") ?? [],
+    ).find((button) => button.dataset.editWebsiteId === websiteOriginId.current)
+    origin?.focus()
+  }, [editingWebsite, open, view])
   useEffect(() => {
     const submission = websiteSubmission.current
     if (!submission) return
@@ -211,10 +217,10 @@ export function BlogManager({
             editingWebsite={editingWebsite}
             websiteValue={websiteValue}
             onWebsiteValue={setWebsiteValue}
-            onStartWebsite={(id, trigger) => {
+            onStartWebsite={(id) => {
               if (busy) return
               const blog = registry.blogs.find((entry) => entry.id === id)
-              websiteOrigin.current = trigger
+              websiteOriginId.current = id
               websiteSubmission.current = undefined
               setEditingWebsite(id)
               setWebsiteValue(blog?.website.source === "manual" ? blog.website.url : "")
@@ -490,7 +496,7 @@ function BlogList({
   readonly editingWebsite?: string
   readonly websiteValue: string
   readonly onWebsiteValue: (value: string) => void
-  readonly onStartWebsite: (id: string, trigger: HTMLButtonElement) => void
+  readonly onStartWebsite: (id: string) => void
   readonly onSaveWebsite: (id: string) => void
   readonly onCancelWebsite: () => void
   readonly onOpenLink: BlogManagerProps["onOpenLink"]
@@ -536,8 +542,9 @@ function BlogList({
               type="button"
               className="secondary-button blog-website-edit"
               aria-label={`编辑 ${blog.name} 的网站地址`}
+              data-edit-website-id={blog.id}
               disabled={busy}
-              onClick={(event) => onStartWebsite(blog.id, event.currentTarget)}
+              onClick={() => onStartWebsite(blog.id)}
             >
               <Pencil size={14} aria-hidden="true" /> 编辑网站地址
             </button>

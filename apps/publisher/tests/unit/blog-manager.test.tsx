@@ -581,6 +581,34 @@ describe("BlogManager", () => {
     expect(props.onUpdateWebsite).not.toHaveBeenCalled()
   })
 
+  it.each(["cancel", "save"] as const)(
+    "restores the replacement website edit trigger after list remount and %s",
+    async (completion) => {
+      const user = userEvent.setup()
+      const props = managerProps()
+      const view = render(<BlogManager {...props} />)
+      const original = screen.getByRole("button", { name: "编辑 Knowledge Garden 的网站地址" })
+      await user.click(original)
+      await user.click(screen.getByRole("button", { name: "从 GitHub 下载" }))
+      expect(original.isConnected).toBe(false)
+      await user.click(screen.getByRole("button", { name: "返回博客列表" }))
+      const replacement = screen.getByRole("button", { name: "编辑 Knowledge Garden 的网站地址" })
+      expect(replacement).not.toBe(original)
+      expect(screen.getByRole("textbox", { name: "网站地址" })).toBeVisible()
+      if (completion === "cancel") {
+        await user.click(screen.getByRole("button", { name: "取消编辑网站地址" }))
+        expect(props.onUpdateWebsite).not.toHaveBeenCalled()
+      } else {
+        await user.click(screen.getByRole("button", { name: "保存网站地址" }))
+        view.rerender(<BlogManager {...props} importState={{ view: "list", busy: true }} />)
+        view.rerender(<BlogManager {...props} registry={{ ...registry }} />)
+      }
+      expect(screen.queryByRole("textbox", { name: "网站地址" })).toBeNull()
+      expect(replacement).toHaveFocus()
+      expect(document.body).not.toHaveFocus()
+    },
+  )
+
   it("blocks address editing, open actions, and registry controls throughout busy operations", async () => {
     const user = userEvent.setup()
     const props = managerProps()
