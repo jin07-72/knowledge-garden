@@ -123,7 +123,9 @@ describe("blog registry", () => {
     const cleared = await registry.setWebsiteUrl(state.activeBlogId, undefined)
 
     expect(Object.hasOwn(cleared.blogs[0]!, "websiteUrl")).toBe(false)
-    expect(Object.hasOwn(JSON.parse(await readFile(file, "utf8")).blogs[0], "websiteUrl")).toBe(false)
+    expect(Object.hasOwn(JSON.parse(await readFile(file, "utf8")).blogs[0], "websiteUrl")).toBe(
+      false,
+    )
     const reloaded = await createRegistry(file, legacyPath).load()
     expect(Object.hasOwn(reloaded.blogs[0]!, "websiteUrl")).toBe(false)
   })

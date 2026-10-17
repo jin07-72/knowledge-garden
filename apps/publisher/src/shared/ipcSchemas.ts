@@ -169,13 +169,14 @@ const cleanupWarningMessages: Readonly<Record<string, string>> = {
   DELETE_CLEANUP_UNCERTAIN: "请人工检查图片删除记录。",
 }
 
-function publicCleanupWarnings(details: unknown):
-  | readonly { readonly code: string; readonly message: string }[]
-  | undefined {
+function publicCleanupWarnings(
+  details: unknown,
+): readonly { readonly code: string; readonly message: string }[] | undefined {
   try {
     if (typeof details !== "object" || details === null) return undefined
     const descriptor = Object.getOwnPropertyDescriptor(details, "cleanupWarnings")
-    if (!descriptor || !("value" in descriptor) || !Array.isArray(descriptor.value)) return undefined
+    if (!descriptor || !("value" in descriptor) || !Array.isArray(descriptor.value))
+      return undefined
     if (descriptor.value.length === 0 || descriptor.value.length > 32) return undefined
     const warnings: { code: string; message: string }[] = []
     for (const value of descriptor.value) {
@@ -212,17 +213,14 @@ export const appErrorSchema = z
     details: z.unknown().optional(),
   })
   .strip()
-  .transform(
-    ({ code, message, details }): AppError => {
-      const cleanupWarnings = publicCleanupWarnings(details)
-      return ({
-        code,
-        message:
-          domainPublicErrorMessages[code] ?? imageLibraryPublicErrorMessages[code] ?? message,
-        ...(cleanupWarnings ? { details: { cleanupWarnings } } : {}),
-      }) as AppError
-    },
-  )
+  .transform(({ code, message, details }): AppError => {
+    const cleanupWarnings = publicCleanupWarnings(details)
+    return {
+      code,
+      message: domainPublicErrorMessages[code] ?? imageLibraryPublicErrorMessages[code] ?? message,
+      ...(cleanupWarnings ? { details: { cleanupWarnings } } : {}),
+    } as AppError
+  })
 
 const pathSchema = z.string().min(1).max(512)
 export const managedNotePathSchema = z.string().max(512).regex(MANAGED_NOTE_PATH_PATTERN)
@@ -240,8 +238,7 @@ const imageNameSchema = z
   .refine((value) => !controlCharacterPattern.test(value))
   .refine((value) => !/[. ]$/.test(value))
   .refine(
-    (value) =>
-      !/^(?:con|prn|aux|nul|com(?:[1-9]|[¹²³])|lpt(?:[1-9]|[¹²³]))(?:\.|$)/i.test(value),
+    (value) => !/^(?:con|prn|aux|nul|com(?:[1-9]|[¹²³])|lpt(?:[1-9]|[¹²³]))(?:\.|$)/i.test(value),
   )
   .regex(/\.(?:png|jpe?g|gif|webp|avif)$/i)
 const imageDataUrlHeaderPattern = /^data:image\/(?:png|jpeg|gif|webp|avif);base64,/
@@ -256,11 +253,7 @@ function canonicalBase64Payload(value: string): string | undefined {
   const header = imageDataUrlHeaderPattern.exec(value)?.[0]
   if (header === undefined) return undefined
   const payload = value.slice(header.length)
-  if (
-    payload.length === 0 ||
-    payload.length % 4 !== 0 ||
-    !base64PayloadPattern.test(payload)
-  )
+  if (payload.length === 0 || payload.length % 4 !== 0 || !base64PayloadPattern.test(payload))
     return undefined
   return hasCanonicalBase64Padding(payload) ? payload : undefined
 }
@@ -343,7 +336,9 @@ export const imageLibraryCommitRequestSchema = z
   .strict()
   .refine(({ include }) => uniqueImageNames(include), { path: ["include"] })
   .refine(
-    ({ include }) => include.reduce((total, name) => total + utf8ByteLength(name), 0) <= IMAGE_LIBRARY_MAX_SELECTION_NAME_TOTAL_LENGTH,
+    ({ include }) =>
+      include.reduce((total, name) => total + utf8ByteLength(name), 0) <=
+      IMAGE_LIBRARY_MAX_SELECTION_NAME_TOTAL_LENGTH,
     { path: ["include"] },
   )
   .refine(({ overwrite }) => uniqueImageNames(overwrite), { path: ["overwrite"] })

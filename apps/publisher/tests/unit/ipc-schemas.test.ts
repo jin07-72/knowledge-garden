@@ -477,17 +477,25 @@ describe("image library IPC schemas", () => {
     expect(commit.safeParse({ ...valid, include: [] }).success).toBe(false)
     expect(commit.safeParse({ ...valid, include: ["hero.png", "HERO.PNG"] }).success).toBe(false)
     expect(commit.safeParse({ ...valid, include: ["../hero.png"] }).success).toBe(false)
-    expect(commit.safeParse({ ...valid, include: Array.from({ length: 51 }, (_, i) => `${i}.png`) }).success).toBe(false)
-    expect(commit.safeParse({
-      ...valid,
-      include: Array.from({ length: 50 }, (_, index) => `${String(index).padStart(3, "0")}-${"a".repeat(247)}.png`),
-    }).success).toBe(false)
+    expect(
+      commit.safeParse({ ...valid, include: Array.from({ length: 51 }, (_, i) => `${i}.png`) })
+        .success,
+    ).toBe(false)
+    expect(
+      commit.safeParse({
+        ...valid,
+        include: Array.from(
+          { length: 50 },
+          (_, index) => `${String(index).padStart(3, "0")}-${"a".repeat(247)}.png`,
+        ),
+      }).success,
+    ).toBe(false)
     const { include: _include, ...withoutInclude } = valid
     expect(commit.safeParse(withoutInclude).success).toBe(false)
-    expect(commit.safeParse({ ...valid, overwrite: ["hero.png", "hero.png"] }).success).toBe(
-      false,
-    )
-    expect(commit.safeParse({ ...valid, include: ["hero.png"], overwrite: ["HERO.PNG"] }).success).toBe(true)
+    expect(commit.safeParse({ ...valid, overwrite: ["hero.png", "hero.png"] }).success).toBe(false)
+    expect(
+      commit.safeParse({ ...valid, include: ["hero.png"], overwrite: ["HERO.PNG"] }).success,
+    ).toBe(true)
     expect(commit.safeParse({ ...valid, overwrite: ["missing.png"] }).success).toBe(false)
     expect(
       commit.safeParse({ ...valid, overwrite: Array.from({ length: 51 }, (_, i) => `${i}.png`) })
@@ -518,7 +526,9 @@ describe("image library IPC schemas", () => {
     expect(
       schema.safeParse({
         ...value,
-        images: [{ ...imageItem, thumbnailDataUrl: `data:image/png;base64,${"A".repeat(512 * 1024)}` }],
+        images: [
+          { ...imageItem, thumbnailDataUrl: `data:image/png;base64,${"A".repeat(512 * 1024)}` },
+        ],
       }).success,
     ).toBe(false)
   })
@@ -601,9 +611,9 @@ describe("image library IPC schemas", () => {
         conflicts: ["last.png", "first.png"],
       }).success,
     ).toBe(false)
-    expect(schema.safeParse({ ...selected, images: Array(51).fill(selected.images[0]) }).success).toBe(
-      false,
-    )
+    expect(
+      schema.safeParse({ ...selected, images: Array(51).fill(selected.images[0]) }).success,
+    ).toBe(false)
     expect(schema.safeParse({ ...selected, conflicts: Array(51).fill("hero.png") }).success).toBe(
       false,
     )
@@ -739,9 +749,9 @@ describe("image library IPC schemas", () => {
       success: true,
       data: { ...previewItem, dataUrl: previewValue.dataUrl },
     })
-    expect(schema.safeParse({ ...previewValue, dataUrl: "data:image/svg+xml;base64,AAAA" }).success).toBe(
-      false,
-    )
+    expect(
+      schema.safeParse({ ...previewValue, dataUrl: "data:image/svg+xml;base64,AAAA" }).success,
+    ).toBe(false)
     expect(
       schema.safeParse({
         ...previewValue,
@@ -955,24 +965,25 @@ describe("IPC success schemas", () => {
       privateToken: "must-not-cross",
     }
 
-    expect(schema.parse({ ...blogRegistry, blogs: [displayBlog], activeAvailability: "available" }))
-      .toEqual({
-        version: 1,
-        activeBlogId: blogId,
-        activeAvailability: "available",
-        blogs: [
-          {
-            id: blogId,
-            name: "Quartz",
-            path: String.raw`C:\\Blogs\\quartz`,
-            canonicalPath: String.raw`C:\\Blogs\\quartz`,
-            createdAt: "2026-10-01T00:00:00.000Z",
-            lastOpenedAt: "2026-10-01T00:00:00.000Z",
-            repository: { display: "openai/quartz", url: "https://github.com/openai/quartz" },
-            website: { source: "manual", url: "https://example.com/garden/" },
-          },
-        ],
-      })
+    expect(
+      schema.parse({ ...blogRegistry, blogs: [displayBlog], activeAvailability: "available" }),
+    ).toEqual({
+      version: 1,
+      activeBlogId: blogId,
+      activeAvailability: "available",
+      blogs: [
+        {
+          id: blogId,
+          name: "Quartz",
+          path: String.raw`C:\\Blogs\\quartz`,
+          canonicalPath: String.raw`C:\\Blogs\\quartz`,
+          createdAt: "2026-10-01T00:00:00.000Z",
+          lastOpenedAt: "2026-10-01T00:00:00.000Z",
+          repository: { display: "openai/quartz", url: "https://github.com/openai/quartz" },
+          website: { source: "manual", url: "https://example.com/garden/" },
+        },
+      ],
+    })
     expect(
       schema.safeParse({
         ...blogRegistry,
