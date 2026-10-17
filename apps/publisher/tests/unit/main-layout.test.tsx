@@ -2302,7 +2302,7 @@ describe("publisher main layout", () => {
     )
   })
 
-  it("collapses only the blog path at narrow width while retaining the name and switch affordance", () => {
+  it("retains all blog address labels at narrow width while ellipsizing values without overflow", () => {
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 640 })
     const registry: BlogRegistryView = {
       version: 1,
@@ -2339,14 +2339,27 @@ describe("publisher main layout", () => {
     const path = screen.getByText(String.raw`C:\Users\me\knowledge-garden`)
     expect(path).toHaveClass("blog-address-value")
     expect(path.closest("dl")).toHaveClass("blog-address-rows")
+    for (const label of ["仓库", "网站", "本地"]) {
+      expect(screen.getByText(label, { exact: true })).toBeVisible()
+    }
 
     const stylesheet = readFileSync(resolve(process.cwd(), "src/renderer/src/app.css"), "utf8")
     const narrowRules = stylesheet.slice(
       stylesheet.indexOf("@media (max-width: 680px)"),
       stylesheet.indexOf("@media (prefers-reduced-motion: reduce)"),
     )
+    expect(narrowRules).not.toMatch(
+      /\.blog-switcher-copy small|\.blog-menu-copy small|\.blog-manager-card-heading code/,
+    )
+    expect(narrowRules).not.toMatch(/\.blog-address[^{}]*\{[^}]*display:\s*none/)
     expect(narrowRules).toMatch(
-      /\.blog-switcher-copy small,\s*\.blog-menu-copy small,\s*\.blog-manager-card-heading code\s*\{\s*display: none;\s*\}/,
+      /\.blog-switcher-summary\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)/,
+    )
+    expect(stylesheet).toMatch(
+      /\.blog-address-rows > div\s*\{[^}]*grid-template-columns:\s*38px minmax\(0, 1fr\)/,
+    )
+    expect(stylesheet).toMatch(
+      /\.blog-address-value\s*\{[^}]*min-width:\s*0;[^}]*overflow:\s*hidden;[^}]*text-overflow:\s*ellipsis/,
     )
     expect(narrowRules).not.toMatch(/\.blog-switcher-trigger[^{]*\{[^}]*display:\s*none/)
   })
