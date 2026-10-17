@@ -61,6 +61,48 @@ async function expectDecodedImage(image: Locator): Promise<void> {
     .toBe(true)
 }
 
+async function expectBlogAddresses(
+  container: Locator,
+  localPath: string,
+  website = "未配置网站",
+): Promise<void> {
+  const addresses = container.locator(".blog-address-rows")
+  await expect(addresses).toHaveCount(1)
+  for (const label of ["仓库", "网站", "本地"]) {
+    await expect(addresses.locator("dt", { hasText: new RegExp(`^${label}$`) })).toBeVisible()
+  }
+  await expect(addresses.locator("dd").nth(0)).toHaveText("未配置仓库")
+  await expect(addresses.locator("dd").nth(1)).toHaveText(website)
+  await expect(addresses.locator("dd").nth(2)).toHaveText(localPath)
+  for (const action of await addresses.locator("button").all()) {
+    await expect(action).toHaveAccessibleDescription(website)
+  }
+  expect(
+    await container.evaluate((element) => {
+      const topbar = element.matches(".blog-switcher-summary") ? element.closest(".topbar") : null
+      const bounds = (topbar ?? element).getBoundingClientRect()
+      return Array.from(
+        element.querySelectorAll(
+          ".blog-address-rows, .blog-address-row, dt, dd, .blog-address-open",
+        ),
+      )
+        .filter((child) => {
+          const rect = child.getBoundingClientRect()
+          return (
+            rect.left < Math.max(0, bounds.left) - 1 ||
+            rect.right > Math.min(window.innerWidth, bounds.right) + 1 ||
+            (topbar !== null && (rect.top < bounds.top - 1 || rect.bottom > bounds.bottom + 1))
+          )
+        })
+        .map((child) => child.className || child.tagName)
+    }),
+    "address rectangles must fit their container",
+  ).toEqual([])
+  expect(
+    await container.evaluate((element) => element.scrollWidth - element.clientWidth),
+  ).toBeLessThanOrEqual(1)
+}
+
 function childHasExited(child: ChildProcess): boolean {
   return child.exitCode !== null || child.signalCode !== null
 }
@@ -973,7 +1015,9 @@ test("edits, changes visibility, and publishes only the selected public note", a
     await betaDeletion.uncheck()
     await expect(alphaChange).toBeChecked()
     await review.getByRole("button", { name: "验证并发布" }).click()
-    await expect(page.getByRole("status", { name: "发布状态" })).toContainText("部署成功")
+    await expect(page.getByRole("status", { name: "发布状态" })).toContainText(
+      "发布成功，暂时无法确认部署状态。",
+    )
 
     const remoteAlpha = await git(repository.root, ["show", "origin/main:content/life/alpha.md"])
     expect(remoteAlpha.stdout).toContain("selected alpha edit")
@@ -1059,7 +1103,9 @@ test("repairs legacy master and publishes the exact selection", async () => {
     await expect(review.getByRole("alert")).toContainText("本地 master")
     await review.getByRole("button", { name: "安全切换到 main 并继续" }).click()
     await expect(review).toHaveCount(0)
-    await expect(page.getByRole("status", { name: "发布状态" })).toContainText("部署成功")
+    await expect(page.getByRole("status", { name: "发布状态" })).toContainText(
+      "发布成功，暂时无法确认部署状态。",
+    )
 
     await expect.poll(() => gitOutput(garden.root, ["branch", "--show-current"])).toBe("main")
     await expect
@@ -1155,6 +1201,8 @@ test("manages independent blogs across safe application restarts", async () => {
     noteTitle: "Second Garden Note",
     noteBody: "second garden only",
   })
+  const website = `https://example.com/${"long-garden-address/".repeat(12)}`
+  await writeFile(join(first.root, "quartz.config.yaml"), `configuration:\n  baseUrl: ${website}\n`)
   const stateRoot = await createTemporaryDirectory("garden-publisher-e2e-state-")
   const registry = join(stateRoot, "blogs.json")
   const relaunchMarker = join(stateRoot, "relaunch-requested")
@@ -1175,6 +1223,38 @@ test("manages independent blogs across safe application restarts", async () => {
     await expect(page.locator('main[data-workspace-diagnostics="ready"]')).toBeVisible()
     await expect(page.getByRole("button", { name: "切换博客：Knowledge Garden" })).toBeVisible()
     await expect(page.getByRole("button", { name: /First Garden Note，公开/ })).toBeVisible()
+
+    const summary = page.locator(".blog-switcher-summary")
+    await expectBlogAddresses(summary, first.root, website)
+    const trigger = page.getByRole("button", { name: "切换博客：Knowledge Garden" })
+    await trigger.focus()
+    await page.keyboard.press("Tab")
+    await expect(
+      summary.getByRole("button", { name: "打开 Knowledge Garden 的网站" }),
+    ).toBeFocused()
+    await trigger.focus()
+    await page.keyboard.press("ArrowDown")
+    const menu = page.getByRole("menu", { name: "选择博客" })
+    await expectBlogAddresses(menu, first.root, website)
+    await expect(menu.getByRole("menuitemradio")).toBeFocused()
+    await page.keyboard.press("ArrowDown")
+    await expect(menu.getByRole("menuitem", { name: "打开 Knowledge Garden 的网站" })).toBeFocused()
+    await expect(page.locator("button button, button a, a button")).toHaveCount(0)
+    await menu.getByRole("menuitem", { name: "管理博客" }).click()
+    const manager = page.getByRole("dialog", { name: "管理博客" })
+    await expectBlogAddresses(manager, first.root, website)
+    await page.setViewportSize({ width: 900, height: 720 })
+    await expectBlogAddresses(summary, first.root, website)
+    await expectBlogAddresses(manager, first.root, website)
+    await expect(page.locator("button button, button a, a button")).toHaveCount(0)
+    await manager.getByRole("button", { name: "编辑 Knowledge Garden 的网站地址" }).click()
+    await expect(manager.getByText(`当前自动读取：${website}`, { exact: true })).toBeVisible()
+    await expect(manager.getByLabel("网站地址", { exact: true })).toBeVisible()
+    expect(
+      await manager.evaluate((element) => element.scrollWidth - element.clientWidth),
+    ).toBeLessThanOrEqual(1)
+    await manager.getByRole("button", { name: "取消编辑网站地址" }).click()
+    await page.getByRole("button", { name: "关闭博客管理" }).click()
 
     await page.getByRole("button", { name: "切换博客：Knowledge Garden" }).click()
     await page.getByRole("menuitem", { name: "添加本地博客" }).click()
@@ -1228,17 +1308,29 @@ test("manages independent blogs across safe application restarts", async () => {
     const switcher = page.getByRole("button", { name: "切换博客：Second Garden" })
     await expect(switcher).toBeVisible()
     await expect(switcher.locator("strong")).toHaveText("Second Garden")
-    await expect(switcher.locator("small")).toBeHidden()
+    await expectBlogAddresses(page.locator(".blog-switcher-summary"), second.root)
     await switcher.click()
     const narrowMenu = page.getByRole("menu", { name: "选择博客" })
     await expect(narrowMenu).toBeVisible()
-    await expect(narrowMenu.locator(".blog-menu-copy small")).toBeHidden()
+    await expectBlogAddresses(narrowMenu, second.root)
     const manage = narrowMenu.getByRole("menuitem", { name: "管理博客" })
     await expect(manage).toBeVisible()
     await expect(manage).toBeEnabled()
     await manage.click()
     await expect(narrowMenu).toHaveCount(0)
-    await expect(page.getByRole("dialog", { name: "管理博客" })).toBeVisible()
+    const narrowManager = page.getByRole("dialog", { name: "管理博客" })
+    await expect(narrowManager).toBeVisible()
+    await expectBlogAddresses(narrowManager, second.root)
+    await expect(page.locator("button button, button a, a button")).toHaveCount(0)
+    await narrowManager.getByRole("button", { name: "编辑 Second Garden 的网站地址" }).click()
+    await expect(
+      narrowManager.getByText(
+        "尚未配置网站地址。可以输入网站地址，或在 Quartz 配置中设置 baseUrl。",
+      ),
+    ).toBeVisible()
+    expect(
+      await narrowManager.evaluate((element) => element.scrollWidth - element.clientWidth),
+    ).toBeLessThanOrEqual(1)
     await page.getByRole("button", { name: "关闭博客管理" }).click()
     await expect(page.getByRole("button", { name: "切换博客：Second Garden" })).toBeVisible()
   } finally {
