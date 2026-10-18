@@ -11,7 +11,12 @@ import {
   resolveBlogRegistryFile,
   resolveE2eCloneSource,
 } from "../../src/main/blogRuntime"
-import type { BlogRecord, BlogRegistryState, BlogRegistryView } from "../../src/shared/contracts"
+import type {
+  BlogCandidateInspection,
+  BlogRecord,
+  BlogRegistryState,
+  BlogRegistryView,
+} from "../../src/shared/contracts"
 import { BlogAddressError, normalizePublicWebsite } from "../../src/main/services/blogAddresses"
 import { BlogImportError } from "../../src/main/services/blogImport"
 import { createPublisherCloseCoordinator } from "../../src/main/publisherServices"
@@ -90,7 +95,7 @@ function managementFixture() {
     ...addressDependencies(),
     registry,
     importer: { clone: vi.fn(), install: vi.fn() },
-    inspect: vi.fn(async (path: string) => ({
+    inspect: vi.fn(async (path: string): Promise<BlogCandidateInspection> => ({
       valid: true as const,
       canonicalPath: path,
       needsInstall: false,
@@ -599,6 +604,111 @@ describe("blog management adapter", () => {
       expect(fixture.addresses.describe).not.toHaveBeenCalled()
     },
   )
+
+  it("validates the current workspace before resolving and opening its link", async () => {
+    const fixture = managementFixture()
+    const current = state()
+    const order: string[] = []
+    fixture.registry.load.mockImplementation(async () => {
+      order.push("load")
+      return current
+    })
+    fixture.inspect.mockImplementation(async () => {
+      await Promise.resolve()
+      order.push("inspect")
+      return { valid: true, canonicalPath: first.canonicalPath, needsInstall: false }
+    })
+    fixture.addresses.resolveLink.mockImplementation(async () => {
+      order.push("resolve")
+      return "https://garden.example/"
+    })
+    fixture.openExternal.mockImplementation(async () => {
+      order.push("open")
+    })
+
+    await fixture.services.openLink({ id: first.id, kind: "website" })
+
+    expect(fixture.inspect).toHaveBeenCalledExactlyOnceWith(first.canonicalPath)
+    expect(fixture.addresses.resolveLink).toHaveBeenCalledExactlyOnceWith(
+      current,
+      first.id,
+      "website",
+    )
+    expect(fixture.openExternal).toHaveBeenCalledExactlyOnceWith("https://garden.example/")
+    expect(order).toEqual(["load", "inspect", "resolve", "open"])
+  })
+
+  it("rejects an unregistered link id without inspection or resolution", async () => {
+    const fixture = managementFixture()
+
+    const operation = fixture.services.openLink({ id: "missing-blog", kind: "website" })
+    await expect(operation).rejects.toBeInstanceOf(BlogAddressError)
+    await expect(operation).rejects.toMatchObject({
+      code: "LINK_UNAVAILABLE",
+      message: "Blog link is unavailable",
+    })
+
+    expect(fixture.inspect).not.toHaveBeenCalled()
+    expect(fixture.addresses.resolveLink).not.toHaveBeenCalled()
+    expect(fixture.openExternal).not.toHaveBeenCalled()
+  })
+
+  it.each(["invalid", "throws", "different path"] as const)(
+    "rejects a manual website link with a safe error when workspace inspection %s",
+    async (failure) => {
+      const fixture = managementFixture()
+      fixture.registry.load.mockResolvedValue({
+        ...state(),
+        blogs: [{ ...first, websiteUrl: "https://garden.example/" }],
+      })
+      if (failure === "invalid") {
+        fixture.inspect.mockResolvedValue({
+          valid: false,
+          code: "SECRET",
+          message: "C:\\secret\\missing",
+        })
+      } else if (failure === "throws") {
+        fixture.inspect.mockRejectedValue(new Error("Could not read C:\\secret\\missing"))
+      } else {
+        fixture.inspect.mockResolvedValue({
+          valid: true,
+          canonicalPath: second.canonicalPath,
+          needsInstall: false,
+        })
+      }
+
+      const operation = fixture.services.openLink({ id: first.id, kind: "website" })
+      await expect(operation).rejects.toBeInstanceOf(BlogAddressError)
+      await expect(operation).rejects.toMatchObject({
+        code: "LINK_UNAVAILABLE",
+        message: "Blog link is unavailable",
+      })
+
+      expect(fixture.inspect).toHaveBeenCalledExactlyOnceWith(first.canonicalPath)
+      expect(fixture.addresses.resolveLink).not.toHaveBeenCalled()
+      expect(fixture.openExternal).not.toHaveBeenCalled()
+    },
+  )
+
+  it("uses platform path case semantics when validating a link workspace", async () => {
+    const fixture = managementFixture()
+    fixture.inspect.mockResolvedValue({
+      valid: true,
+      canonicalPath: first.canonicalPath.toUpperCase(),
+      needsInstall: false,
+    })
+
+    const operation = fixture.services.openLink({ id: first.id, kind: "website" })
+    if (process.platform === "win32") {
+      await expect(operation).resolves.toBeUndefined()
+      expect(fixture.openExternal).toHaveBeenCalledExactlyOnceWith("https://garden.example/")
+    } else {
+      await expect(operation).rejects.toEqual(new BlogAddressError("LINK_UNAVAILABLE"))
+      expect(fixture.addresses.resolveLink).not.toHaveBeenCalled()
+      expect(fixture.openExternal).not.toHaveBeenCalled()
+    }
+    expect(fixture.inspect).toHaveBeenCalledExactlyOnceWith(first.canonicalPath)
+  })
 
   it("reloads and resolves every open request and passes only the trusted result to the opener", async () => {
     const fixture = managementFixture()

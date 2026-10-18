@@ -421,6 +421,13 @@ export function createBlogManagementAdapter(dependencies: {
       },
       async openLink(request) {
         const state = await dependencies.registry.load()
+        const blog = state.blogs.find((candidate) => candidate.id === request.id)
+        if (!blog) throw new BlogAddressError("LINK_UNAVAILABLE")
+        try {
+          await validate(blog, dependencies.inspect)
+        } catch {
+          throw new BlogAddressError("LINK_UNAVAILABLE")
+        }
         const url = await dependencies.addresses.resolveLink(state, request.id, request.kind)
         try {
           await dependencies.openExternal(url)
