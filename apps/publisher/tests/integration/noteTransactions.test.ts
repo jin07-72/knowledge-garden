@@ -315,6 +315,48 @@ describe("note visibility transactions", () => {
     expect(await exists(join(workspace, source))).toBe(false)
   })
 
+  it("rejects a target domain replaced by a file before execution without changing the source", async () => {
+    const workspace = await garden({ git: true })
+    const source = "content/reading/active-recall.md"
+    const targetDirectory = join(workspace, "private", "reading")
+    const markdown = "---\ntitle: Active recall\n---\n\nPractice retrieval.\n"
+    await rm(targetDirectory, { recursive: true })
+    await put(workspace, source, markdown)
+
+    const plan = await planVisibilityChange({ workspace, path: source, visibility: "private" })
+    await writeFile(targetDirectory, "not a directory")
+
+    await expect(executeVisibilityChange(plan, { workspace })).rejects.toMatchObject({
+      code: "TRANSACTION_PLAN_BLOCKED",
+      details: { issue: "UNSAFE_TARGET", path: "private/reading" },
+    })
+    await expect(readFile(join(workspace, source), "utf8")).resolves.toBe(markdown)
+  })
+
+  it("rejects a target domain replaced by a link before execution without changing the source", async () => {
+    const workspace = await garden({ git: true })
+    const source = "content/reading/active-recall.md"
+    const targetDirectory = join(workspace, "private", "reading")
+    const linkedDirectory = join(workspace, "private", "linked-reading")
+    const markdown = "---\ntitle: Active recall\n---\n\nPractice retrieval.\n"
+    await rm(targetDirectory, { recursive: true })
+    await mkdir(linkedDirectory)
+    await put(workspace, source, markdown)
+
+    const plan = await planVisibilityChange({ workspace, path: source, visibility: "private" })
+    await symlink(
+      linkedDirectory,
+      targetDirectory,
+      process.platform === "win32" ? "junction" : "dir",
+    )
+
+    await expect(executeVisibilityChange(plan, { workspace })).rejects.toMatchObject({
+      code: "TRANSACTION_PLAN_BLOCKED",
+      details: { issue: "UNSAFE_TARGET", path: "private/reading" },
+    })
+    await expect(readFile(join(workspace, source), "utf8")).resolves.toBe(markdown)
+  })
+
   it("rejects a target domain replaced by a file after planning without changing the source", async () => {
     const workspace = await garden({ git: true })
     const source = "content/reading/active-recall.md"

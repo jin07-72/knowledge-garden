@@ -495,6 +495,35 @@ async function ensureStateDirectories(workspace: string): Promise<void> {
   }
 }
 
+async function validateVisibilityTargetDomainDirectory(
+  workspace: string,
+  targetPath: string,
+): Promise<void> {
+  const target = parseNotePath(targetPath)
+  const rootPath = target.root
+  const domainPath = `${target.root}/${target.domain}`
+  const root = absolutePath(workspace, rootPath)
+  const directory = absolutePath(workspace, domainPath)
+
+  try {
+    await ensureSafeDirectory(root, workspace)
+  } catch {
+    throw transactionError("TRANSACTION_STALE", "The target visibility root is unavailable.", {
+      path: rootPath,
+    })
+  }
+
+  try {
+    await ensureSafeDirectory(directory, root)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return
+    throw transactionError("TRANSACTION_PLAN_BLOCKED", "The target domain directory is unsafe.", {
+      issue: "UNSAFE_TARGET",
+      path: domainPath,
+    })
+  }
+}
+
 async function ensureVisibilityTargetDomainDirectory(
   workspace: string,
   targetPath: string,
@@ -3059,6 +3088,9 @@ async function execute(
   }
   const verified = await verifyPlan(rawPlan, expectedKind, context.workspace)
   const { plan, workspace, key } = verified
+  if (plan.kind === "visibility") {
+    await validateVisibilityTargetDomainDirectory(workspace, plan.target)
+  }
   const domains = await captureNoteDomainSnapshot(workspace).catch(() => {
     throw transactionError("TRANSACTION_STALE", "The domain catalog is unavailable.")
   })
