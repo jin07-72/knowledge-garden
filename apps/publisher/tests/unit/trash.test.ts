@@ -1,0 +1,486 @@
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { afterEach, describe, expect, it, vi } from "vitest"
+import { createElectronTrashAdapter, trashManagedNote } from "../../src/main/services/trash"
+import { createNote, internalRecoveryKey } from "../../src/main/services/noteFiles"
+import { reconcileTrashRecovery } from "../../src/main/services/trashRecovery"
+
+const temporaryDirectories: string[] = []
+
+afterEach(async () => {
+  await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true })))
+})
+
+async function garden(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "garden-trash-"))
+  temporaryDirectories.push(root)
+  for (const domain of ["technology", "reading", "language", "life"]) {
+    await markDomain(root, domain)
+  }
+  await mkdir(join(root, "content", "_assets", "daily"), { recursive: true })
+  await writeFile(join(root, "content", "life", "daily.md"), "# Daily")
+  await writeFile(join(root, "content", "_assets", "daily", "chart.png"), "chart")
+  return root
+}
+
+async function markDomain(root: string, domain: string): Promise<void> {
+  await mkdir(join(root, "content", domain), { recursive: true })
+  await mkdir(join(root, "private", domain), { recursive: true })
+  await writeFile(
+    join(root, "content", domain, "index.md"),
+    `---\ngardenDomain: true\ntitle: ${domain}\ndescription: Test domain.\n---\n`,
+  )
+}
+
+describe("safe note trash", () => {
+  it("retains attachments shared by two custom discovered domains", async () => {
+    const root = await garden()
+    await markDomain(root, "artificial-intelligence")
+    await markDomain(root, "machine-learning")
+    await writeFile(join(root, "content", "artificial-intelligence", "daily.md"), "# AI")
+    await writeFile(join(root, "content", "machine-learning", "daily.md"), "# ML")
+    const trashItem = vi.fn(async (target: string) =>
+      rename(target, join(root, "recycled-custom-note.md")),
+    )
+
+    await expect(
+      trashManagedNote({
+        workspace: root,
+        path: "content/artificial-intelligence/daily.md",
+        trash: { trashItem },
+        isTracked: async () => false,
+      }),
+    ).resolves.toMatchObject({ attachmentCleanup: { status: "retained-ambiguous" } })
+    expect(trashItem).toHaveBeenCalledOnce()
+  })
+
+  it("rejects a note after its domain marker is removed", async () => {
+    const root = await garden()
+    await rm(join(root, "content", "life", "index.md"))
+    const trashItem = vi.fn(async () => undefined)
+
+    await expect(
+      trashManagedNote({
+        workspace: root,
+        path: "content/life/daily.md",
+        trash: { trashItem },
+        isTracked: async () => false,
+      }),
+    ).rejects.toMatchObject({ code: "NOTE_FILE_INVALID" })
+    expect(trashItem).not.toHaveBeenCalled()
+  })
+  it("rejects paths outside managed note roots before calling the Recycle Bin", async () => {
+    const root = await garden()
+    const trashItem = vi.fn(async () => undefined)
+
+    await expect(
+      trashManagedNote({
+        workspace: root,
+        path: "../outside.md",
+        trash: { trashItem },
+        isTracked: async () => false,
+      }),
+    ).rejects.toMatchObject({ code: "NOTE_FILE_INVALID" })
+    expect(trashItem).not.toHaveBeenCalled()
+  })
+
+  it("moves the verified note and its owned attachment directory to the Recycle Bin", async () => {
+    const root = await garden()
+    const recycle = await mkdtemp(join(tmpdir(), "garden-recycle-"))
+    temporaryDirectories.push(recycle)
+    let sequence = 0
+    const trashItem = vi.fn(async (target: string) => {
+      sequence += 1
+      await rename(target, join(recycle, `item-${sequence}`))
+    })
+
+    await expect(
+      trashManagedNote({
+        workspace: root,
+        path: "content/life/daily.md",
+        trash: { trashItem },
+        isTracked: async () => true,
+      }),
+    ).resolves.toEqual({
+      path: "content/life/daily.md",
+      pendingPublicDeletion: "content/life/daily.md",
+      historyWarning: true,
+      attachmentCleanup: { status: "trashed" },
+    })
+    expect(trashItem).toHaveBeenCalledTimes(2)
+    expect(trashItem.mock.calls[0]![0]).toMatch(/[\\/]content[\\/]life[\\/]daily\.md$/)
+    expect(trashItem.mock.calls[1]![0]).toMatch(/[\\/]content[\\/]_assets[\\/]daily$/)
+    expect(trashItem.mock.calls[0]![0]).not.toBe(join(root, "content", "life", "daily.md"))
+    expect(trashItem.mock.calls[1]![0]).not.toBe(join(root, "content", "_assets", "daily"))
+    await expect(readFile(join(recycle, "item-2", "chart.png"), "utf8")).resolves.toBe("chart")
+    await rename(join(recycle, "item-1"), trashItem.mock.calls[0]![0])
+    await rename(join(recycle, "item-2"), trashItem.mock.calls[1]![0])
+    await expect(
+      reconcileTrashRecovery(root, () => internalRecoveryKey(root, false), {
+        maximumElapsedMs: 5_000,
+        now: () => 0,
+      }),
+    ).resolves.toEqual({
+      restored: expect.arrayContaining(["content/life/daily.md", "content/_assets/daily"]),
+      conflicts: [],
+    })
+    await expect(readFile(join(root, "content", "life", "daily.md"), "utf8")).resolves.toBe(
+      "# Daily",
+    )
+    await expect(
+      readFile(join(root, "content", "_assets", "daily", "chart.png"), "utf8"),
+    ).resolves.toBe("chart")
+  })
+
+  it("retains ambiguous same-slug attachments shared by notes in different domains", async () => {
+    const root = await garden()
+    await mkdir(join(root, "content", "reading"), { recursive: true })
+    await writeFile(join(root, "content", "reading", "daily.md"), "# Other daily")
+    const recycled = join(root, "recycled-note.md")
+    const trashItem = vi.fn(async (target: string) => rename(target, recycled))
+
+    await expect(
+      trashManagedNote({
+        workspace: root,
+        path: "content/life/daily.md",
+        trash: { trashItem },
+        isTracked: async () => true,
+      }),
+    ).resolves.toEqual({
+      path: "content/life/daily.md",
+      pendingPublicDeletion: "content/life/daily.md",
+      historyWarning: true,
+      attachmentCleanup: {
+        status: "retained-ambiguous",
+        message: expect.stringContaining("slug"),
+      },
+    })
+    expect(trashItem).toHaveBeenCalledOnce()
+    await expect(
+      readFile(join(root, "content", "_assets", "daily", "chart.png"), "utf8"),
+    ).resolves.toBe("chart")
+  })
+
+  it("does not report ambiguous attachment retention when no attachment directory exists", async () => {
+    const root = await garden()
+    await rm(join(root, "content", "_assets", "daily"), { recursive: true })
+    await mkdir(join(root, "content", "reading"), { recursive: true })
+    await writeFile(join(root, "content", "reading", "daily.md"), "# Other daily")
+    const trashItem = vi.fn(async (target: string) =>
+      rename(target, join(root, "recycled-note.md")),
+    )
+
+    await expect(
+      trashManagedNote({
+        workspace: root,
+        path: "content/life/daily.md",
+        trash: { trashItem },
+        isTracked: async () => false,
+      }),
+    ).resolves.toMatchObject({ attachmentCleanup: { status: "not-found" } })
+    expect(trashItem).toHaveBeenCalledOnce()
+  })
+
+  it("keeps an attachment replacement created inside trashItem and stages the recoverable original", async () => {
+    const root = await garden()
+    const note = join(root, "content", "life", "daily.md")
+    const attachments = join(root, "content", "_assets", "daily")
+    const recycle = await mkdtemp(join(tmpdir(), "garden-adversarial-recycle-"))
+    temporaryDirectories.push(recycle)
+    let call = 0
+    const trashItem = vi.fn(async (staged: string) => {
+      call += 1
+      if (call === 2) {
+        await mkdir(attachments)
+        await writeFile(join(attachments, "replacement.png"), "replacement attachment")
+      }
+      await rename(staged, join(recycle, `original-${call}`))
+    })
+
+    await expect(
+      trashManagedNote({
+        workspace: root,
+        path: "content/life/daily.md",
+        trash: { trashItem },
+        isTracked: async () => false,
+      }),
+    ).resolves.toMatchObject({ attachmentCleanup: { status: "trashed" } })
+    await expect(readFile(note, "utf8")).rejects.toMatchObject({ code: "ENOENT" })
+    await expect(readFile(join(attachments, "replacement.png"), "utf8")).resolves.toBe(
+      "replacement attachment",
+    )
+    await expect(readFile(join(recycle, "original-1"), "utf8")).resolves.toBe("# Daily")
+    await expect(readFile(join(recycle, "original-2", "chart.png"), "utf8")).resolves.toBe("chart")
+  })
+
+  it("restores staged attachments when another instance creates a same-slug owner", async () => {
+    const root = await garden()
+    await mkdir(join(root, "content", "reading"), { recursive: true })
+    const recycle = await mkdtemp(join(tmpdir(), "garden-owner-race-recycle-"))
+    temporaryDirectories.push(recycle)
+    let call = 0
+    const trashItem = vi.fn(async (target: string) => {
+      call += 1
+      await rename(target, join(recycle, `item-${call}`))
+    })
+
+    const receipt = await trashManagedNote(
+      {
+        workspace: root,
+        path: "content/life/daily.md",
+        trash: { trashItem },
+        isTracked: async () => false,
+      },
+      {
+        afterAttachmentStage: async () => {
+          await writeFile(join(root, "content", "reading", "daily.md"), "# New owner")
+        },
+      },
+    )
+
+    expect(receipt.attachmentCleanup).toMatchObject({ status: "retained-ambiguous" })
+    expect(trashItem).toHaveBeenCalledOnce()
+    await expect(
+      readFile(join(root, "content", "_assets", "daily", "chart.png"), "utf8"),
+    ).resolves.toBe("chart")
+  })
+
+  it("retains staged attachments when an existing folder becomes a marked same-slug domain", async () => {
+    const root = await garden()
+    const lateDomain = join(root, "content", "late-domain")
+    await mkdir(lateDomain, { recursive: true })
+    const recycle = await mkdtemp(join(tmpdir(), "garden-late-domain-recycle-"))
+    temporaryDirectories.push(recycle)
+    let calls = 0
+    const trashItem = vi.fn(async (target: string) => {
+      calls += 1
+      await rename(target, join(recycle, `item-${calls}`))
+    })
+
+    const receipt = await trashManagedNote(
+      {
+        workspace: root,
+        path: "content/life/daily.md",
+        trash: { trashItem },
+        isTracked: async () => false,
+      },
+      {
+        afterAttachmentStage: async () => {
+          await writeFile(
+            join(lateDomain, "index.md"),
+            "---\ngardenDomain: true\ntitle: Late domain\ndescription: Newly marked domain.\n---\n",
+          )
+          await writeFile(join(lateDomain, "daily.md"), "# Late owner")
+        },
+      },
+    )
+
+    expect(receipt.attachmentCleanup).toMatchObject({ status: "retained-ambiguous" })
+    expect(trashItem).toHaveBeenCalledOnce()
+    await expect(
+      readFile(join(root, "content", "_assets", "daily", "chart.png"), "utf8"),
+    ).resolves.toBe("chart")
+    await expect(readFile(join(lateDomain, "daily.md"), "utf8")).resolves.toBe("# Late owner")
+  })
+
+  it.each(["removed", "replaced"] as const)(
+    "restores staged attachments when a domain marker is %s",
+    async (mutation) => {
+      const root = await garden()
+      const landing = join(root, "content", "life", "index.md")
+      const recoveryRoot = join(root, ".garden-publisher", "trash-recovery", "indexed-transactions")
+      const recycle = await mkdtemp(join(tmpdir(), `garden-domain-${mutation}-recycle-`))
+      temporaryDirectories.push(recycle)
+      let calls = 0
+      let stagedTransactions = 0
+      const trashItem = vi.fn(async (target: string) => {
+        calls += 1
+        await rename(target, join(recycle, `item-${calls}`))
+      })
+
+      const receipt = await trashManagedNote(
+        {
+          workspace: root,
+          path: "content/life/daily.md",
+          trash: { trashItem },
+          isTracked: async () => false,
+        },
+        {
+          afterAttachmentStage: async () => {
+            stagedTransactions = (await readdir(recoveryRoot, { recursive: true })).filter((path) =>
+              path.endsWith("journal.json"),
+            ).length
+            await rm(landing)
+            if (mutation === "replaced") {
+              await writeFile(landing, "---\ngardenDomain: false\n---\n")
+            }
+          },
+        },
+      )
+
+      expect(receipt.attachmentCleanup).toMatchObject({ status: "retained-ambiguous" })
+      expect(trashItem).toHaveBeenCalledOnce()
+      await expect(
+        readFile(join(root, "content", "_assets", "daily", "chart.png"), "utf8"),
+      ).resolves.toBe("chart")
+      expect(
+        (await readdir(recoveryRoot, { recursive: true })).filter((path) =>
+          path.endsWith("journal.json"),
+        ),
+      ).toHaveLength(stagedTransactions - 1)
+    },
+  )
+
+  it("holds every same-slug note lease until attachment ownership cleanup finishes", async () => {
+    const root = await garden()
+    await mkdir(join(root, "content", "reading"), { recursive: true })
+    const recycle = await mkdtemp(join(tmpdir(), "garden-owner-lease-recycle-"))
+    temporaryDirectories.push(recycle)
+    let call = 0
+    let competingError: unknown
+
+    await trashManagedNote(
+      {
+        workspace: root,
+        path: "content/life/daily.md",
+        trash: {
+          trashItem: async (target) => {
+            call += 1
+            await rename(target, join(recycle, `item-${call}`))
+          },
+        },
+        isTracked: async () => false,
+      },
+      {
+        afterAttachmentStage: async () => {
+          try {
+            await createNote(
+              {
+                workspace: root,
+                visibility: "public",
+                domain: "reading",
+                slug: "daily",
+                title: "Competing owner",
+                date: "2026-09-29",
+                description: "Must wait for deletion",
+                tags: ["life"],
+              },
+              { lockWaitMs: 5, delay: async () => undefined },
+            )
+          } catch (error) {
+            competingError = error
+          }
+        },
+      },
+    )
+
+    expect(competingError).toMatchObject({ code: "NOTE_FILE_LOCKED" })
+    await expect(
+      createNote({
+        workspace: root,
+        visibility: "public",
+        domain: "reading",
+        slug: "daily",
+        title: "New owner",
+        date: "2026-09-29",
+        description: "Created after cleanup",
+        tags: ["life"],
+      }),
+    ).resolves.toMatchObject({ path: "content/reading/daily.md" })
+  })
+
+  it("refuses to restore an attachment tree whose signed contents were modified", async () => {
+    const root = await garden()
+    const recycle = await mkdtemp(join(tmpdir(), "garden-modified-attachment-recycle-"))
+    temporaryDirectories.push(recycle)
+    const staged: string[] = []
+    await trashManagedNote({
+      workspace: root,
+      path: "content/life/daily.md",
+      trash: {
+        trashItem: async (target) => {
+          staged.push(target)
+          await rename(target, join(recycle, `item-${staged.length}`))
+        },
+      },
+      isTracked: async () => false,
+    })
+    await rename(join(recycle, "item-2"), staged[1]!)
+    await writeFile(join(staged[1]!, "chart.png"), "modified")
+
+    await expect(
+      reconcileTrashRecovery(root, () => internalRecoveryKey(root, false)),
+    ).resolves.toEqual({ restored: [], conflicts: ["content/_assets/daily"] })
+  })
+
+  it("refuses to restore an attachment tree containing a symlink", async ({ skip }) => {
+    const root = await garden()
+    const recycle = await mkdtemp(join(tmpdir(), "garden-linked-attachment-recycle-"))
+    temporaryDirectories.push(recycle)
+    const outside = join(root, "outside.png")
+    await writeFile(outside, "outside")
+    const staged: string[] = []
+    await trashManagedNote({
+      workspace: root,
+      path: "content/life/daily.md",
+      trash: {
+        trashItem: async (target) => {
+          staged.push(target)
+          await rename(target, join(recycle, `item-${staged.length}`))
+        },
+      },
+      isTracked: async () => false,
+    })
+    await rename(join(recycle, "item-2"), staged[1]!)
+    await rm(join(staged[1]!, "chart.png"))
+    try {
+      await symlink(outside, join(staged[1]!, "chart.png"), "file")
+    } catch {
+      skip()
+      return
+    }
+
+    await expect(
+      reconcileTrashRecovery(root, () => internalRecoveryKey(root, false)),
+    ).resolves.toEqual({ restored: [], conflicts: ["content/_assets/daily"] })
+  })
+
+  it("returns note success and an attachment warning when the second recycle call fails", async () => {
+    const root = await garden()
+    const recycled = join(root, "recycled-note.md")
+    const trashItem = vi.fn(async (target: string) => {
+      if (target.endsWith("daily.md")) await rename(target, recycled)
+      else throw new Error("Recycle Bin unavailable")
+    })
+
+    await expect(
+      trashManagedNote({
+        workspace: root,
+        path: "content/life/daily.md",
+        trash: { trashItem },
+        isTracked: async () => true,
+      }),
+    ).resolves.toEqual({
+      path: "content/life/daily.md",
+      pendingPublicDeletion: "content/life/daily.md",
+      historyWarning: true,
+      attachmentCleanup: {
+        status: "failed",
+        message: expect.stringContaining("attachments remain"),
+      },
+    })
+    expect(trashItem.mock.calls[1]![0]).toMatch(/[\\/]content[\\/]_assets[\\/]daily$/)
+    await expect(
+      readFile(join(root, "content", "_assets", "daily", "chart.png"), "utf8"),
+    ).resolves.toBe("chart")
+  })
+
+  it("adapts only the injected Electron shell trash capability", async () => {
+    const shellTrash = vi.fn(async (_path: string) => undefined)
+    const adapter = createElectronTrashAdapter({ trashItem: shellTrash })
+    await adapter.trashItem("C:\\garden\\content\\life\\daily.md")
+    expect(shellTrash).toHaveBeenCalledWith("C:\\garden\\content\\life\\daily.md")
+    expect(Object.keys(adapter)).toEqual(["trashItem"])
+  })
+})

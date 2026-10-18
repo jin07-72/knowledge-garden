@@ -1,0 +1,451 @@
+import { basename, dirname, isAbsolute, join, resolve } from "node:path"
+import { realpathSync, statSync, writeFileSync } from "node:fs"
+import { parseGitHubRepositoryUrl } from "../shared/contracts"
+import type {
+  BlogCloneRequest,
+  BlogAddLocalRequest,
+  BlogCandidateInspection,
+  BlogIdRequest,
+  BlogImportProgress,
+  BlogImportReceipt,
+  BlogLinkOpenRequest,
+  BlogPathRequest,
+  BlogRecord,
+  BlogRegistryState,
+  BlogRegistryView,
+  BlogRegistryStatus,
+  BlogRelocateRequest,
+  BlogRenameRequest,
+  BlogSwitchRequest,
+  BlogWebsiteUpdateRequest,
+} from "../shared/contracts"
+import type { BlogRegistry } from "./services/blogRegistry"
+import { BlogImportError, type BlogImportService } from "./services/blogImport"
+import { BlogAddressError, type BlogAddressResolver } from "./services/blogAddresses"
+
+export interface BlogRuntime {
+  active(): Promise<BlogRecord>
+  switchTo(request: { readonly id: string; readonly editorSaved: true }): Promise<void>
+}
+
+export interface BlogRuntimeRegistry {
+  load(): Promise<BlogRegistryState>
+  activate(id: string): Promise<BlogRegistryState>
+}
+
+export interface BlogRuntimeDependencies {
+  readonly registry: BlogRuntimeRegistry
+  readonly inspect: (path: string) => Promise<BlogCandidateInspection>
+  readonly assertIdle: () => Promise<void>
+  readonly dispose: () => Promise<void>
+  readonly relaunch: () => void
+  readonly quit: () => void
+}
+
+function unavailable(): Error & { readonly code: "BLOG_WORKSPACE_UNAVAILABLE" } {
+  return Object.assign(new Error("The selected blog workspace is unavailable."), {
+    code: "BLOG_WORKSPACE_UNAVAILABLE" as const,
+  })
+}
+
+function samePath(left: string, right: string): boolean {
+  return process.platform === "win32"
+    ? left.toLocaleLowerCase("en-US") === right.toLocaleLowerCase("en-US")
+    : left === right
+}
+
+interface E2eMarkerOptions {
+  readonly isPackaged: boolean
+  readonly e2e: boolean
+  readonly marker?: string
+  readonly record?: (path: string, value: string) => void
+}
+
+function e2eMarkerTarget(options: E2eMarkerOptions): string | undefined {
+  if (options.isPackaged || !options.e2e || !options.marker || !isAbsolute(options.marker)) {
+    return undefined
+  }
+  try {
+    const target = resolve(options.marker)
+    const parent = realpathSync(dirname(target))
+    if (!statSync(parent).isDirectory()) return undefined
+    const canonicalTarget = resolve(parent, basename(target))
+    return samePath(canonicalTarget, target) ? canonicalTarget : undefined
+  } catch {
+    return undefined
+  }
+}
+
+export function createE2eMarkerRecorder(
+  options: E2eMarkerOptions & { readonly value: string },
+): (() => void) | undefined {
+  const target = e2eMarkerTarget(options)
+  if (!target) return undefined
+  const record =
+    options.record ??
+    ((path: string, value: string) =>
+      writeFileSync(path, `${value}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" }))
+  return () => record(target, options.value)
+}
+
+export function createRelaunchScheduler(
+  options: E2eMarkerOptions & { readonly relaunch: () => void },
+): () => void {
+  if (!options.isPackaged && options.e2e) {
+    return createE2eMarkerRecorder({ ...options, value: "relaunch-requested" }) ?? (() => undefined)
+  }
+  return options.relaunch
+}
+
+async function validate(
+  record: BlogRecord,
+  inspect: BlogRuntimeDependencies["inspect"],
+): Promise<BlogRecord> {
+  let inspection: BlogCandidateInspection
+  try {
+    inspection = await inspect(record.canonicalPath)
+  } catch {
+    throw unavailable()
+  }
+  if (
+    !inspection.valid ||
+    !samePath(resolve(inspection.canonicalPath), resolve(record.canonicalPath))
+  ) {
+    throw unavailable()
+  }
+  return record
+}
+
+export function createBlogRuntime(dependencies: BlogRuntimeDependencies): BlogRuntime {
+  let switchFlight: Promise<void> | undefined
+
+  const terminate = (): void => {
+    let failure: { readonly error: unknown } | undefined
+    try {
+      try {
+        dependencies.relaunch()
+      } catch (error) {
+        failure = { error }
+      }
+    } finally {
+      try {
+        dependencies.quit()
+      } catch (error) {
+        failure ??= { error }
+      }
+    }
+    if (failure) throw failure.error
+  }
+
+  const active = async (): Promise<BlogRecord> => {
+    const state = await dependencies.registry.load()
+    const record = state.blogs.find((blog) => blog.id === state.activeBlogId)
+    if (!record) throw unavailable()
+    return validate(record, dependencies.inspect)
+  }
+
+  return {
+    active,
+    switchTo(request) {
+      if (request.editorSaved !== true) {
+        return Promise.reject(
+          Object.assign(new Error("Save the editor before switching blogs."), {
+            code: "BLOG_EDITOR_UNSAVED" as const,
+          }),
+        )
+      }
+      if (switchFlight) return switchFlight
+      const operation = (async () => {
+        const state = await dependencies.registry.load()
+        const target = state.blogs.find((blog) => blog.id === request.id)
+        if (!target) throw unavailable()
+        await validate(target, dependencies.inspect)
+        await dependencies.assertIdle()
+        await dependencies.dispose()
+        try {
+          await dependencies.registry.activate(target.id)
+        } catch (error) {
+          try {
+            terminate()
+          } catch {
+            // Activation is the primary failure; terminal failures must not conceal it.
+          }
+          throw error
+        }
+        terminate()
+      })()
+      switchFlight = operation.finally(() => {
+        if (switchFlight === tracked) switchFlight = undefined
+      })
+      const tracked = switchFlight
+      return switchFlight
+    },
+  }
+}
+
+export function resolveBlogRegistryFile(options: {
+  readonly isPackaged: boolean
+  readonly e2e: boolean
+  readonly userDataPath: string
+  readonly override?: string
+}): string {
+  if (!options.isPackaged && options.e2e && options.override && isAbsolute(options.override)) {
+    return resolve(options.override)
+  }
+  return join(options.userDataPath, "blogs.json")
+}
+
+export function resolveE2eCloneSource(options: {
+  readonly isPackaged: boolean
+  readonly e2e: boolean
+  readonly override?: string
+}): string | undefined {
+  if (options.isPackaged || !options.e2e || !options.override || !isAbsolute(options.override)) {
+    return undefined
+  }
+  try {
+    const source = realpathSync(options.override)
+    return statSync(source).isDirectory() ? source : undefined
+  } catch {
+    return undefined
+  }
+}
+
+export interface BlogManagementServices {
+  list(): Promise<BlogRegistryStatus>
+  chooseLocal(): Promise<
+    { readonly path: string; readonly inspection: BlogCandidateInspection } | undefined
+  >
+  addLocal(request: BlogAddLocalRequest): Promise<BlogRegistryView>
+  recoverLocal(request: BlogAddLocalRequest): Promise<BlogRegistryView>
+  clone(request: BlogCloneRequest): Promise<BlogImportReceipt>
+  cancelImport(): Promise<void>
+  install(request: BlogPathRequest): Promise<BlogCandidateInspection>
+  rename(request: BlogRenameRequest): Promise<BlogRegistryView>
+  relocate(request: BlogRelocateRequest): Promise<BlogRegistryView>
+  remove(request: BlogIdRequest): Promise<BlogRegistryView>
+  updateWebsite(request: BlogWebsiteUpdateRequest): Promise<BlogRegistryView>
+  openLink(request: BlogLinkOpenRequest): Promise<void>
+  openFolder(request: BlogIdRequest): Promise<void>
+  switch(request: BlogSwitchRequest): Promise<void>
+  subscribeProgress(listener: (progress: BlogImportProgress) => void): () => void
+}
+
+export interface BlogManagementAdapter {
+  readonly services: BlogManagementServices
+  readonly emitProgress: (progress: BlogImportProgress) => void
+  readonly prepareForShutdown: () => Promise<void>
+  readonly restoreAfterFailedShutdown: () => void
+}
+
+export async function runBlogManagementShutdown(options: {
+  readonly prepare: () => Promise<void>
+  readonly cleanup: (markRestoreUnsafe: () => void) => Promise<void>
+  readonly restore: () => void
+}): Promise<void> {
+  let restoreSafe = true
+  await options.prepare()
+  try {
+    await options.cleanup(() => {
+      restoreSafe = false
+    })
+  } catch (error) {
+    if (restoreSafe) options.restore()
+    throw error
+  }
+}
+
+export function createBlogManagementAdapter(dependencies: {
+  readonly registry: BlogRegistry
+  readonly addresses: BlogAddressResolver
+  readonly openExternal: (url: string) => Promise<void>
+  readonly importer: BlogImportService | (() => BlogImportService)
+  readonly inspect: (path: string) => Promise<BlogCandidateInspection>
+  readonly chooseDirectory: () => Promise<string | undefined>
+  readonly openFolder: (path: string) => Promise<void>
+  readonly switchTo: (request: { readonly id: string; readonly editorSaved: true }) => Promise<void>
+}): BlogManagementAdapter {
+  const listeners = new Set<(progress: BlogImportProgress) => void>()
+  const view = (state: BlogRegistryState): Promise<BlogRegistryView> =>
+    dependencies.addresses.describe(state)
+  let activeImport:
+    | {
+        readonly controller: AbortController
+        readonly result: Promise<unknown>
+        readonly settled: Promise<void>
+      }
+    | undefined
+  let importsOpen = true
+  let terminationUncertain: BlogImportError | undefined
+  const importer = (): BlogImportService =>
+    typeof dependencies.importer === "function" ? dependencies.importer() : dependencies.importer
+  const validWorkspace = async (
+    path: string,
+  ): Promise<Extract<BlogCandidateInspection, { valid: true }>> => {
+    const inspection = await dependencies.inspect(path)
+    if (!inspection.valid) {
+      throw new BlogImportError("VALIDATION_FAILED", "The selected blog could not be validated.")
+    }
+    return inspection
+  }
+  const normalizedClone = (request: BlogCloneRequest): Required<BlogCloneRequest> => {
+    const repository = parseGitHubRepositoryUrl(request.url)
+    if (!repository) {
+      throw new BlogImportError("INVALID_REPOSITORY_URL", "The repository URL is invalid.")
+    }
+    const requestedName = request.name?.trim() ?? ""
+    if (requestedName.length > 80 || /[\u0000-\u001f\u007f-\u009f]/.test(requestedName)) {
+      throw new BlogImportError("VALIDATION_FAILED", "The blog display name is invalid.")
+    }
+    const name = requestedName || repository.repository.slice(0, 80)
+    if (!name) {
+      throw new BlogImportError("VALIDATION_FAILED", "The blog display name is invalid.")
+    }
+    return { ...request, name }
+  }
+  const runImport = <T>(
+    operation: (service: BlogImportService, signal: AbortSignal) => Promise<T>,
+  ): Promise<T> => {
+    if (!importsOpen) {
+      return Promise.reject(
+        new BlogImportError(
+          "IMPORT_UNAVAILABLE",
+          "Blog imports are unavailable while the app is closing.",
+        ),
+      )
+    }
+    if (activeImport) {
+      return Promise.reject(
+        new BlogImportError("IMPORT_ACTIVE", "Another blog import is already running."),
+      )
+    }
+    const controller = new AbortController()
+    const result = Promise.resolve().then(() => operation(importer(), controller.signal))
+    const settled = result.then(
+      () => undefined,
+      (error: unknown) => {
+        if (error instanceof BlogImportError && error.code === "IMPORT_UNAVAILABLE") {
+          terminationUncertain ??= error
+        }
+      },
+    )
+    activeImport = { controller, result, settled }
+    void settled.then(() => {
+      if (activeImport?.controller === controller) activeImport = undefined
+    })
+    return result
+  }
+
+  return {
+    async prepareForShutdown() {
+      importsOpen = false
+      if (terminationUncertain) throw terminationUncertain
+      const current = activeImport
+      if (!current) return
+      current.controller.abort()
+      try {
+        await current.result
+      } catch (error) {
+        if (error instanceof BlogImportError && error.code === "IMPORT_UNAVAILABLE") {
+          terminationUncertain = error
+          throw error
+        }
+        // All other outcomes settled after the importer confirmed that its child process stopped.
+      }
+    },
+    restoreAfterFailedShutdown() {
+      if (terminationUncertain === undefined) importsOpen = true
+    },
+    emitProgress(progress) {
+      for (const listener of listeners) listener(progress)
+    },
+    services: {
+      async list() {
+        const state = await dependencies.registry.load()
+        const active = state.blogs.find((blog) => blog.id === state.activeBlogId)
+        let available = false
+        if (active) {
+          try {
+            const inspection = await dependencies.inspect(active.canonicalPath)
+            available =
+              inspection.valid &&
+              samePath(resolve(inspection.canonicalPath), resolve(active.canonicalPath))
+          } catch {
+            // Availability is intentionally coarse; inspection errors never cross the IPC boundary.
+          }
+        }
+        return {
+          ...(await view(state)),
+          activeAvailability: available ? "available" : "unavailable",
+        }
+      },
+      async chooseLocal() {
+        const path = await dependencies.chooseDirectory()
+        if (!path) return undefined
+        return { path, inspection: await dependencies.inspect(path) }
+      },
+      async addLocal(request) {
+        await validWorkspace(request.path)
+        return view(await dependencies.registry.add(request))
+      },
+      async recoverLocal(request) {
+        await validWorkspace(request.path)
+        return view(await dependencies.registry.recover(request))
+      },
+      clone: (request) =>
+        runImport(async (service, signal) => {
+          const normalized = normalizedClone(request)
+          const receipt = await service.clone(normalized, signal)
+          await dependencies.registry.add({ name: normalized.name, path: receipt.canonicalPath })
+          return receipt
+        }),
+      async cancelImport() {
+        const current = activeImport
+        current?.controller.abort()
+        await current?.settled
+      },
+      install: (request) => runImport((service, signal) => service.install(request.path, signal)),
+      rename: async (request) => view(await dependencies.registry.rename(request.id, request.name)),
+      async relocate(request) {
+        await validWorkspace(request.path)
+        return view(await dependencies.registry.relocate(request.id, request.path))
+      },
+      remove: async (request) => view(await dependencies.registry.remove(request.id)),
+      async updateWebsite(request) {
+        let normalized: string | undefined
+        if (request.websiteUrl !== null) {
+          normalized = dependencies.addresses.normalizeWebsite(request.websiteUrl)
+          if (normalized === undefined) throw new BlogAddressError("INVALID_WEBSITE")
+        }
+        return view(await dependencies.registry.setWebsiteUrl(request.id, normalized))
+      },
+      async openLink(request) {
+        const state = await dependencies.registry.load()
+        const blog = state.blogs.find((candidate) => candidate.id === request.id)
+        if (!blog) throw new BlogAddressError("LINK_UNAVAILABLE")
+        try {
+          await validate(blog, dependencies.inspect)
+        } catch {
+          throw new BlogAddressError("LINK_UNAVAILABLE")
+        }
+        const url = await dependencies.addresses.resolveLink(state, request.id, request.kind)
+        try {
+          await dependencies.openExternal(url)
+        } catch {
+          throw new Error("The blog link could not be opened.")
+        }
+      },
+      async openFolder(request) {
+        const state = await dependencies.registry.load()
+        const blog = state.blogs.find((candidate) => candidate.id === request.id)
+        if (!blog) throw new Error("Blog is not registered")
+        await dependencies.openFolder(blog.canonicalPath)
+      },
+      switch: (request) => dependencies.switchTo(request),
+      subscribeProgress(listener) {
+        listeners.add(listener)
+        return () => listeners.delete(listener)
+      },
+    },
+  }
+}

@@ -1,0 +1,771 @@
+import { describe, expect, it } from "vitest"
+import {
+  detectImageFormat,
+  IMAGE_MAX_DECODED_DIMENSION,
+  IMAGE_MAX_DECODED_PIXELS,
+  imageDataUrl,
+  markdownForImage,
+  normalizeImageName,
+  readBoundedImageMetadata,
+  type ImageFormat,
+} from "../../src/main/services/imageFormats"
+
+// @ts-expect-error Image extensions and MIME types must remain exact pairs.
+const mismatchedImageFormat: ImageFormat = { extension: ".png", mime: "image/jpeg" }
+void mismatchedImageFormat
+
+const ascii = (value: string) => Uint8Array.from(Buffer.from(value, "ascii"))
+const bytes = (...values: number[]) => Uint8Array.from(values)
+const append = (...parts: readonly Uint8Array[]) =>
+  Uint8Array.from(parts.flatMap((part) => [...part]))
+const uint32Bytes = (value: number) =>
+  bytes((value >>> 24) & 0xff, (value >>> 16) & 0xff, (value >>> 8) & 0xff, value & 0xff)
+const uint32LittleEndian = (value: number) =>
+  bytes(value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff)
+const uint16Bytes = (value: number) => bytes((value >>> 8) & 0xff, value & 0xff)
+
+function pngHeader(width: number, height: number): Uint8Array {
+  return append(
+    bytes(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a),
+    uint32Bytes(13),
+    ascii("IHDR"),
+    uint32Bytes(width),
+    uint32Bytes(height),
+    bytes(8, 2, 0, 0, 0),
+  )
+}
+
+function pngDimensions(width: number, height: number): Uint8Array {
+  return append(
+    pngHeader(width, height),
+    bytes(0, 0, 0, 0),
+    uint32Bytes(1),
+    ascii("IDAT"),
+    bytes(0, 0, 0, 0, 0),
+    uint32Bytes(0),
+    ascii("IEND"),
+    bytes(0, 0, 0, 0),
+  )
+}
+
+function jpegHeader(width: number, height: number): Uint8Array {
+  return append(
+    bytes(0xff, 0xd8, 0xff, 0xe0, 0x00, 0x04, 0x00, 0x00),
+    bytes(0xff, 0xc0, 0x00, 0x0b, 0x08, (height >>> 8) & 0xff, height & 0xff),
+    bytes((width >>> 8) & 0xff, width & 0xff, 0x01, 0x01, 0x11, 0x00),
+  )
+}
+
+function jpegDimensions(width: number, height: number): Uint8Array {
+  return append(
+    jpegHeader(width, height),
+    bytes(0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3f, 0x00),
+    bytes(0, 0xff, 0xd9),
+  )
+}
+
+function gifHeader(width: number, height: number): Uint8Array {
+  return append(ascii("GIF89a"), bytes(width & 0xff, width >>> 8, height & 0xff, height >>> 8, 0, 0, 0))
+}
+
+function gifDimensions(width: number, height: number): Uint8Array {
+  return append(
+    gifHeader(width, height),
+    bytes(0x2c, 0, 0, 0, 0, width & 0xff, width >>> 8, height & 0xff, height >>> 8, 0),
+    bytes(2, 1, 0, 0, 0x3b),
+  )
+}
+
+function webpHeader(width: number, height: number): Uint8Array {
+  return append(
+    ascii("RIFF"),
+    uint32LittleEndian(22),
+    ascii("WEBPVP8X"),
+    uint32LittleEndian(10),
+    bytes(0, 0, 0, 0),
+    bytes((width - 1) & 0xff, ((width - 1) >>> 8) & 0xff, ((width - 1) >>> 16) & 0xff),
+    bytes((height - 1) & 0xff, ((height - 1) >>> 8) & 0xff, ((height - 1) >>> 16) & 0xff),
+  )
+}
+
+function webpDimensions(width: number, height: number): Uint8Array {
+  return append(
+    ascii("RIFF"),
+    uint32LittleEndian(40),
+    ascii("WEBPVP8X"),
+    uint32LittleEndian(10),
+    bytes(0, 0, 0, 0),
+    bytes((width - 1) & 0xff, ((width - 1) >>> 8) & 0xff, ((width - 1) >>> 16) & 0xff),
+    bytes((height - 1) & 0xff, ((height - 1) >>> 8) & 0xff, ((height - 1) >>> 16) & 0xff),
+    ascii("VP8 "),
+    uint32LittleEndian(10),
+    bytes(0, 0, 0, 0x9d, 0x01, 0x2a, width & 0xff, width >>> 8, height & 0xff, height >>> 8),
+  )
+}
+
+function webpLossyDimensions(width: number, height: number, payloadBytes: number): Uint8Array {
+  const bytes = new Uint8Array(20 + payloadBytes)
+  bytes.set(ascii("RIFF"), 0)
+  bytes.set(uint32LittleEndian(12 + payloadBytes), 4)
+  bytes.set(ascii("WEBPVP8 "), 8)
+  bytes.set(uint32LittleEndian(payloadBytes), 16)
+  bytes.set([0, 0, 0, 0x9d, 0x01, 0x2a, width & 0xff, width >>> 8, height & 0xff, height >>> 8], 20)
+  return bytes
+}
+
+function webpLosslessDimensions(width: number, height: number, payloadBytes: number): Uint8Array {
+  const bytes = new Uint8Array(20 + payloadBytes)
+  const bits = width - 1 + (height - 1) * 0x4000
+  bytes.set(ascii("RIFF"), 0)
+  bytes.set(uint32LittleEndian(12 + payloadBytes), 4)
+  bytes.set(ascii("WEBPVP8L"), 8)
+  bytes.set(uint32LittleEndian(payloadBytes), 16)
+  bytes.set([0x2f, ...uint32LittleEndian(bits)], 20)
+  return bytes
+}
+
+const uint24LittleEndian = (value: number) =>
+  bytes(value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff)
+
+function webpChunk(type: string, payload: Uint8Array): Uint8Array {
+  return append(ascii(type), uint32LittleEndian(payload.length), payload, payload.length & 1 ? bytes(0) : bytes())
+}
+
+function webpContainer(...chunks: readonly Uint8Array[]): Uint8Array {
+  const body = append(ascii("WEBP"), ...chunks)
+  return append(ascii("RIFF"), uint32LittleEndian(body.length), body)
+}
+
+function vp8Payload(width: number, height: number): Uint8Array {
+  return bytes(0, 0, 0, 0x9d, 0x01, 0x2a, width & 0xff, width >>> 8, height & 0xff, height >>> 8)
+}
+
+function animatedWebp(
+  canvasWidth: number,
+  canvasHeight: number,
+  frameWidth: number,
+  frameHeight: number,
+  x = 0,
+  y = 0,
+): Uint8Array {
+  const frameHeader = append(
+    uint24LittleEndian(x / 2),
+    uint24LittleEndian(y / 2),
+    uint24LittleEndian(frameWidth - 1),
+    uint24LittleEndian(frameHeight - 1),
+    uint24LittleEndian(1),
+    bytes(0),
+  )
+  return webpContainer(
+    webpChunk(
+      "VP8X",
+      append(
+        bytes(0x02, 0, 0, 0),
+        uint24LittleEndian(canvasWidth - 1),
+        uint24LittleEndian(canvasHeight - 1),
+      ),
+    ),
+    webpChunk("ANIM", bytes(0, 0, 0, 0, 0, 0)),
+    webpChunk("ANMF", append(frameHeader, webpChunk("VP8 ", vp8Payload(frameWidth, frameHeight)))),
+  )
+}
+
+function pngChunk(type: string, payload: Uint8Array): Uint8Array {
+  return append(uint32Bytes(payload.length), ascii(type), payload, bytes(0, 0, 0, 0))
+}
+
+function apngDimensions(
+  canvasWidth: number,
+  canvasHeight: number,
+  frameWidth: number,
+  frameHeight: number,
+  x = 0,
+  y = 0,
+): Uint8Array {
+  const frameControl = append(
+    uint32Bytes(0),
+    uint32Bytes(frameWidth),
+    uint32Bytes(frameHeight),
+    uint32Bytes(x),
+    uint32Bytes(y),
+    bytes(0, 1, 0, 1, 0, 0),
+  )
+  return append(
+    bytes(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a),
+    pngChunk(
+      "IHDR",
+      append(uint32Bytes(canvasWidth), uint32Bytes(canvasHeight), bytes(8, 2, 0, 0, 0)),
+    ),
+    pngChunk("fcTL", frameControl),
+    pngChunk("IDAT", bytes()),
+    pngChunk("IDAT", bytes(0)),
+    pngChunk("IEND", bytes()),
+  )
+}
+
+function gifFrameDimensions(
+  canvasWidth: number,
+  canvasHeight: number,
+  frameWidth: number,
+  frameHeight: number,
+  x = 0,
+  y = 0,
+): Uint8Array {
+  return append(
+    gifHeader(canvasWidth, canvasHeight),
+    bytes(
+      0x2c,
+      x & 0xff,
+      x >>> 8,
+      y & 0xff,
+      y >>> 8,
+      frameWidth & 0xff,
+      frameWidth >>> 8,
+      frameHeight & 0xff,
+      frameHeight >>> 8,
+      0,
+    ),
+    bytes(2, 1, 0, 0, 0x3b),
+  )
+}
+
+function avifDimensions(width: number, height: number): Uint8Array {
+  const ispe = append(
+    uint32Bytes(20),
+    ascii("ispe"),
+    bytes(0, 0, 0, 0),
+    uint32Bytes(width),
+    uint32Bytes(height),
+  )
+  const ipco = append(uint32Bytes(8 + ispe.length), ascii("ipco"), ispe)
+  const iprp = append(uint32Bytes(8 + ipco.length), ascii("iprp"), ipco)
+  const meta = append(uint32Bytes(12 + iprp.length), ascii("meta"), bytes(0, 0, 0, 0), iprp)
+  return append(avifHeader("avif"), meta)
+}
+
+function avifWithLargeMediaData(width: number, height: number, payloadBytes: number): Uint8Array {
+  const header = avifDimensions(width, height)
+  const bytes = new Uint8Array(header.length + 8 + payloadBytes)
+  bytes.set(header)
+  bytes.set(uint32Bytes(8 + payloadBytes), header.length)
+  bytes.set(ascii("mdat"), header.length + 4)
+  return bytes
+}
+
+function isoBox(type: string, payload: Uint8Array): Uint8Array {
+  return append(uint32Bytes(8 + payload.length), ascii(type), payload)
+}
+
+function av1Configuration(markerVersion = 0x81): Uint8Array {
+  return isoBox("av1C", bytes(markerVersion, 0, 0, 0))
+}
+
+function av1SampleEntry(width: number, height: number, markerVersion = 0x81): Uint8Array {
+  const visualSampleEntry = new Uint8Array(78)
+  visualSampleEntry.set(uint16Bytes(width), 24)
+  visualSampleEntry.set(uint16Bytes(height), 26)
+  return isoBox("av01", append(visualSampleEntry, av1Configuration(markerVersion)))
+}
+
+function avisSequenceWithLargeLeadingMediaData(
+  displayWidth: number,
+  displayHeight: number,
+  entries: readonly Uint8Array[],
+  payloadBytes: number,
+  reorderTrackBoxes = false,
+): Uint8Array {
+  const trackHeader = new Uint8Array(84)
+  trackHeader.set(uint32Bytes(displayWidth * 0x1_0000), 76)
+  trackHeader.set(uint32Bytes(displayHeight * 0x1_0000), 80)
+  const mdat = new Uint8Array(8 + payloadBytes)
+  mdat.set(uint32Bytes(mdat.length), 0)
+  mdat.set(ascii("mdat"), 4)
+  const stsd = isoBox("stsd", append(bytes(0, 0, 0, 0), uint32Bytes(entries.length), ...entries))
+  const stbl = isoBox("stbl", stsd)
+  const minf = isoBox("minf", stbl)
+  const mdia = isoBox("mdia", minf)
+  const trackChildren = append(
+    ...(reorderTrackBoxes ? [mdia, isoBox("tkhd", trackHeader)] : [isoBox("tkhd", trackHeader), mdia]),
+  )
+  return append(
+    avifHeader("avis"),
+    mdat,
+    isoBox("moov", isoBox("trak", trackChildren)),
+  )
+}
+
+function avifHeader(
+  majorBrand: "avif" | "avis" | "mif1" = "avif",
+  compatibleBrands: readonly string[] = [],
+): Uint8Array {
+  const size = 16 + compatibleBrands.length * 4
+  return append(
+    bytes((size >>> 24) & 0xff, (size >>> 16) & 0xff, (size >>> 8) & 0xff, size & 0xff),
+    ascii("ftyp"),
+    ascii(majorBrand),
+    bytes(0, 0, 0, 0),
+    ...compatibleBrands.map(ascii),
+  )
+}
+
+function extendedAvifHeader(
+  majorBrand: "avif" | "avis" | "mif1" = "avif",
+  compatibleBrands: readonly string[] = [],
+): Uint8Array {
+  const size = 24 + compatibleBrands.length * 4
+  return append(
+    uint32Bytes(1),
+    ascii("ftyp"),
+    uint32Bytes(Math.floor(size / 0x1_0000_0000)),
+    uint32Bytes(size),
+    ascii(majorBrand),
+    bytes(0, 0, 0, 0),
+    ...compatibleBrands.map(ascii),
+  )
+}
+
+function expectInvalid(run: () => unknown): void {
+  expect(run).toThrow(expect.objectContaining({ code: "IMAGE_LIBRARY_INVALID" }))
+}
+
+describe("image format detection", () => {
+  const cases: readonly [string, Uint8Array, ImageFormat][] = [
+    [
+      "photo.png",
+      bytes(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a),
+      { extension: ".png", mime: "image/png" },
+    ],
+    ["photo.jpg", bytes(0xff, 0xd8, 0xff), { extension: ".jpg", mime: "image/jpeg" }],
+    ["photo.jpeg", bytes(0xff, 0xd8, 0xff), { extension: ".jpeg", mime: "image/jpeg" }],
+    ["animation.gif", ascii("GIF87a"), { extension: ".gif", mime: "image/gif" }],
+    ["animation.gif", ascii("GIF89a"), { extension: ".gif", mime: "image/gif" }],
+    [
+      "photo.webp",
+      append(ascii("RIFF"), bytes(0x11, 0x22, 0x33, 0x44), ascii("WEBP")),
+      { extension: ".webp", mime: "image/webp" },
+    ],
+    ["photo.avif", avifHeader("avif"), { extension: ".avif", mime: "image/avif" }],
+    ["sequence.avif", avifHeader("avis"), { extension: ".avif", mime: "image/avif" }],
+    [
+      "compatible.avif",
+      avifHeader("mif1", ["miaf", "avif"]),
+      { extension: ".avif", mime: "image/avif" },
+    ],
+  ]
+
+  it.each(cases)("recognizes %s from its exact signature", (name, header, expected) => {
+    expect(detectImageFormat(header, name)).toEqual(expected)
+  })
+
+  it("accepts supported extensions case-insensitively and normalizes the result", () => {
+    expect(detectImageFormat(bytes(0xff, 0xd8, 0xff), "Portrait.JpEg")).toEqual({
+      extension: ".jpeg",
+      mime: "image/jpeg",
+    })
+  })
+
+  it("detects signatures in Uint8Array views with a nonzero byte offset", () => {
+    const backing = bytes(0xaa, 0xbb, 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xcc)
+    expect(detectImageFormat(backing.subarray(2, 10), "offset.png")).toEqual({
+      extension: ".png",
+      mime: "image/png",
+    })
+  })
+
+  it("rejects truncated and near-match signatures", () => {
+    for (const [name, header] of [
+      ["photo.png", bytes(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a)],
+      ["photo.jpg", bytes(0xff, 0xd8)],
+      ["photo.gif", ascii("GIF89")],
+      ["photo.webp", append(ascii("RIFF"), bytes(0, 0, 0), ascii("WEBP"))],
+      ["photo.avif", avifHeader("avif").slice(0, 15)],
+      ["photo.png", bytes(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0b)],
+      ["photo.gif", ascii("GIF88a")],
+    ] as const)
+      expectInvalid(() => detectImageFormat(header, name))
+  })
+
+  it("rejects extension/signature mismatches and unsupported extensions", () => {
+    const png = bytes(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)
+    expectInvalid(() => detectImageFormat(png, "photo.jpg"))
+    expectInvalid(() => detectImageFormat(png, "photo.svg"))
+    expectInvalid(() => detectImageFormat(png, "photo"))
+  })
+
+  it("accepts normal, extended-size, and box-to-end AVIF ftyp layouts", () => {
+    const normalOver512 = avifHeader(
+      "mif1",
+      Array.from({ length: 126 }, (_, index) => (index === 125 ? "avif" : "miaf")),
+    )
+    const extended = extendedAvifHeader("mif1", ["miaf", "avis"])
+    const toEnd = avifHeader("mif1", ["avif"])
+    toEnd.set(uint32Bytes(0), 0)
+
+    expect(normalOver512).toHaveLength(520)
+    for (const header of [normalOver512, extended, toEnd])
+      expect(detectImageFormat(header, "photo.avif")).toEqual({
+        extension: ".avif",
+        mime: "image/avif",
+      })
+  })
+
+  it("finds a compatible AVIF brand near the 64 KiB validation bound", () => {
+    const compatibleBrands = Array.from({ length: 16_380 }, (_, index) =>
+      index === 16_379 ? "avif" : "miaf",
+    )
+    const header = avifHeader("mif1", compatibleBrands)
+
+    expect(header).toHaveLength(64 * 1024)
+    expect(detectImageFormat(header, "bounded.avif")).toEqual({
+      extension: ".avif",
+      mime: "image/avif",
+    })
+  })
+
+  it("rejects AVIF brands outside the declared leading ftyp box", () => {
+    const strayBrand = append(
+      bytes(0, 0, 0, 16),
+      ascii("free"),
+      ascii("mif1"),
+      bytes(0, 0, 0, 0),
+      ascii("avif"),
+    )
+    const outOfBoundsBrand = append(
+      bytes(0, 0, 0, 16),
+      ascii("ftyp"),
+      ascii("mif1"),
+      bytes(0, 0, 0, 0),
+      ascii("avif"),
+    )
+    for (const header of [strayBrand, outOfBoundsBrand])
+      expectInvalid(() => detectImageFormat(header, "photo.avif"))
+  })
+
+  it("rejects truncated, undersized, and unaligned AVIF ftyp boxes", () => {
+    const normalTruncated = avifHeader("mif1", ["avif"])
+    normalTruncated.set(uint32Bytes(normalTruncated.length + 4), 0)
+    const extendedTruncated = extendedAvifHeader("mif1", ["avif"])
+    extendedTruncated.set(uint32Bytes(extendedTruncated.length + 4), 12)
+    const undersized = append(uint32Bytes(12), ascii("ftyp"), ascii("avif"), bytes(0, 0, 0, 0))
+    const unaligned = append(
+      uint32Bytes(17),
+      ascii("ftyp"),
+      ascii("avif"),
+      bytes(0, 0, 0, 0, 0),
+    )
+
+    for (const header of [normalTruncated, extendedTruncated, undersized, unaligned])
+      expectInvalid(() => detectImageFormat(header, "photo.avif"))
+  })
+
+  it("rejects AVIF ftyp boxes beyond the product bound or safe integer range", () => {
+    const beyondBound = new Uint8Array(64 * 1024 + 4)
+    beyondBound.set(uint32Bytes(beyondBound.length), 0)
+    beyondBound.set(ascii("ftyp"), 4)
+    beyondBound.set(ascii("avif"), 8)
+    const unsafeExtendedSize = append(
+      uint32Bytes(1),
+      ascii("ftyp"),
+      bytes(0x00, 0x20, 0x00, 0x00, 0, 0, 0, 0),
+      ascii("avif"),
+      bytes(0, 0, 0, 0),
+    )
+
+    for (const header of [beyondBound, unsafeExtendedSize])
+      expectInvalid(() => detectImageFormat(header, "photo.avif"))
+  })
+})
+
+describe("bounded image metadata", () => {
+  it.each([
+    ["PNG IHDR", pngHeader(640, 480)],
+    ["JPEG SOF", jpegHeader(640, 480)],
+    ["GIF logical screen", gifHeader(640, 480)],
+    ["WebP VP8X", webpHeader(640, 480)],
+    ["AVIF ispe", avifDimensions(640, 480)],
+  ] as const)("rejects a %s header without complete image payload structure", (_label, input) => {
+    expect(() => readBoundedImageMetadata(input)).toThrow(
+      expect.objectContaining({ code: "IMAGE_LIBRARY_INVALID" }),
+    )
+  })
+
+  it.each([
+    ["PNG", pngDimensions(640, 480), "image/png"],
+    ["JPEG", jpegDimensions(640, 480), "image/jpeg"],
+    ["GIF", gifDimensions(640, 480), "image/gif"],
+    ["animated WebP canvas", webpDimensions(640, 480), "image/webp"],
+    ["AVIF item property", avifWithLargeMediaData(640, 480, 1), "image/avif"],
+  ] as const)("reads %s dimensions without a decoder", (_label, input, mime) => {
+    expect(readBoundedImageMetadata(input)).toEqual({ width: 640, height: 480, mime })
+  })
+
+  it("accepts a structurally complete animated WebP frame", () => {
+    expect(readBoundedImageMetadata(animatedWebp(640, 480, 640, 480))).toEqual({
+      width: 640,
+      height: 480,
+      mime: "image/webp",
+    })
+  })
+
+  it("rejects animation frames whose dimensions exceed their canvas or decode budget", () => {
+    expect(() => readBoundedImageMetadata(animatedWebp(1, 1, 2, 1))).toThrow(
+      expect.objectContaining({ code: "IMAGE_LIBRARY_INVALID" }),
+    )
+    expect(() => readBoundedImageMetadata(animatedWebp(1, 1, 16_385, 1))).toThrow(
+      expect.objectContaining({ code: "IMAGE_LIBRARY_TOO_LARGE" }),
+    )
+  })
+
+  it("rejects GIF frame rectangles beyond the logical screen or decode budget", () => {
+    expect(() => readBoundedImageMetadata(gifFrameDimensions(1, 1, 2, 1))).toThrow(
+      expect.objectContaining({ code: "IMAGE_LIBRARY_INVALID" }),
+    )
+    expect(() => readBoundedImageMetadata(gifFrameDimensions(1, 1, 65_535, 1))).toThrow(
+      expect.objectContaining({ code: "IMAGE_LIBRARY_TOO_LARGE" }),
+    )
+  })
+
+  it("validates APNG frame rectangles while allowing zero-length IDAT chunks", () => {
+    expect(readBoundedImageMetadata(apngDimensions(640, 480, 640, 480))).toEqual({
+      width: 640,
+      height: 480,
+      mime: "image/png",
+    })
+    expect(() => readBoundedImageMetadata(apngDimensions(1, 1, 2, 1))).toThrow(
+      expect.objectContaining({ code: "IMAGE_LIBRARY_INVALID" }),
+    )
+    expect(() => readBoundedImageMetadata(apngDimensions(1, 1, 16_385, 1))).toThrow(
+      expect.objectContaining({ code: "IMAGE_LIBRARY_TOO_LARGE" }),
+    )
+  })
+
+  it("rejects a large-payload container whose declared boundary exceeds the input", () => {
+    const malformedWebp = webpLossyDimensions(640, 480, 1_048_578).subarray(0, -1)
+    const malformedAvif = avifWithLargeMediaData(640, 480, 1_048_578)
+    malformedAvif.set(uint32Bytes(malformedAvif.length + 1), avifDimensions(640, 480).length)
+
+    for (const input of [malformedWebp, malformedAvif])
+      expect(() => readBoundedImageMetadata(input)).toThrow(
+        expect.objectContaining({ code: "IMAGE_LIBRARY_INVALID" }),
+      )
+  })
+
+  it("accepts the exact pixel budget and rejects the next pixel row", () => {
+    expect(IMAGE_MAX_DECODED_PIXELS).toBe(40_000_000)
+    expect(readBoundedImageMetadata(pngDimensions(10_000, 4_000))).toMatchObject({
+      width: 10_000,
+      height: 4_000,
+    })
+    expect(() => readBoundedImageMetadata(pngDimensions(10_000, 4_001))).toThrow(
+      expect.objectContaining({ code: "IMAGE_LIBRARY_TOO_LARGE" }),
+    )
+  })
+
+  it.each([
+    ["VP8", webpLossyDimensions(640, 480, 1_048_578), "image/webp"],
+    ["VP8L", webpLosslessDimensions(640, 480, 1_048_578), "image/webp"],
+    ["AVIF mdat", avifWithLargeMediaData(640, 480, 1_048_578), "image/avif"],
+  ] as const)("reads %s metadata before a payload larger than the scan window", (_label, input, mime) => {
+    expect(readBoundedImageMetadata(input)).toEqual({ width: 640, height: 480, mime })
+  })
+
+  it("finds avis track dimensions after a large leading mdat", () => {
+    expect(
+      readBoundedImageMetadata(
+        avisSequenceWithLargeLeadingMediaData(640, 480, [av1SampleEntry(640, 480)], 1_048_578),
+      ),
+    ).toEqual({ width: 640, height: 480, mime: "image/avif" })
+  })
+
+  it("uses every avis av01 sample entry rather than the smaller track header", () => {
+    const smallerTrack = avisSequenceWithLargeLeadingMediaData(
+      1,
+      1,
+      [av1SampleEntry(16_385, 1)],
+      1,
+    )
+    expect(() => readBoundedImageMetadata(smallerTrack)).toThrow(
+      expect.objectContaining({ code: "IMAGE_LIBRARY_TOO_LARGE" }),
+    )
+  })
+
+  it("accepts the avis pixel boundary and rejects any oversized av01 entry", () => {
+    expect(
+      readBoundedImageMetadata(
+        avisSequenceWithLargeLeadingMediaData(1, 1, [av1SampleEntry(10_000, 4_000)], 1),
+      ),
+    ).toMatchObject({ width: 10_000, height: 4_000, mime: "image/avif" })
+    expect(() =>
+      readBoundedImageMetadata(
+        avisSequenceWithLargeLeadingMediaData(
+          1,
+          1,
+          [av1SampleEntry(640, 480), av1SampleEntry(16_385, 1)],
+          1,
+        ),
+      ),
+    ).toThrow(expect.objectContaining({ code: "IMAGE_LIBRARY_TOO_LARGE" }))
+  })
+
+  it("fails closed for avis sample-description counts, sizes, and configuration records", () => {
+    const valid = avisSequenceWithLargeLeadingMediaData(640, 480, [av1SampleEntry(640, 480)], 1)
+    const malformedCount = valid.slice()
+    const stsd = Buffer.from("stsd", "ascii")
+    const stsdOffset = malformedCount.findIndex(
+      (value, index) => value === stsd[0] && malformedCount[index + 1] === stsd[1] && malformedCount[index + 2] === stsd[2] && malformedCount[index + 3] === stsd[3],
+    )
+    malformedCount.set(uint32Bytes(2), stsdOffset + 8 + 4)
+    const malformedFullBox = valid.slice()
+    malformedFullBox[stsdOffset + 4] = 1
+    const malformedAv1C = avisSequenceWithLargeLeadingMediaData(640, 480, [av1SampleEntry(640, 480, 0x80)], 1)
+
+    const reorderedTrack = avisSequenceWithLargeLeadingMediaData(
+      640,
+      480,
+      [av1SampleEntry(640, 480)],
+      1,
+      true,
+    )
+
+    for (const input of [malformedCount, malformedFullBox, valid.subarray(0, -1), malformedAv1C, reorderedTrack])
+      expectInvalid(() => readBoundedImageMetadata(input))
+  })
+
+  it("rejects zero, over-dimension, truncated, and integer-overflow dimensions", () => {
+    expect(IMAGE_MAX_DECODED_DIMENSION).toBe(16_384)
+    for (const input of [
+      pngDimensions(0, 480),
+      gifDimensions(640, 0),
+      pngDimensions(IMAGE_MAX_DECODED_DIMENSION + 1, 1),
+      avifDimensions(0xffff_ffff, 0xffff_ffff),
+      pngDimensions(640, 480).subarray(0, 28),
+    ])
+      expect(() => readBoundedImageMetadata(input)).toThrow(
+        expect.objectContaining({
+          code: expect.stringMatching(/^IMAGE_LIBRARY_(?:INVALID|TOO_LARGE)$/),
+        }),
+      )
+  })
+
+  it("rejects unsupported signatures instead of sending them to a decoder", () => {
+    expectInvalid(() => readBoundedImageMetadata(ascii("not an image")))
+  })
+})
+
+describe("image filename normalization", () => {
+  it("preserves safe Unicode, spaces, brackets, and extension casing", () => {
+    for (const name of ["猫咪 夏天 [一].PNG", "résumé photo.JpEg", "动画 01.gif"]) {
+      expect(normalizeImageName(name)).toBe(name)
+    }
+  })
+
+  it("rejects controls, separators, unsafe Windows punctuation, and dot segments", () => {
+    for (const name of [
+      "",
+      ".",
+      "..",
+      "../hero.png",
+      "folder/hero.png",
+      "folder\\hero.png",
+      "hero\u0000.png",
+      "hero\n.png",
+      "hero\r.png",
+      "hero\u007f.png",
+      "hero\u0085.png",
+      "bad<name.png",
+      "bad>name.png",
+      "bad:name.png",
+      'bad"name.png',
+      "bad|name.png",
+      "bad?name.png",
+      "bad*name.png",
+      "trailing.png.",
+      "trailing.png ",
+    ])
+      expectInvalid(() => normalizeImageName(name))
+  })
+
+  it("rejects classic and superscript Windows device names", () => {
+    for (const name of [
+      "CON.png",
+      "con.backup.png",
+      "PRN.JPG",
+      "aux.gif",
+      "NUL.webp",
+      "COM1.avif",
+      "com9.png",
+      "LPT1.jpeg",
+      "lpt9.gif",
+      "COM¹.png",
+      "com².JPG",
+      "CoM³.gif",
+      "LPT¹.webp",
+      "lpt².AVIF",
+      "LpT³.jpeg",
+    ])
+      expectInvalid(() => normalizeImageName(name))
+  })
+
+  it("requires a supported extension, a nonempty stem, and at most 255 characters", () => {
+    expect(normalizeImageName(`${"a".repeat(251)}.png`)).toHaveLength(255)
+    for (const name of [
+      ".png",
+      "photo",
+      "photo.svg",
+      "photo.pdf",
+      "photo.mp4",
+      "photo.png.exe",
+      `${"a".repeat(252)}.png`,
+    ])
+      expectInvalid(() => normalizeImageName(name))
+  })
+})
+
+describe("image Markdown and data URLs", () => {
+  it("uses an angle-bracket destination while preserving Unicode and spaces", () => {
+    expect(markdownForImage("summer-notes", "猫咪 夏天.png")).toBe(
+      "![猫咪 夏天](<../_assets/summer-notes/猫咪 夏天.png>)",
+    )
+  })
+
+  it("uses extensionless alt text and safely escapes brackets without double escaping", () => {
+    expect(markdownForImage("garden-log", "draft [one].png")).toBe(
+      "![draft \\[one\\]](<../_assets/garden-log/draft [one].png>)",
+    )
+    expectInvalid(() => markdownForImage("garden-log", "draft \\[one].png"))
+  })
+
+  it.each([
+    ["cover#draft.png", "![cover#draft](<../_assets/garden-log/cover%23draft.png>)"],
+    ["cover%20draft.png", "![cover%20draft](<../_assets/garden-log/cover%2520draft.png>)"],
+    ["%ZZ.png", "![%ZZ](<../_assets/garden-log/%25ZZ.png>)"],
+  ])("round-trips reserved destination characters in %s", (name, expected) => {
+    const markdown = markdownForImage("garden-log", name)
+    expect(markdown).toBe(expected)
+    const encodedName = /\/([^/]*)>\)$/.exec(markdown)?.[1]
+    expect(encodedName).toBeDefined()
+    expect(decodeURIComponent(encodedName!)).toBe(name)
+  })
+
+  it("rejects invalid slugs and unsafe image names", () => {
+    for (const slug of ["", "Garden-Log", "garden_log", "-garden", "garden--log", "../garden"])
+      expectInvalid(() => markdownForImage(slug, "photo.png"))
+    expectInvalid(() => markdownForImage("garden-log", "bad>name.png"))
+  })
+
+  it("returns the exact MIME-prefixed canonical Base64 data URL", () => {
+    expect(imageDataUrl("image/png", bytes(0x00, 0xff, 0x10, 0x80))).toBe(
+      "data:image/png;base64,AP8QgA==",
+    )
+    expect(imageDataUrl("image/jpeg", bytes(0xff, 0xd8, 0xff))).toBe(
+      "data:image/jpeg;base64,/9j/",
+    )
+  })
+
+  it("encodes only the selected bytes from a nonzero-offset Uint8Array view", () => {
+    const backing = bytes(0xaa, 0x00, 0xff, 0x10, 0x80, 0xbb)
+    expect(imageDataUrl("image/png", backing.subarray(1, 5))).toBe(
+      "data:image/png;base64,AP8QgA==",
+    )
+  })
+})

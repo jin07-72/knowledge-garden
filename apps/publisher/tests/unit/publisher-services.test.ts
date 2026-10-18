@@ -1,0 +1,1340 @@
+import { mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { afterEach, describe, expect, it, vi } from "vitest"
+import {
+  createPublisherCloseCoordinator,
+  createPublisherRuntimeShutdown,
+  createPublisherQuitCoordinator,
+  createPublisherServices,
+  disposePublisherRuntime,
+} from "../../src/main/publisherServices"
+import { createBlogRuntime, runBlogManagementShutdown } from "../../src/main/blogRuntime"
+import type { DomainCatalog } from "../../src/main/services/domains"
+import type { PreviewStatus } from "../../src/shared/contracts"
+import type { ImageLibraryAdapter, ImageLibraryService } from "../../src/main/services/imageLibrary"
+import type { PublishBranchRepairService } from "../../src/main/services/publishBranchRepair"
+import { git } from "../helpers/git"
+
+const temporaryDirectories: string[] = []
+
+afterEach(async () => {
+  vi.useRealTimers()
+  await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true })))
+})
+
+async function garden(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "garden-publisher-services-"))
+  temporaryDirectories.push(root)
+  await mkdir(join(root, "content", "life"), { recursive: true })
+  await mkdir(join(root, "private", "life"), { recursive: true })
+  await writeFile(
+    join(root, "content", "life", "daily.md"),
+    "---\ntitle: Daily\ndate: 2026-09-24\ndescription: Daily note\ntags: [life]\n---\n\n# Daily",
+  )
+  await writeFile(
+    join(root, "content", "life", "index.md"),
+    "---\ntitle: Life\ndescription: Life domain\ngardenDomain: true\n---\n",
+  )
+  await git(root, ["init", "--initial-branch=main", "--object-format=sha1"])
+  await git(root, ["config", "user.name", "Garden Test"])
+  await git(root, ["config", "user.email", "garden-test@example.invalid"])
+  await git(root, ["add", "content/life/index.md"])
+  await git(root, ["commit", "--allow-empty", "-m", "initial"])
+  return root
+}
+
+function preview() {
+  const status: PreviewStatus = { state: "stopped", generation: 0 }
+  return {
+    start: vi.fn(async () => status),
+    stop: vi.fn(async () => status),
+    getStatus: vi.fn(() => status),
+    subscribe: vi.fn(() => vi.fn()),
+    dispose: vi.fn(async () => undefined),
+  }
+}
+
+function domainCatalog(overrides: Partial<DomainCatalog> = {}): DomainCatalog {
+  return {
+    list: vi.fn(async () => []),
+    require: vi.fn(async () => {
+      throw new Error("not found")
+    }),
+    create: vi.fn(async () => []),
+    rename: vi.fn(async () => []),
+    remove: vi.fn(async () => []),
+    assertIdle: vi.fn(async () => undefined),
+    dispose: vi.fn(async () => undefined),
+    ...overrides,
+  }
+}
+
+function imageAdapter(): ImageLibraryAdapter {
+  return {
+    chooseImages: vi.fn(async () => undefined),
+    renderThumbnail: vi.fn(async () => ({
+      width: 1,
+      height: 1,
+      dataUrl: "data:image/png;base64,iVBORw0KGgo=",
+    })),
+    readDimensions: vi.fn(async () => ({ width: 1, height: 1 })),
+    writeClipboard: vi.fn(),
+  }
+}
+
+function imageService(overrides: Partial<ImageLibraryService> = {}): ImageLibraryService {
+  return {
+    open: vi.fn(),
+    select: vi.fn(),
+    commit: vi.fn(),
+    preview: vi.fn(),
+    copyMarkdown: vi.fn(),
+    delete: vi.fn(),
+    dispose: vi.fn(async () => undefined),
+    ...overrides,
+  }
+}
+
+describe("publisher service wiring", () => {
+  function branchRepair(
+    overrides: Partial<PublishBranchRepairService> = {},
+  ): PublishBranchRepairService {
+    return {
+      inspect: vi.fn(async () => ({ status: "ready" as const, head: "a".repeat(40) })),
+      repair: vi.fn(async () => ({
+        branch: "main" as const,
+        upstream: "origin/main" as const,
+        head: "a".repeat(40),
+      })),
+      dispose: vi.fn(async () => undefined),
+      ...overrides,
+    }
+  }
+
+  it("creates exactly one workspace-bound image service and exposes it unchanged", async () => {
+    const workspace = await garden()
+    const adapter = imageAdapter()
+    const images = imageService()
+    const imageLibraryFactory = vi.fn(() => images)
+    const services = await createPublisherServices({
+      workspace,
+      trash: { trashItem: async () => undefined },
+      isTracked: async () => false,
+      preview: preview(),
+      imageLibraryAdapter: adapter,
+      imageLibraryFactory,
+    })
+
+    expect(imageLibraryFactory).toHaveBeenCalledExactlyOnceWith({ workspace, adapter })
+    expect(services.images).toBe(images)
+    await services.dispose()
+    expect(images.dispose).toHaveBeenCalledOnce()
+  })
+
+  it("invalidates and drains the image service before disposing workspace services", async () => {
+    const workspace = await garden()
+    const order: string[] = []
+    let releaseImages!: () => void
+    const imageDisposal = new Promise<void>((resolve) => {
+      releaseImages = resolve
+    })
+    const images = imageService({
+      dispose: vi.fn(async () => {
+        order.push("images")
+        await imageDisposal
+      }),
+    })
+    const catalog = domainCatalog({
+      dispose: vi.fn(async () => {
+        order.push("domains")
+      }),
+    })
+    const services = await createPublisherServices({
+      workspace,
+      trash: { trashItem: async () => undefined },
+      isTracked: async () => false,
+      preview: preview(),
+      imageLibraryAdapter: imageAdapter(),
+      imageLibraryFactory: () => images,
+      domainCatalogFactory: () => catalog,
+    })
+
+    const disposal = services.dispose()
+    await vi.waitFor(() => expect(images.dispose).toHaveBeenCalledOnce())
+    expect(order).toEqual(["images"])
+    expect(catalog.dispose).not.toHaveBeenCalled()
+    releaseImages()
+    await disposal
+    expect(order.slice(0, 2)).toEqual(["images", "domains"])
+  })
+
+  it("disposes the constructed image service when later construction fails", async () => {
+    const workspace = await garden()
+    const images = imageService()
+    const primary = new Error("publisher construction failed")
+    await expect(
+      createPublisherServices({
+        workspace,
+        trash: { trashItem: async () => undefined },
+        isTracked: async () => false,
+        preview: preview(),
+        imageLibraryAdapter: imageAdapter(),
+        imageLibraryFactory: () => images,
+        publisherFactory: () => {
+          throw primary
+        },
+      }),
+    ).rejects.toBe(primary)
+    expect(images.dispose).toHaveBeenCalledOnce()
+  })
+
+  it("keeps imports closed across repeated preview cleanup failures after services become irreversible", async () => {
+    const services = {
+      assertSwitchSafe: vi.fn(async () => undefined),
+      dispose: vi.fn(async () => undefined),
+    }
+    const preview = {
+      dispose: vi
+        .fn()
+        .mockRejectedValueOnce(new Error("preview cleanup failed 1"))
+        .mockRejectedValueOnce(new Error("preview cleanup failed 2"))
+        .mockResolvedValueOnce(undefined),
+    }
+    const restore = vi.fn()
+    const shutdown = createPublisherRuntimeShutdown({ services, preview })
+    const coordinator = createPublisherCloseCoordinator({
+      requestRendererFlush: vi.fn(async () => true),
+      cleanup: () =>
+        runBlogManagementShutdown({
+          prepare: async () => undefined,
+          cleanup: (markRestoreUnsafe) => shutdown(markRestoreUnsafe),
+          restore,
+        }),
+      allowClose: vi.fn(),
+      allowQuit: vi.fn(),
+      reportFailure: vi.fn(),
+    })
+
+    await coordinator.beforeQuit({ preventDefault: vi.fn() })
+    await coordinator.beforeQuit({ preventDefault: vi.fn() })
+    await coordinator.beforeQuit({ preventDefault: vi.fn() })
+
+    expect(services.dispose).toHaveBeenCalledOnce()
+    expect(preview.dispose).toHaveBeenCalledTimes(3)
+    expect(restore).not.toHaveBeenCalled()
+  })
+
+  it("coalesces overlapping switch and quit shutdowns and retries remaining cleanup", async () => {
+    let releaseServices!: () => void
+    const servicesPending = new Promise<void>((resolve) => {
+      releaseServices = resolve
+    })
+    const servicesStarted = vi.fn()
+    const services = {
+      assertSwitchSafe: vi.fn(async () => undefined),
+      dispose: vi.fn(async () => {
+        servicesStarted()
+        await servicesPending
+      }),
+    }
+    const preview = {
+      dispose: vi.fn().mockRejectedValueOnce(new Error("preview cleanup failed")),
+    }
+    const shutdown = createPublisherRuntimeShutdown({ services, preview })
+    const markSwitch = vi.fn()
+    const markQuit = vi.fn()
+    const markRetry = vi.fn()
+
+    const switchShutdown = shutdown(markSwitch, true)
+    await vi.waitFor(() => expect(servicesStarted).toHaveBeenCalledOnce())
+    const quitShutdown = shutdown(markQuit)
+    expect(services.dispose).toHaveBeenCalledOnce()
+    expect(markSwitch).toHaveBeenCalledOnce()
+    expect(markQuit).toHaveBeenCalledOnce()
+
+    releaseServices()
+    await expect(Promise.all([switchShutdown, quitShutdown])).rejects.toThrow(
+      "preview cleanup failed",
+    )
+    await expect(shutdown(markRetry)).resolves.toBeUndefined()
+
+    expect(services.dispose).toHaveBeenCalledOnce()
+    expect(preview.dispose).toHaveBeenCalledTimes(2)
+    expect(markRetry).toHaveBeenCalledOnce()
+  })
+
+  it("resumes preview cleanup after service disposal without re-preflighting a disposed catalog", async () => {
+    const assertSwitchSafe = vi.fn(async () => undefined)
+    const catalogDispose = vi.fn(async () => undefined)
+    const services = {
+      assertSwitchSafe,
+      dispose: vi.fn(catalogDispose),
+    }
+    const preview = {
+      dispose: vi
+        .fn()
+        .mockRejectedValueOnce(new Error("preview cleanup failed"))
+        .mockResolvedValueOnce(undefined),
+    }
+    const unregister = vi.fn()
+    const shutdown = createPublisherRuntimeShutdown({
+      services,
+      preview,
+      unregister,
+    })
+    const allowQuit = vi.fn()
+    const coordinator = createPublisherCloseCoordinator({
+      requestRendererFlush: vi.fn(async () => true),
+      cleanup: shutdown,
+      allowClose: vi.fn(),
+      allowQuit,
+      reportFailure: vi.fn(),
+    })
+
+    await coordinator.beforeQuit({ preventDefault: vi.fn() })
+    expect(allowQuit).not.toHaveBeenCalled()
+    await coordinator.beforeQuit({ preventDefault: vi.fn() })
+
+    expect(assertSwitchSafe).toHaveBeenCalledOnce()
+    expect(services.dispose).toHaveBeenCalledOnce()
+    expect(catalogDispose).toHaveBeenCalledOnce()
+    expect(preview.dispose).toHaveBeenCalledTimes(2)
+    expect(unregister).toHaveBeenCalledOnce()
+    expect(allowQuit).toHaveBeenCalledOnce()
+  })
+
+  it("disposes the domain catalog before rejecting when publisher construction fails", async () => {
+    const workspace = await garden()
+    const order: string[] = []
+    const catalog = domainCatalog({
+      dispose: vi.fn(async () => {
+        order.push("domains")
+      }),
+    })
+
+    await expect(
+      createPublisherServices({
+        workspace,
+        trash: { trashItem: async () => undefined },
+        isTracked: async () => false,
+        preview: preview(),
+        domainCatalogFactory: () => catalog,
+        publisherFactory: () => {
+          order.push("publisher")
+          throw new Error("publisher construction failed")
+        },
+      }),
+    ).rejects.toThrow("publisher construction failed")
+
+    expect(catalog.dispose).toHaveBeenCalledOnce()
+    expect(order).toEqual(["publisher", "domains"])
+  })
+
+  it("preserves publisher construction and domain disposal failures in an AggregateError", async () => {
+    const workspace = await garden()
+    const primary = new Error("publisher construction failed")
+    const cleanup = new Error("domain disposal failed")
+    const catalog = domainCatalog({
+      dispose: vi.fn(async () => {
+        throw cleanup
+      }),
+    })
+
+    let failure: unknown
+    try {
+      await createPublisherServices({
+        workspace,
+        trash: { trashItem: async () => undefined },
+        isTracked: async () => false,
+        preview: preview(),
+        domainCatalogFactory: () => catalog,
+        publisherFactory: () => {
+          throw primary
+        },
+      })
+    } catch (error) {
+      failure = error
+    }
+
+    expect(failure).toBeInstanceOf(AggregateError)
+    expect((failure as AggregateError).errors).toEqual([primary, cleanup])
+    expect(catalog.dispose).toHaveBeenCalledOnce()
+  })
+
+  it("creates exactly one workspace-bound domain catalog with the shared trash adapter", async () => {
+    const workspace = await garden()
+    const trash = { trashItem: vi.fn(async () => undefined) }
+    const catalog = domainCatalog()
+    const domainCatalogFactory = vi.fn(() => catalog)
+    const services = await createPublisherServices({
+      workspace,
+      trash,
+      isTracked: async () => false,
+      preview: preview(),
+      domainCatalogFactory,
+    })
+
+    expect(domainCatalogFactory).toHaveBeenCalledExactlyOnceWith({ workspace, trash })
+    await services.domains.list()
+    await services.domains.create({
+      name: "Artificial Intelligence",
+      slug: "artificial-intelligence",
+    })
+    await services.domains.rename({ slug: "artificial-intelligence", name: "AI" })
+    await services.domains.remove({ slug: "artificial-intelligence" })
+    expect(catalog.list).toHaveBeenCalledOnce()
+    expect(catalog.create).toHaveBeenCalledWith({
+      name: "Artificial Intelligence",
+      slug: "artificial-intelligence",
+    })
+    expect(catalog.rename).toHaveBeenCalledWith({
+      slug: "artificial-intelligence",
+      name: "AI",
+    })
+    expect(catalog.remove).toHaveBeenCalledWith({ slug: "artificial-intelligence" })
+  })
+
+  it("wires existing note and singleton preview capabilities to the fixed workspace", async () => {
+    const workspace = await garden()
+    const manager = preview()
+    const services = await createPublisherServices({
+      workspace,
+      trash: { trashItem: async () => undefined },
+      isTracked: async () => false,
+      preview: manager,
+    })
+
+    await expect(services.notes.read({ path: "content/life/daily.md" })).resolves.toMatchObject({
+      path: "content/life/daily.md",
+      markdown: expect.stringContaining("# Daily"),
+    })
+    await services.preview.start({ preferredPort: 43120 })
+    expect(manager.start).toHaveBeenCalledWith({ workspace, preferredPort: 43120 })
+    await services.preview.stop()
+    expect(manager.stop).toHaveBeenCalledOnce()
+    expect(services.preview.status()).toEqual({ state: "stopped", generation: 0 })
+    const listener = vi.fn()
+    services.preview.subscribe(listener)
+    expect(manager.subscribe).toHaveBeenCalledWith(listener)
+  })
+
+  it("reconciles a Recycle Bin restore in the background without blocking note listing", async () => {
+    const workspace = await garden()
+    const recycled = join(workspace, "recycled-daily.md")
+    let staged = ""
+    const services = await createPublisherServices({
+      workspace,
+      trash: {
+        trashItem: async (target) => {
+          staged = target
+          await rename(target, recycled)
+        },
+      },
+      isTracked: async () => false,
+      preview: preview(),
+    })
+    await services.notes.trash({ path: "content/life/daily.md" })
+    await rename(recycled, staged)
+
+    await expect(services.notes.list()).resolves.toEqual(expect.any(Array))
+    await vi.waitFor(async () => {
+      await expect(services.notes.list()).resolves.toEqual([
+        expect.objectContaining({ path: "content/life/daily.md" }),
+      ])
+    })
+    await services.dispose()
+  })
+
+  it("returns notes while a recovery backlog pass is still pending", async () => {
+    const workspace = await garden()
+    let finishRecovery!: () => void
+    const recovery = new Promise<{ pending: boolean }>((resolve) => {
+      finishRecovery = () => resolve({ pending: false })
+    })
+    const reconcileTrash = vi.fn(() => recovery)
+    const services = await createPublisherServices({
+      workspace,
+      trash: { trashItem: async () => undefined },
+      isTracked: async () => false,
+      preview: preview(),
+      reconcileTrash,
+    })
+
+    await expect(services.notes.list()).resolves.toEqual([
+      expect.objectContaining({ path: "content/life/daily.md" }),
+    ])
+    expect(reconcileTrash).toHaveBeenCalledOnce()
+    finishRecovery()
+  })
+
+  it("retries a rejected background recovery pass with bounded backoff", async () => {
+    vi.useFakeTimers()
+    const workspace = await garden()
+    const reconcileTrash = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("temporary recovery failure"))
+      .mockResolvedValueOnce({ pending: false })
+    const services = await createPublisherServices({
+      workspace,
+      trash: { trashItem: async () => undefined },
+      isTracked: async () => false,
+      preview: preview(),
+      reconcileTrash,
+    })
+
+    await services.notes.list()
+    await vi.waitFor(() => expect(reconcileTrash).toHaveBeenCalledOnce())
+    await vi.advanceTimersByTimeAsync(50)
+    await vi.waitFor(() => expect(reconcileTrash).toHaveBeenCalledTimes(2))
+    await services.dispose()
+    vi.useRealTimers()
+  })
+
+  it("aborts an in-flight recovery pass during runtime disposal", async () => {
+    const workspace = await garden()
+    let aborted = false
+    const reconcileTrash = vi.fn(
+      (signal: AbortSignal) =>
+        new Promise<{ pending: boolean }>((_resolve, reject) => {
+          signal.addEventListener(
+            "abort",
+            () => {
+              aborted = true
+              reject(new Error("aborted"))
+            },
+            { once: true },
+          )
+        }),
+    )
+    const services = await createPublisherServices({
+      workspace,
+      trash: { trashItem: async () => undefined },
+      isTracked: async () => false,
+      preview: preview(),
+      reconcileTrash,
+    })
+    await services.notes.list()
+    await vi.waitFor(() => expect(reconcileTrash).toHaveBeenCalledOnce())
+
+    await expect(services.dispose()).resolves.toBeUndefined()
+    expect(aborted).toBe(true)
+  })
+
+  it("wires change review and history while keeping publishing explicitly unavailable", async () => {
+    const workspace = await garden()
+    const services = await createPublisherServices({
+      workspace,
+      trash: { trashItem: async () => undefined },
+      isTracked: async () => false,
+      preview: preview(),
+    })
+    await expect(services.changes.list()).resolves.toMatchObject({
+      groups: [expect.objectContaining({ kind: "added", selection: "default" })],
+    })
+    await expect(services.publish.start({ changeGroupIds: ["note:a"] })).rejects.toMatchObject({
+      code: "SERVICE_UNAVAILABLE",
+    })
+    await expect(services.history.git({})).resolves.toEqual([
+      expect.objectContaining({ subject: "initial" }),
+    ])
+  })
+
+  it("publishes only selected non-private change groups and relays completion", async () => {
+    const workspace = await garden()
+    const listeners = new Set<(progress: { phase: string; message: string }) => void>()
+    const publish = vi.fn(async ({ paths }: { paths: readonly string[] }) => {
+      expect(paths).toEqual(["content/life/daily.md"])
+      return { commit: "a".repeat(40), tree: "b".repeat(40), pushed: true as const }
+    })
+    const services = await createPublisherServices({
+      workspace,
+      trash: { trashItem: async () => undefined },
+      isTracked: async () => false,
+      preview: preview(),
+      changeScanner: {
+        list: async () => ({
+          groups: [
+            {
+              id: "note:daily",
+              label: "Daily",
+              kind: "modified",
+              selection: "default",
+              description: "changed",
+              paths: ["content/life/daily.md"],
+              attachments: [],
+            },
+            {
+              id: "private:journal",
+              label: "Journal",
+              kind: "private",
+              selection: "locked",
+              description: "private",
+              paths: [],
+              attachments: [],
+            },
+          ],
+        }),
+        cancel: async () => undefined,
+      },
+      publisherFactory: (onProgress) => ({
+        publish,
+        cancel: async () => undefined,
+        dispose: async () => undefined,
+        emit: onProgress,
+      }),
+      publishCompletionMessage: "部署成功",
+    })
+    services.publish.subscribe((progress) => listeners.forEach((listener) => listener(progress)))
+    const progress: string[] = []
+    listeners.add((event) => progress.push(`${event.phase}:${event.message}`))
+
+    await expect(
+      services.publish.start({ changeGroupIds: ["private:journal"] }),
+    ).rejects.toMatchObject({ code: "INVALID_INPUT" })
+    await expect(
+      services.publish.start({ changeGroupIds: ["note:daily"], message: "Publish Daily" }),
+    ).resolves.toEqual({ operationId: expect.any(String) })
+    await vi.waitFor(() => expect(publish).toHaveBeenCalledOnce())
+    await vi.waitFor(() => expect(progress).toContain("complete:部署成功"))
+    await services.dispose()
+  })
+
+  it("rejects a repairable branch before scanning changes or starting publication", async () => {
+    const workspace = await garden()
+    const scan = vi.fn(async () => ({ groups: [] }))
+    const publish = vi.fn(async () => undefined)
+    const repair = branchRepair({
+      inspect: vi.fn(async () => ({ status: "repairable" as const, head: "a".repeat(40) })),
+    })
+    const services = await createPublisherServices({
+      workspace,
+      trash: { trashItem: async () => undefined },
+      isTracked: async () => false,
+      preview: preview(),
+      changeScanner: { list: scan, cancel: vi.fn(async () => undefined) },
+      branchRepair: repair,
+      publisherFactory: () => ({
+        publish,
+        cancel: vi.fn(async () => undefined),
+        dispose: vi.fn(async () => undefined),
+      }),
+    })
+
+    await expect(services.publish.start({ changeGroupIds: ["note:daily"] })).rejects.toEqual({
+      code: "PUBLISH_BRANCH_REPAIR_REQUIRED",
+      message: "本地 master 正在跟踪 origin/main；请确认安全切换到 main 后继续发布。",
+    })
+    expect(scan).not.toHaveBeenCalled()
+    expect(publish).not.toHaveBeenCalled()
+    await services.dispose()
+  })
+
+  it("maps a blocked branch inspection to the public blocked error", async () => {
+    const workspace = await garden()
+    const repair = branchRepair({
+      inspect: vi.fn(async () => ({ status: "blocked" as const, reason: "A local main exists." })),
+    })
+    const services = await createPublisherServices({
+      workspace,
+      trash: { trashItem: async () => undefined },
+      isTracked: async () => false,
+      preview: preview(),
+      branchRepair: repair,
+      changeScanner: { list: vi.fn(), cancel: vi.fn(async () => undefined) },
+      publisherFactory: () => ({
+        publish: vi.fn(async () => undefined),
+        cancel: vi.fn(async () => undefined),
+        dispose: vi.fn(async () => undefined),
+      }),
+    })
+
+    await expect(services.publish.start({ changeGroupIds: ["note:daily"] })).rejects.toEqual({
+      code: "PUBLISH_BRANCH_REPAIR_BLOCKED",
+      message: "A local main exists.",
+    })
+    await services.dispose()
+  })
+
+  it("coordinates branch repair against preparing, active, and repairing publications", async () => {
+    const workspace = await garden()
+    let finishInspect!: () => void
+    const inspectPending = new Promise<void>((resolve) => {
+      finishInspect = resolve
+    })
+    let finishRepair!: () => void
+    const repairPending = new Promise<void>((resolve) => {
+      finishRepair = resolve
+    })
+    const repair = branchRepair({
+      inspect: vi.fn(async () => {
+        await inspectPending
+        return { status: "ready" as const, head: "a".repeat(40) }
+      }),
+      repair: vi.fn(async () => {
+        await repairPending
+        return { branch: "main" as const, upstream: "origin/main" as const, head: "a".repeat(40) }
+      }),
+    })
+    const services = await createPublisherServices({
+      workspace,
+      trash: { trashItem: async () => undefined },
+      isTracked: async () => false,
+      preview: preview(),
+      branchRepair: repair,
+      changeScanner: {
+        list: vi.fn(async () => ({ groups: [] })),
+        cancel: vi.fn(async () => undefined),
+      },
+      publisherFactory: () => ({
+        publish: vi.fn(async () => undefined),
+        cancel: vi.fn(async () => undefined),
+        dispose: vi.fn(async () => undefined),
+      }),
+    })
+
+    const preparing = services.publish.start({ changeGroupIds: ["note:daily"] })
+    await vi.waitFor(() => expect(repair.inspect).toHaveBeenCalledOnce())
+    await expect(services.publish.repairBranch()).rejects.toMatchObject({ code: "INVALID_INPUT" })
+    finishInspect()
+    await expect(preparing).rejects.toMatchObject({ code: "INVALID_INPUT" })
+
+    const repairing = services.publish.repairBranch()
+    const sameRepair = services.publish.repairBranch()
+    await vi.waitFor(() => expect(repair.repair).toHaveBeenCalledOnce())
+    await expect(services.publish.start({ changeGroupIds: ["note:daily"] })).rejects.toMatchObject({
+      code: "INVALID_INPUT",
+    })
+    finishRepair()
+    await expect(Promise.all([repairing, sameRepair])).resolves.toEqual([
+      { branch: "main", upstream: "origin/main", head: "a".repeat(40) },
+      { branch: "main", upstream: "origin/main", head: "a".repeat(40) },
+    ])
+    await services.dispose()
+  })
+
+  it("rejects branch repair while publication is active and disposes the branch service", async () => {
+    const workspace = await garden()
+    let finishPublish!: () => void
+    const publishing = new Promise<void>((resolve) => {
+      finishPublish = resolve
+    })
+    const repair = branchRepair()
+    const services = await createPublisherServices({
+      workspace,
+      trash: { trashItem: async () => undefined },
+      isTracked: async () => false,
+      preview: preview(),
+      branchRepair: repair,
+      changeScanner: {
+        list: vi.fn(async () => ({
+          groups: [
+            {
+              id: "note:daily",
+              label: "Daily",
+              kind: "modified" as const,
+              visibility: "public" as const,
+              selection: "default" as const,
+              description: "changed",
+              paths: ["content/life/daily.md"],
+              attachments: [],
+            },
+          ],
+        })),
+        cancel: vi.fn(async () => undefined),
+      },
+      publisherFactory: () => ({
+        publish: () => publishing,
+        cancel: vi.fn(async () => undefined),
+        dispose: vi.fn(async () => undefined),
+      }),
+    })
+
+    await services.publish.start({ changeGroupIds: ["note:daily"] })
+    await expect(services.publish.repairBranch()).rejects.toMatchObject({ code: "INVALID_INPUT" })
+    finishPublish()
+    await vi.waitFor(() =>
+      expect(services.publish.repairBranch()).resolves.toMatchObject({ branch: "main" }),
+    )
+    await services.dispose()
+    expect(repair.dispose).toHaveBeenCalledOnce()
+  })
+
+  it("keeps IPC registered until preview disposal succeeds", async () => {
+    const order: string[] = []
+    const unregister = vi.fn(() => order.push("ipc"))
+    const dispose = vi.fn(async () => {
+      order.push("preview")
+    })
+    await disposePublisherRuntime(unregister, { dispose })
+    expect(order).toEqual(["preview", "ipc"])
+
+    const unregisterAfterFailedDispose = vi.fn()
+    await expect(
+      disposePublisherRuntime(unregisterAfterFailedDispose, {
+        dispose: async () => {
+          throw new Error("stop failed")
+        },
+      }),
+    ).rejects.toThrow("stop failed")
+    expect(unregisterAfterFailedDispose).not.toHaveBeenCalled()
+
+    const disposeAfterUnregisterFailure = vi.fn(async () => undefined)
+    await expect(
+      disposePublisherRuntime(
+        () => {
+          throw new Error("unregister failed")
+        },
+        { dispose: disposeAfterUnregisterFailure },
+      ),
+    ).rejects.toThrow("unregister failed")
+    expect(disposeAfterUnregisterFailure).toHaveBeenCalledOnce()
+  })
+
+  it("cancels an active change scan before preview and IPC disposal", async () => {
+    const workspace = await garden()
+    const order: string[] = []
+    let rejectScan!: (error: unknown) => void
+    const activeScan = new Promise<never>((_, reject) => {
+      rejectScan = reject
+    })
+    const scanner = {
+      list: vi.fn(() => activeScan),
+      cancel: vi.fn(async () => {
+        order.push("changes")
+        rejectScan({ code: "CHANGE_SCAN_CANCELLED", message: "cancelled" })
+      }),
+    }
+    const services = await createPublisherServices({
+      workspace,
+      trash: { trashItem: async () => undefined },
+      isTracked: async () => false,
+      preview: preview(),
+      changeScanner: scanner,
+    })
+    const scan = services.changes.list()
+    const manager = {
+      dispose: vi.fn(async () => {
+        order.push("preview")
+      }),
+    }
+    const unregister = vi.fn(() => order.push("ipc"))
+
+    await disposePublisherRuntime(unregister, manager, services)
+    await expect(scan).rejects.toMatchObject({ code: "CHANGE_SCAN_CANCELLED" })
+    expect(order).toEqual(["changes", "preview", "ipc"])
+  })
+
+  it("rejects switching while a publication is active", async () => {
+    const workspace = await garden()
+    let finishPublish!: () => void
+    const publishing = new Promise<void>((resolve) => {
+      finishPublish = resolve
+    })
+    const services = await createPublisherServices({
+      workspace,
+      trash: { trashItem: async () => undefined },
+      isTracked: async () => false,
+      preview: preview(),
+      changeScanner: {
+        list: async () => ({
+          groups: [
+            {
+              id: "note:daily",
+              label: "Daily",
+              kind: "modified",
+              selection: "default",
+              description: "changed",
+              paths: ["content/life/daily.md"],
+              attachments: [],
+            },
+          ],
+        }),
+        cancel: vi.fn(async () => undefined),
+      },
+      publisherFactory: () => ({
+        publish: () => publishing,
+        cancel: async () => undefined,
+        dispose: async () => undefined,
+      }),
+    })
+    await services.publish.start({ changeGroupIds: ["note:daily"] })
+
+    await expect(services.assertSwitchSafe()).rejects.toMatchObject({
+      code: "BLOG_SWITCH_BUSY",
+      restoreSafe: true,
+    })
+    finishPublish()
+    await services.dispose()
+  })
+
+  it("fails closed when an active change scan cannot be safely cancelled", async () => {
+    const workspace = await garden()
+    const cancel = vi.fn(async () => {
+      throw new Error("termination not confirmed")
+    })
+    const services = await createPublisherServices({
+      workspace,
+      trash: { trashItem: async () => undefined },
+      isTracked: async () => false,
+      preview: preview(),
+      changeScanner: { list: vi.fn(), cancel },
+    })
+
+    await expect(services.assertSwitchSafe()).rejects.toMatchObject({
+      code: "BLOG_SWITCH_BUSY",
+      restoreSafe: false,
+    })
+    await expect(services.changes.list()).rejects.toMatchObject({ code: "BLOG_SWITCH_BUSY" })
+  })
+
+  it("closes the runtime gate before cancelling scans so new work cannot race disposal", async () => {
+    const workspace = await garden()
+    let finishCancel!: () => void
+    const cancelPending = new Promise<void>((resolve) => {
+      finishCancel = resolve
+    })
+    const services = await createPublisherServices({
+      workspace,
+      trash: { trashItem: async () => undefined },
+      isTracked: async () => false,
+      preview: preview(),
+      changeScanner: { list: vi.fn(), cancel: () => cancelPending },
+      domainCatalogFactory: () => domainCatalog(),
+    })
+
+    const safe = services.assertSwitchSafe()
+    await expect(services.changes.list()).rejects.toMatchObject({ code: "BLOG_SWITCH_BUSY" })
+    await expect(services.publish.start({ changeGroupIds: ["note:daily"] })).rejects.toMatchObject({
+      code: "BLOG_SWITCH_BUSY",
+    })
+    finishCancel()
+    await expect(safe).resolves.toBeUndefined()
+  })
+
+  it("waits for the domain idle barrier before a blog switch disposes preview or relaunches", async () => {
+    const workspace = await garden()
+    let releaseDomains!: () => void
+    const domainsIdle = new Promise<void>((resolve) => {
+      releaseDomains = resolve
+    })
+    const catalog = domainCatalog({ assertIdle: vi.fn(() => domainsIdle) })
+    const manager = preview()
+    const services = await createPublisherServices({
+      workspace,
+      trash: { trashItem: async () => undefined },
+      isTracked: async () => false,
+      preview: manager,
+      changeScanner: { list: vi.fn(), cancel: vi.fn(async () => undefined) },
+      domainCatalogFactory: () => catalog,
+    })
+    const relaunch = vi.fn()
+    const activate = vi.fn(async () => ({ version: 1 as const, blogs: [], activeBlogId: "target" }))
+    const runtime = createBlogRuntime({
+      registry: {
+        load: async () => ({
+          version: 1,
+          activeBlogId: "current",
+          blogs: [
+            {
+              id: "target",
+              name: "Target",
+              path: workspace,
+              canonicalPath: workspace,
+              createdAt: "2026-10-05T00:00:00.000Z",
+              lastOpenedAt: "2026-10-05T00:00:00.000Z",
+            },
+          ],
+        }),
+        activate,
+      },
+      inspect: async () => ({ valid: true, canonicalPath: workspace, needsInstall: false }),
+      assertIdle: services.assertSwitchSafe,
+      dispose: () => disposePublisherRuntime(vi.fn(), manager, services),
+      relaunch,
+      quit: vi.fn(),
+    })
+
+    const switching = runtime.switchTo({ id: "target", editorSaved: true })
+    await vi.waitFor(() => expect(catalog.assertIdle).toHaveBeenCalledOnce())
+    expect(manager.dispose).not.toHaveBeenCalled()
+    expect(activate).not.toHaveBeenCalled()
+    expect(relaunch).not.toHaveBeenCalled()
+
+    releaseDomains()
+    await switching
+    expect(manager.dispose).toHaveBeenCalledOnce()
+    expect(activate).toHaveBeenCalledOnce()
+    expect(relaunch).toHaveBeenCalledOnce()
+  })
+
+  it("reopens runtime gates when a busy domain assertion safely blocks switching", async () => {
+    const workspace = await garden()
+    const list = vi.fn(async () => ({ groups: [] }))
+    const services = await createPublisherServices({
+      workspace,
+      trash: { trashItem: async () => undefined },
+      isTracked: async () => false,
+      preview: preview(),
+      changeScanner: { list, cancel: vi.fn(async () => undefined) },
+      domainCatalogFactory: () =>
+        domainCatalog({
+          assertIdle: vi.fn(async () =>
+            Promise.reject(Object.assign(new Error("busy"), { code: "DOMAIN_BUSY" })),
+          ),
+        }),
+    })
+
+    await expect(services.assertSwitchSafe()).rejects.toMatchObject({
+      code: "BLOG_SWITCH_BUSY",
+      restoreSafe: true,
+    })
+    await expect(services.changes.list()).resolves.toEqual({ groups: [] })
+    expect(list).toHaveBeenCalledOnce()
+  })
+
+  it("fails closed when domain idle safety is uncertain", async () => {
+    const workspace = await garden()
+    const services = await createPublisherServices({
+      workspace,
+      trash: { trashItem: async () => undefined },
+      isTracked: async () => false,
+      preview: preview(),
+      changeScanner: { list: vi.fn(), cancel: vi.fn(async () => undefined) },
+      domainCatalogFactory: () =>
+        domainCatalog({
+          assertIdle: vi.fn(async () =>
+            Promise.reject(
+              Object.assign(new Error("uncertain"), { code: "DOMAIN_ROLLBACK_UNCERTAIN" }),
+            ),
+          ),
+        }),
+    })
+
+    await expect(services.assertSwitchSafe()).rejects.toMatchObject({
+      code: "BLOG_SWITCH_BUSY",
+      restoreSafe: false,
+    })
+    await expect(services.changes.list()).rejects.toMatchObject({ code: "BLOG_SWITCH_BUSY" })
+  })
+
+  it("disposes domains before other services, preview, and IPC", async () => {
+    const workspace = await garden()
+    const order: string[] = []
+    let releaseDomains!: () => void
+    const domainDisposal = new Promise<void>((resolve) => {
+      releaseDomains = resolve
+    })
+    const catalog = domainCatalog({
+      dispose: vi.fn(async () => {
+        order.push("domains")
+        await domainDisposal
+      }),
+    })
+    const services = await createPublisherServices({
+      workspace,
+      trash: { trashItem: async () => undefined },
+      isTracked: async () => false,
+      preview: preview(),
+      changeScanner: {
+        list: vi.fn(),
+        cancel: vi.fn(async () => undefined),
+        dispose: vi.fn(async () => {
+          order.push("changes")
+        }),
+      },
+      domainCatalogFactory: () => catalog,
+    })
+    const manager = {
+      dispose: vi.fn(async () => {
+        order.push("preview")
+      }),
+    }
+    const unregister = vi.fn(() => order.push("ipc"))
+
+    const disposal = disposePublisherRuntime(unregister, manager, services)
+    await vi.waitFor(() => expect(catalog.dispose).toHaveBeenCalledOnce())
+    expect(order).toEqual(["domains"])
+    expect(manager.dispose).not.toHaveBeenCalled()
+    expect(unregister).not.toHaveBeenCalled()
+
+    releaseDomains()
+    await disposal
+    expect(order).toEqual(["domains", "changes", "preview", "ipc"])
+  })
+
+  it("keeps preview and IPC alive and leaves runtime fail-closed after domain disposal fails", async () => {
+    const workspace = await garden()
+    const manager = preview()
+    const unregister = vi.fn()
+    const changeDispose = vi.fn(async () => undefined)
+    const services = await createPublisherServices({
+      workspace,
+      trash: { trashItem: async () => undefined },
+      isTracked: async () => false,
+      preview: manager,
+      changeScanner: { list: vi.fn(), cancel: vi.fn(), dispose: changeDispose },
+      domainCatalogFactory: () =>
+        domainCatalog({
+          dispose: vi.fn(async () => {
+            throw Object.assign(new Error("rollback uncertain"), {
+              code: "DOMAIN_ROLLBACK_UNCERTAIN",
+            })
+          }),
+        }),
+    })
+
+    await expect(disposePublisherRuntime(unregister, manager, services)).rejects.toThrow(
+      "rollback uncertain",
+    )
+    expect(changeDispose).not.toHaveBeenCalled()
+    expect(manager.dispose).not.toHaveBeenCalled()
+    expect(unregister).not.toHaveBeenCalled()
+    await expect(services.changes.list()).rejects.toMatchObject({ code: "BLOG_SWITCH_BUSY" })
+  })
+
+  it("keeps quit cleanup blocked when change-scan disposal is uncertain", async () => {
+    const disposePreview = vi.fn(async () => undefined)
+    const unregister = vi.fn()
+    await expect(
+      disposePublisherRuntime(
+        unregister,
+        { dispose: disposePreview },
+        {
+          dispose: async () => {
+            throw new Error("change scan termination was not confirmed")
+          },
+        },
+      ),
+    ).rejects.toThrow(/not confirmed/)
+    expect(disposePreview).not.toHaveBeenCalled()
+    expect(unregister).not.toHaveBeenCalled()
+  })
+
+  it("keeps quit blocked after cleanup failure and retries without concurrent cleanup", async () => {
+    let resolveFirst!: () => void
+    const first = new Promise<void>((resolve) => {
+      resolveFirst = resolve
+    })
+    const cleanup = vi
+      .fn<() => Promise<void>>()
+      .mockImplementationOnce(() => first.then(() => Promise.reject(new Error("stop failed"))))
+      .mockResolvedValueOnce(undefined)
+    const allowQuit = vi.fn()
+    const logFailure = vi.fn()
+    const coordinator = createPublisherQuitCoordinator({
+      cleanup,
+      allowQuit,
+      logFailure,
+      retryDelay: async () => undefined,
+    })
+    const firstEvent = { preventDefault: vi.fn() }
+    const repeatedEvent = { preventDefault: vi.fn() }
+    const pending = coordinator.beforeQuit(firstEvent)
+    const repeated = coordinator.beforeQuit(repeatedEvent)
+    expect(cleanup).toHaveBeenCalledOnce()
+    expect(firstEvent.preventDefault).toHaveBeenCalledOnce()
+    expect(repeatedEvent.preventDefault).toHaveBeenCalledOnce()
+    resolveFirst()
+    await Promise.all([pending, repeated])
+    expect(cleanup).toHaveBeenCalledTimes(2)
+    expect(allowQuit).toHaveBeenCalledOnce()
+    expect(logFailure).not.toHaveBeenCalled()
+    const allowedEvent = { preventDefault: vi.fn() }
+    await coordinator.beforeQuit(allowedEvent)
+    expect(allowedEvent.preventDefault).not.toHaveBeenCalled()
+  })
+
+  it("bounds each failed quit flight, restores operability, and permits a later gesture", async () => {
+    const cleanup = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(new Error("stop failed"))
+      .mockRejectedValueOnce(new Error("stop failed"))
+      .mockResolvedValueOnce(undefined)
+    const allowQuit = vi.fn()
+    const restoreOperable = vi.fn()
+    const coordinator = createPublisherQuitCoordinator({
+      cleanup,
+      allowQuit,
+      logFailure: vi.fn(),
+      maximumAttempts: 2,
+      retryDelay: async () => undefined,
+      restoreOperable,
+    })
+    const firstGesture = { preventDefault: vi.fn() }
+    await coordinator.beforeQuit(firstGesture)
+    expect(cleanup).toHaveBeenCalledTimes(2)
+    expect(allowQuit).not.toHaveBeenCalled()
+    expect(restoreOperable).toHaveBeenCalledOnce()
+
+    const secondGesture = { preventDefault: vi.fn() }
+    await coordinator.beforeQuit(secondGesture)
+    expect(cleanup).toHaveBeenCalledTimes(3)
+    expect(allowQuit).toHaveBeenCalledOnce()
+    expect(firstGesture.preventDefault).toHaveBeenCalledOnce()
+    expect(secondGesture.preventDefault).toHaveBeenCalledOnce()
+  })
+
+  it("coalesces close and quit until the renderer confirms a durable save, then cleans up", async () => {
+    let resolveFlush!: (saved: boolean) => void
+    const pendingFlush = new Promise<boolean>((resolve) => {
+      resolveFlush = resolve
+    })
+    const order: string[] = []
+    const coordinator = createPublisherCloseCoordinator({
+      requestRendererFlush: vi.fn(() => pendingFlush),
+      cleanup: vi.fn(async () => {
+        order.push("cleanup")
+      }),
+      allowClose: vi.fn(() => order.push("close")),
+      allowQuit: vi.fn(() => order.push("quit")),
+      reportFailure: vi.fn(),
+    })
+    const closeEvent = { preventDefault: vi.fn() }
+    const quitEvent = { preventDefault: vi.fn() }
+    const close = coordinator.beforeWindowClose(closeEvent)
+    const quit = coordinator.beforeQuit(quitEvent)
+    expect(closeEvent.preventDefault).toHaveBeenCalledOnce()
+    expect(quitEvent.preventDefault).toHaveBeenCalledOnce()
+    expect(order).toEqual([])
+    resolveFlush(true)
+    await Promise.all([close, quit])
+    expect(order).toEqual(["close", "cleanup", "quit"])
+  })
+
+  it("keeps the app operable after a failed save and permits an explicit retry", async () => {
+    const requestRendererFlush = vi
+      .fn<() => Promise<boolean>>()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true)
+    const cleanup = vi.fn(async () => undefined)
+    const allowClose = vi.fn()
+    const reportFailure = vi.fn()
+    const coordinator = createPublisherCloseCoordinator({
+      requestRendererFlush,
+      cleanup,
+      allowClose,
+      allowQuit: vi.fn(),
+      reportFailure,
+    })
+    await coordinator.beforeWindowClose({ preventDefault: vi.fn() })
+    expect(cleanup).not.toHaveBeenCalled()
+    expect(allowClose).not.toHaveBeenCalled()
+    expect(reportFailure).toHaveBeenCalledWith("保存失败，窗口仍保持打开。")
+    await coordinator.beforeWindowClose({ preventDefault: vi.fn() })
+    expect(allowClose).toHaveBeenCalledOnce()
+    await coordinator.beforeQuit({ preventDefault: vi.fn() })
+    expect(cleanup).toHaveBeenCalledOnce()
+  })
+
+  it("fails closed when the renderer is destroyed or does not acknowledge before timeout", async () => {
+    vi.useFakeTimers()
+    const reportFailure = vi.fn()
+    const cleanup = vi.fn()
+    const allowQuit = vi.fn()
+    const coordinator = createPublisherCloseCoordinator({
+      requestRendererFlush: () => new Promise<boolean>(() => undefined),
+      cleanup,
+      allowClose: vi.fn(),
+      allowQuit,
+      reportFailure,
+      timeoutMs: 50,
+    })
+    const quit = coordinator.beforeQuit({ preventDefault: vi.fn() })
+    await vi.advanceTimersByTimeAsync(50)
+    await quit
+    expect(cleanup).not.toHaveBeenCalled()
+    expect(allowQuit).not.toHaveBeenCalled()
+    expect(reportFailure).toHaveBeenCalledWith("保存失败，窗口仍保持打开。")
+    vi.useRealTimers()
+  })
+
+  it("allows the window close event emitted synchronously by an approved app quit", async () => {
+    const closeEvent = { preventDefault: vi.fn() }
+    let coordinator!: ReturnType<typeof createPublisherCloseCoordinator>
+    coordinator = createPublisherCloseCoordinator({
+      requestRendererFlush: vi.fn(async () => true),
+      cleanup: vi.fn(async () => undefined),
+      allowClose: vi.fn(),
+      allowQuit: vi.fn(() => {
+        void coordinator.beforeWindowClose(closeEvent)
+      }),
+      reportFailure: vi.fn(),
+    })
+
+    await coordinator.beforeQuit({ preventDefault: vi.fn() })
+
+    expect(closeEvent.preventDefault).not.toHaveBeenCalled()
+  })
+
+  it("continues with cleanup when app quit arrives as the close flight settles", async () => {
+    const cleanup = vi.fn(async () => undefined)
+    const allowQuit = vi.fn()
+    const quitEvent = { preventDefault: vi.fn() }
+    let quit: Promise<void> | undefined
+    let coordinator!: ReturnType<typeof createPublisherCloseCoordinator>
+    coordinator = createPublisherCloseCoordinator({
+      requestRendererFlush: vi.fn(async () => true),
+      cleanup,
+      allowClose: vi.fn(() => {
+        queueMicrotask(() => {
+          quit = coordinator.beforeQuit(quitEvent)
+        })
+      }),
+      allowQuit,
+      reportFailure: vi.fn(),
+    })
+
+    await coordinator.beforeWindowClose({ preventDefault: vi.fn() })
+    await Promise.resolve()
+    await quit
+
+    expect(quitEvent.preventDefault).toHaveBeenCalledOnce()
+    expect(cleanup).toHaveBeenCalledOnce()
+    expect(allowQuit).toHaveBeenCalledOnce()
+  })
+
+  it("requires a fresh renderer flush after close preparation fails", async () => {
+    const requestRendererFlush = vi.fn(async () => true)
+    const cleanup = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(new Error("cleanup failed"))
+      .mockResolvedValueOnce(undefined)
+    const allowQuit = vi.fn()
+    const coordinator = createPublisherCloseCoordinator({
+      requestRendererFlush,
+      cleanup,
+      allowClose: vi.fn(),
+      allowQuit,
+      reportFailure: vi.fn(),
+    })
+
+    await coordinator.beforeQuit({ preventDefault: vi.fn() })
+    await coordinator.beforeQuit({ preventDefault: vi.fn() })
+
+    expect(requestRendererFlush).toHaveBeenCalledTimes(2)
+    expect(allowQuit).toHaveBeenCalledOnce()
+  })
+
+  it("re-arms the close barrier when cleanup fails after an allowed close", async () => {
+    const requestRendererFlush = vi.fn(async () => true)
+    const coordinator = createPublisherCloseCoordinator({
+      requestRendererFlush,
+      cleanup: vi.fn(async () => {
+        throw new Error("cleanup failed")
+      }),
+      allowClose: vi.fn(),
+      allowQuit: vi.fn(),
+      reportFailure: vi.fn(),
+    })
+
+    const close = coordinator.beforeWindowClose({ preventDefault: vi.fn() })
+    const quit = coordinator.beforeQuit({ preventDefault: vi.fn() })
+    await Promise.all([close, quit])
+    const retriedClose = { preventDefault: vi.fn() }
+    await coordinator.beforeWindowClose(retriedClose)
+
+    expect(retriedClose.preventDefault).toHaveBeenCalledOnce()
+    expect(requestRendererFlush).toHaveBeenCalledTimes(2)
+  })
+})

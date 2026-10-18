@@ -15,6 +15,7 @@ import { WebSocketServer } from "ws"
 import { randomUUID } from "crypto"
 import { Mutex } from "async-mutex"
 import { CreateArgv } from "./args.js"
+import { bindPreviewServers } from "./preview-server-options.js"
 import { globby } from "globby"
 import {
   exitIfCancel,
@@ -562,8 +563,10 @@ export async function handleBuild(argv) {
       }
       throw err
     })
-    server.listen(argv.port)
-    const wss = new WebSocketServer({ port: argv.wsPort })
+    // The desktop publisher sets this private integration variable because the
+    // Quartz CLI has no host flag. Keep the normal CLI behavior unchanged when
+    // it is absent, but never expose an embedded preview beyond loopback.
+    const wss = bindPreviewServers(server, WebSocketServer, argv.port, argv.wsPort)
     wss.on("error", (err) => {
       if (err.code === "EADDRINUSE") {
         console.error(

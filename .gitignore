@@ -16,3 +16,10 @@ replit.nix
 quartz/cli/tui/dist/
 .turbo/
 !private/.gitkeep
+.garden-publisher/
+apps/publisher/dist/
+apps/publisher/out/
+apps/publisher/release/
+apps/publisher/vendor/node/
+apps/publisher/test-results/
+apps/publisher/playwright-report/
