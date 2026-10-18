@@ -3141,8 +3141,10 @@ async function execute(
     await updateJournal(journal, "note-publish-intent", key)
     await adapter.beforePublish?.(plan.target)
     await revalidateDomains()
-    await ensureVisibilityTargetDomainDirectory(workspace, plan.target)
-    await revalidateDomains()
+    if (plan.kind === "visibility") {
+      await ensureVisibilityTargetDomainDirectory(workspace, plan.target)
+      await revalidateDomains()
+    }
     await publishExclusive(
       workspace,
       plan.target,
