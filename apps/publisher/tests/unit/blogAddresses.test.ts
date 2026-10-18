@@ -35,6 +35,8 @@ const expandedSshRemote = "git@github.com:owner/" + "界".repeat(300)
 
 describe("repository remote policy", () => {
   it.each([
+    ["http://0.0.0.0/owner/repo.git", "http://0.0.0.0/owner/repo"],
+    ["http://[::]/owner/repo.git", "http://[::]/owner/repo"],
     ["https://github.com/acme/garden.git", "https://github.com/acme/garden"],
     ["git@github.com:acme/garden.git", "https://github.com/acme/garden"],
     ["ssh://git@gitlab.com/acme/garden.git", "https://gitlab.com/acme/garden"],
@@ -99,11 +101,34 @@ describe("public website policy", () => {
     ["https://example.com/garden/", "https://example.com/garden/"],
     ["http://example.com/path?q=a#anchor", "http://example.com/path?q=a#anchor"],
     ["https://8.8.8.8", "https://8.8.8.8/"],
+    ["https://[::ffff:8.8.8.8]/", "https://[::ffff:808:808]/"],
     ["https://[2606:4700:4700::1111]/", "https://[2606:4700:4700::1111]/"],
     ["example.com:8443/garden", "https://example.com:8443/garden"],
     ["https://example.com./path?q=a#anchor", "https://example.com./path?q=a#anchor"],
   ])("normalizes %s", (input, expected) => {
     expect(normalizePublicWebsite(input)).toBe(expected)
+  })
+
+  it.each([
+    ["http://0", "0.0.0.0"],
+    ["http://00", "0.0.0.0"],
+    ["http://0x0", "0.0.0.0"],
+    ["http://0.0", "0.0.0.0"],
+    ["http://0.0.0", "0.0.0.0"],
+    ["http://0.0.0.0/", "0.0.0.0"],
+    ["http://0.0.0.0./", "0.0.0.0"],
+    ["http://[::]/", "[::]"],
+    ["http://[0:0:0:0:0:0:0:0]/", "[::]"],
+    ["http://[0000:0000:0000:0000:0000:0000:0000:0000]/", "[::]"],
+    ["http://[::0]/", "[::]"],
+    ["http://[::ffff:0.0.0.0]/", "[::ffff:0:0]"],
+    ["http://[::ffff:0:0]/", "[::ffff:0:0]"],
+    ["http://[0:0:0:0:0:ffff:0000:0000]/", "[::ffff:0:0]"],
+  ])("rejects unspecified destinations after WHATWG normalization: %s", (input, hostname) => {
+    const canonical = new URL(input)
+    expect(canonical.hostname).toBe(hostname)
+    expect(normalizePublicWebsite(input)).toBeUndefined()
+    expect(normalizePublicWebsite(canonical.href)).toBeUndefined()
   })
 
   it.each([
@@ -164,6 +189,40 @@ describe("public website policy", () => {
 })
 
 describe("blog address resolver", () => {
+  const unspecifiedSources = (["manual", "quartz"] as const).flatMap((source) =>
+    ["http://0", "http://[::]/", "http://[::ffff:0.0.0.0]/"].map((websiteUrl) => ({
+      source,
+      websiteUrl,
+    })),
+  )
+
+  it.each(unspecifiedSources)(
+    "marks $source unspecified website $websiteUrl unconfigured",
+    async ({ source, websiteUrl }) => {
+      const resolver = resolverWith("", `configuration:\n  baseUrl: ${websiteUrl}`)
+      const view = await resolver.describe(
+        state(source === "manual" ? { ...blog, websiteUrl } : blog),
+      )
+      expect(view.blogs[0]?.website).toEqual({ source: "unconfigured" })
+      expect(JSON.stringify(view)).not.toContain(websiteUrl)
+    },
+  )
+
+  it.each(unspecifiedSources)(
+    "refuses to resolve $source unspecified website $websiteUrl",
+    async ({ source, websiteUrl }) => {
+      const resolver = resolverWith("", `configuration:\n  baseUrl: ${websiteUrl}`)
+      const current = state(source === "manual" ? { ...blog, websiteUrl } : blog)
+      const error = await resolver
+        .resolveLink(current, blog.id, "website")
+        .catch((error: unknown) => error)
+      expect(error).toBeInstanceOf(BlogAddressError)
+      expect(error).toMatchObject({ code: "LINK_UNAVAILABLE", message: "Blog link is unavailable" })
+      expect(error).not.toHaveProperty("cause")
+      expect(JSON.stringify(error)).not.toContain(websiteUrl)
+    },
+  )
+
   it.each([expandedWebsite, nearLimitWebsite])(
     "keeps oversized normalized websites within the real IPC contract: %s",
     async (websiteUrl) => {

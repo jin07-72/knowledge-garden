@@ -71,6 +71,7 @@ export function parseRepositoryRemote(
 function blockedIpv4(host: string): boolean {
   const [first, second] = host.split(".").map(Number)
   return (
+    host === "0.0.0.0" ||
     first === 127 ||
     first === 10 ||
     (first === 172 && second! >= 16 && second! <= 31) ||
@@ -86,6 +87,7 @@ function blockedIpv6(host: string): boolean {
   const tail = right ? right.split(":").map((part) => Number.parseInt(part, 16)) : []
   const groups =
     right === undefined ? head : [...head, ...Array(8 - head.length - tail.length).fill(0), ...tail]
+  if (groups.every((part) => part === 0)) return true
   if (groups.slice(0, 7).every((part) => part === 0) && groups[7] === 1) return true
   if ((groups[0]! & 0xfe00) === 0xfc00 || (groups[0]! & 0xffc0) === 0xfe80) return true
   if (groups.slice(0, 5).every((part) => part === 0) && groups[5] === 0xffff) {
