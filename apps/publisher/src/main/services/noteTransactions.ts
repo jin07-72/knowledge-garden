@@ -495,6 +495,46 @@ async function ensureStateDirectories(workspace: string): Promise<void> {
   }
 }
 
+async function ensureVisibilityTargetDomainDirectory(
+  workspace: string,
+  targetPath: string,
+): Promise<void> {
+  const target = parseNotePath(targetPath)
+  const rootPath = target.root
+  const domainPath = `${target.root}/${target.domain}`
+  const root = absolutePath(workspace, rootPath)
+  const directory = absolutePath(workspace, domainPath)
+
+  try {
+    await ensureSafeDirectory(root, workspace)
+  } catch {
+    throw transactionError("TRANSACTION_STALE", "The target visibility root is unavailable.", {
+      path: rootPath,
+    })
+  }
+
+  try {
+    await mkdir(directory, { mode: 0o700 })
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+      throw transactionError(
+        "TRANSACTION_FAILED",
+        "The target domain directory could not be created.",
+        { path: domainPath },
+      )
+    }
+  }
+
+  try {
+    await ensureSafeDirectory(directory, root)
+  } catch {
+    throw transactionError("TRANSACTION_PLAN_BLOCKED", "The target domain directory is unsafe.", {
+      issue: "UNSAFE_TARGET",
+      path: domainPath,
+    })
+  }
+}
+
 async function syncDirectory(path: string): Promise<void> {
   let handle
   try {
@@ -3100,6 +3140,8 @@ async function execute(
     await locks.assertOwned()
     await updateJournal(journal, "note-publish-intent", key)
     await adapter.beforePublish?.(plan.target)
+    await revalidateDomains()
+    await ensureVisibilityTargetDomainDirectory(workspace, plan.target)
     await revalidateDomains()
     await publishExclusive(
       workspace,
