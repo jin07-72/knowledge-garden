@@ -64,7 +64,8 @@ export interface WikiLinkEdit {
   path: string
   revision: TransactionRevision
   oldTarget: string
-  newTarget: string
+  /** A replacement target, or null when the link entry should be removed. */
+  newTarget: string | null
   count: number
   qualification: "qualified" | "unqualified"
 }
@@ -87,7 +88,7 @@ export interface VisibilityChangePlan extends TransactionPlanBase {
   kind: "visibility"
   visibility: Visibility
   historyWarning: boolean
-  linkEdits: []
+  linkEdits: WikiLinkEdit[]
 }
 
 export interface RenamePlan extends TransactionPlanBase {
@@ -175,6 +176,7 @@ export interface TransactionWarning {
 export interface TransactionResult {
   id: string
   changedPaths: string[]
+  linkEditedPaths?: string[]
   pendingPublicDeletion?: string
   historyWarning: boolean
   warnings: TransactionWarning[]
@@ -374,6 +376,43 @@ function absolutePath(workspace: string, path: string): string {
     )
   }
   return candidate
+}
+
+interface ParsedMarkdownPath {
+  visibility: Visibility
+  root: "content" | "private"
+  domain: string
+  slug: string
+  path: string
+}
+
+function parseMarkdownPath(path: string): ParsedMarkdownPath {
+  if (!path || path.includes("\\") || isAbsolute(path) || posix.isAbsolute(path)) {
+    throw transactionError("TRANSACTION_PLAN_INVALID", "The note path is invalid.", { path: "." })
+  }
+  const parts = path.split("/")
+  if (parts.length !== 3) {
+    throw transactionError("TRANSACTION_PLAN_INVALID", "The note path is invalid.", { path })
+  }
+  const [root, domain, filename] = parts
+  const visibility = root === "content" ? "public" : root === "private" ? "private" : undefined
+  const slug = filename?.endsWith(".md") ? filename.slice(0, -3) : ""
+  if (
+    visibility === undefined ||
+    !slugPattern.test(domain) ||
+    !slug ||
+    (slug !== "index" && !slugPattern.test(slug)) ||
+    `${root}/${domain}/${slug}.md` !== path
+  ) {
+    throw transactionError("TRANSACTION_PLAN_INVALID", "The note path is invalid.", { path })
+  }
+  return {
+    visibility,
+    root: root as "content" | "private",
+    domain,
+    slug,
+    path,
+  }
 }
 
 function parseNotePath(path: string): ParsedNotePath {
@@ -1048,6 +1087,38 @@ async function buildVisibilityChangePlan(
     base.sourceFile.bytes.toString("utf8"),
     base.domains,
   )
+  const linkEdits: WikiLinkEdit[] = []
+  if (source.visibility === "public" && input.visibility === "private") {
+    const notes = await scanMarkdown(base.workspace, base.domains)
+    const sameSlugCount = notes.filter(({ note }) => note.slug === source.slug).length
+    for (const scanned of await scanPublicLinkSources(base.workspace, base.domains)) {
+      if (scanned.path === source.path) continue
+      const occurrences = wikiOccurrences(scanned.file.bytes.toString("utf8"))
+      const targets: Array<[string, WikiLinkEdit["qualification"]]> = [
+        [`${source.domain}/${source.slug}`, "qualified"],
+        [source.slug, "unqualified"],
+      ]
+      for (const [target, qualification] of targets) {
+        const count = occurrences.filter(({ target: link }) => link === target).length
+        if (count === 0) continue
+        if (qualification === "unqualified" && sameSlugCount !== 1) {
+          throw blocked("AMBIGUOUS_WIKI_LINK", scanned.path)
+        }
+        linkEdits.push({
+          path: scanned.path,
+          revision: scanned.file.revision,
+          oldTarget: target,
+          newTarget: null,
+          count,
+          qualification,
+        })
+      }
+    }
+    linkEdits.sort(
+      (left, right) =>
+        left.path.localeCompare(right.path) || left.oldTarget.localeCompare(right.oldTarget),
+    )
+  }
   const historyWarning =
     source.visibility === "public"
       ? await trackedByGit(base.workspace, source.path, input.runner ?? systemCommandRunner)
@@ -1077,7 +1148,7 @@ async function buildVisibilityChangePlan(
       visibility: input.visibility,
       moves: base.moves,
       collisionChecks: base.collisionChecks,
-      linkEdits: [],
+      linkEdits,
       historyWarning,
       warnings,
     },
@@ -1138,6 +1209,46 @@ async function scanMarkdown(
   return scanned
 }
 
+interface ScannedLinkSource {
+  path: string
+  file: SafeFile
+}
+
+async function scanPublicLinkSources(
+  workspace: string,
+  domains: NoteDomainSnapshot,
+): Promise<ScannedLinkSource[]> {
+  const scanned: ScannedLinkSource[] = []
+  const rootPath = resolve(workspace, "content")
+  await ensureSafeDirectory(rootPath, workspace).catch(() => {
+    throw blocked("UNSAFE_MARKDOWN_TREE", "content")
+  })
+  for (const domain of domains.orderedSlugs) {
+    const directory = resolve(rootPath, domain)
+    try {
+      await ensureSafeDirectory(directory, rootPath)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue
+      throw blocked("UNSAFE_MARKDOWN_TREE", `content/${domain}`)
+    }
+    const entries = await readdir(directory, { withFileTypes: true })
+    entries.sort((left, right) => left.name.localeCompare(right.name))
+    for (const entry of entries) {
+      if (!entry.name.endsWith(".md")) continue
+      const path = `content/${domain}/${entry.name}`
+      if (entry.isSymbolicLink()) throw blocked("UNSAFE_MARKDOWN_TREE", path)
+      if (!entry.isFile()) continue
+      try {
+        parseMarkdownPath(path)
+      } catch {
+        continue
+      }
+      scanned.push({ path, file: await safeFile(workspace, path) })
+    }
+  }
+  return scanned
+}
+
 function maskRange(mask: string[], start: number, end: number): void {
   for (let index = start; index < end; index += 1)
     if (mask[index] !== "\n" && mask[index] !== "\r") mask[index] = " "
@@ -1185,6 +1296,8 @@ interface WikiOccurrence {
   start: number
   end: number
   target: string
+  tokenStart: number
+  tokenEnd: number
 }
 
 function wikiOccurrences(source: string): WikiOccurrence[] {
@@ -1208,6 +1321,8 @@ function wikiOccurrences(source: string): WikiOccurrence[] {
       start: innerStart + targetOffset,
       end: innerStart + targetOffset + target.length,
       target,
+      tokenStart: index,
+      tokenEnd: index + match[0].length,
     })
   }
   return occurrences
@@ -1303,7 +1418,102 @@ function rewriteOwnedAttachmentReferences(
   return result
 }
 
+const linkOnlyLinePrefix =
+  /^\s*(?:(?:>\s*)|(?:[-*+]\s+(?:\[[ xX]\]\s+)?)|(?:\d+[.)]\s+)|(?:#{1,6}\s*))*$/
+
+function lineStartOf(source: string, index: number): number {
+  return source.lastIndexOf("\n", index - 1) + 1
+}
+
+function lineWithoutTokens(
+  source: string,
+  lineStart: number,
+  lineEnd: number,
+  tokens: readonly WikiOccurrence[],
+): string {
+  let line = source.slice(lineStart, lineEnd)
+  for (const token of [...tokens].sort((left, right) => right.tokenStart - left.tokenStart)) {
+    line = line.slice(0, token.tokenStart - lineStart) + line.slice(token.tokenEnd - lineStart)
+  }
+  return line
+}
+
+function removeWikiLinks(source: string, edits: readonly WikiLinkEdit[]): string {
+  const tokens: WikiOccurrence[] = []
+  for (const edit of edits) {
+    const matches = wikiOccurrences(source).filter(({ target }) => target === edit.oldTarget)
+    if (matches.length !== edit.count) {
+      throw transactionError("TRANSACTION_STALE", "A Wiki-link edit no longer matches its plan.", {
+        path: edit.path,
+      })
+    }
+    tokens.push(...matches)
+  }
+  const unique = [...new Map(tokens.map((token) => [token.tokenStart, token])).values()]
+  const byLine = new Map<number, WikiOccurrence[]>()
+  for (const token of unique) {
+    const lineStart = lineStartOf(source, token.tokenStart)
+    byLine.set(lineStart, [...(byLine.get(lineStart) ?? []), token])
+  }
+  const spans: Array<{ start: number; end: number }> = []
+  for (const [lineStart, lineTokens] of byLine) {
+    const lastTokenEnd = Math.max(...lineTokens.map(({ tokenEnd }) => tokenEnd))
+    const newline = source.indexOf("\n", lastTokenEnd)
+    const lineEndWithBreak = newline < 0 ? source.length : newline
+    const lineEnd =
+      lineEndWithBreak > lineStart && source[lineEndWithBreak - 1] === "\r"
+        ? lineEndWithBreak - 1
+        : lineEndWithBreak
+    const remainder = lineWithoutTokens(source, lineStart, lineEnd, lineTokens)
+    if (linkOnlyLinePrefix.test(remainder)) {
+      let start = lineStart
+      let end = newline < 0 ? source.length : newline + 1
+      if (source.slice(end).trim() === "") {
+        end = source.length
+        while (start > 0) {
+          const previousLineStart = source.lastIndexOf("\n", start - 2) + 1
+          const previousLine = source.slice(previousLineStart, start - 1).replace(/\r$/, "")
+          if (previousLine.trim() !== "") break
+          start = previousLineStart
+        }
+      }
+      spans.push({ start, end })
+      continue
+    }
+    for (const token of lineTokens) {
+      let start = token.tokenStart
+      let end = token.tokenEnd
+      const trailing = /^[ \t]*$/.test(source.slice(end, lineEnd))
+      if (
+        start > lineStart &&
+        source[start - 1] === " " &&
+        (/[ \t]/.test(source[end] ?? "") || trailing)
+      ) {
+        start -= 1
+      }
+      if (trailing) end = lineEnd
+      spans.push({ start, end })
+    }
+  }
+  spans.sort((left, right) => right.start - left.start)
+  let result = source
+  for (const span of spans) {
+    result = result.slice(0, span.start) + result.slice(span.end)
+  }
+  return result
+}
+
 function applyWikiEdits(source: string, edits: readonly WikiLinkEdit[]): string {
+  const removals = edits.filter((edit) => edit.newTarget === null)
+  if (removals.length > 0) {
+    if (removals.length !== edits.length) {
+      throw transactionError(
+        "TRANSACTION_PLAN_INVALID",
+        "A Wiki-link file cannot mix rewrites and removals.",
+      )
+    }
+    return removeWikiLinks(source, removals)
+  }
   const replacements: Array<WikiOccurrence & { replacement: string }> = []
   for (const edit of edits) {
     const matches = wikiOccurrences(source).filter(({ target }) => target === edit.oldTarget)
@@ -1311,6 +1521,9 @@ function applyWikiEdits(source: string, edits: readonly WikiLinkEdit[]): string 
       throw transactionError("TRANSACTION_STALE", "A Wiki-link edit no longer matches its plan.", {
         path: edit.path,
       })
+    }
+    if (edit.newTarget === null) {
+      throw transactionError("TRANSACTION_PLAN_INVALID", "The Wiki-link edit is invalid.")
     }
     for (const match of matches) replacements.push({ ...match, replacement: edit.newTarget })
   }
@@ -1488,10 +1701,14 @@ async function verifyPlan(
   }
   for (const collision of plan.collisionChecks) absolutePath(workspace, collision.path)
   for (const edit of plan.linkEdits) {
-    parseNotePath(edit.path)
+    parseMarkdownPath(edit.path)
     if (
       !hashPattern.test(edit.revision?.contentHash ?? "") ||
       !Number.isFinite(edit.revision?.mtimeMs) ||
+      typeof edit.oldTarget !== "string" ||
+      edit.oldTarget.length === 0 ||
+      (edit.newTarget !== null &&
+        (typeof edit.newTarget !== "string" || edit.newTarget.length === 0)) ||
       !Number.isInteger(edit.count) ||
       edit.count < 1
     )
@@ -1874,7 +2091,7 @@ async function replacePlannedFile(
   const target = absolutePath(workspace, path)
   const originals = resolve(journalDirectory, "forward-originals")
   const quarantined = resolve(originals, `${sha256(path)}.bin`)
-  await mkdir(originals, { mode: 0o700 })
+  await mkdir(originals, { recursive: true, mode: 0o700 })
   await syncDirectory(journalDirectory)
   quarantinedOriginals.add(path)
   try {
@@ -3096,17 +3313,18 @@ async function execute(
     throw transactionError("TRANSACTION_STALE", "The domain catalog is unavailable.")
   })
   const affectedDomains = [
-    ...new Set(
-      [plan.source, plan.target, ...plan.linkEdits.map(({ path }) => path)].map(
-        (path) => parseNotePath(path).domain,
-      ),
-    ),
+    ...new Set([
+      parseNotePath(plan.source).domain,
+      parseNotePath(plan.target).domain,
+      ...plan.linkEdits.map(({ path }) => parseMarkdownPath(path).domain),
+    ]),
   ]
   if (affectedDomains.some((domain) => !domains.has(domain))) {
     throw transactionError("TRANSACTION_STALE", "A transaction domain no longer exists.")
   }
+  const replacedLandings = new Set<string>()
   const revalidateDomains = async (): Promise<void> => {
-    await revalidateNoteDomains(domains, affectedDomains).catch(() => {
+    await revalidateNoteDomains(domains, affectedDomains, replacedLandings).catch(() => {
       throw transactionError("TRANSACTION_STALE", "A transaction domain changed.")
     })
   }
@@ -3225,6 +3443,9 @@ async function execute(
           if (identity !== undefined) installedIdentities.set(path, identity)
         },
       )
+      if (path.endsWith("/index.md")) {
+        replacedLandings.add(parseMarkdownPath(path).domain)
+      }
     }
     await locks.assertOwned()
     await updateJournal(journal, "links-published", key)
@@ -3282,9 +3503,13 @@ async function execute(
           },
         ] as TransactionWarning[],
     )
+    const linkEditedPaths = [...new Set(plan.linkEdits.map(({ path }) => path))].sort(
+      (left, right) => left.localeCompare(right),
+    )
     return {
       id: plan.id,
       changedPaths,
+      ...(linkEditedPaths.length > 0 ? { linkEditedPaths } : {}),
       ...(plan.kind === "visibility" && parseNotePath(plan.source).visibility === "public"
         ? { pendingPublicDeletion: plan.source }
         : {}),

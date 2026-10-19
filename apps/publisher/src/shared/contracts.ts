@@ -651,6 +651,7 @@ export interface NoteWriteReceipt {
 export interface NoteTransactionReceipt {
   readonly id: string
   readonly changedPaths: readonly string[]
+  readonly linkEditedPaths?: readonly string[]
   readonly pendingPublicDeletion?: string
   readonly historyWarning: boolean
   readonly warnings: readonly { readonly code: string; readonly message: string }[]

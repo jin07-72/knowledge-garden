@@ -186,6 +186,36 @@ export function resolveProductionPublishRuntime(options: {
   }
 }
 
+const productionVerificationCommands = [
+  ["--test", "scripts/*.test.mjs"],
+  ["scripts/validate-content.mjs"],
+  ["quartz/bootstrap-cli.mjs", "build"],
+  ["scripts/check-built-links.mjs"],
+] as const
+
+/**
+ * Content publishing must prove that the generated website is valid. The
+ * repository-wide tsc/prettier gate is intentionally excluded: formatting an
+ * unrelated source file must not block taking a note offline or publishing it.
+ */
+export function createProductionSiteVerifier(
+  runner: Pick<BoundedCommandRunner, "run"> = systemPublishCommandRunner,
+): (request: VerifySiteRequest) => Promise<{ readonly exitCode: number }> {
+  return async (request) => {
+    for (const args of productionVerificationCommands) {
+      const result = await runner.run({
+        executable: request.executable,
+        args,
+        cwd: request.cwd,
+        env: {},
+        signal: request.signal,
+      })
+      if (result.exitCode !== 0) return { exitCode: result.exitCode }
+    }
+    return { exitCode: 0 }
+  }
+}
+
 export function createProductionPublisher(options: ProductionPublisherOptions): Publisher {
   const allowed = new Set([
     "workspace",
@@ -210,6 +240,7 @@ export function createProductionPublisher(options: ProductionPublisherOptions): 
         appPath,
       }),
       onProgress: options.onProgress,
+      verifySite: createProductionSiteVerifier(),
       timeoutMs: options.timeoutMs,
       criticalSectionTimeoutMs: options.criticalSectionTimeoutMs,
     },

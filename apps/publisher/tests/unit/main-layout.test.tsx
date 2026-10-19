@@ -1213,6 +1213,210 @@ describe("publisher main layout", () => {
     expect(screen.getByText("Git 历史仍可能保留公开内容")).toBeVisible()
   })
 
+  it("refreshes publishable changes immediately after privatizing a public note", async () => {
+    const user = userEvent.setup()
+    vi.mocked(garden.changes.list)
+      .mockResolvedValueOnce(ok({ groups: [] }))
+      .mockResolvedValueOnce(
+        ok({
+          groups: [
+            {
+              id: "unpublish-css-grid",
+              label: "css-grid",
+              kind: "unpublish",
+              selection: "default",
+              description: "将从公开网站移除",
+              paths: ["content/technology/css-grid.md"],
+              attachments: [],
+            },
+          ],
+        }),
+      )
+    vi.mocked(garden.notes.changeVisibility).mockResolvedValueOnce(
+      ok({
+        id: "visibility-refresh",
+        changedPaths: ["content/technology/css-grid.md", "private/technology/css-grid.md"],
+        pendingPublicDeletion: "content/technology/css-grid.md",
+        historyWarning: false,
+        warnings: [],
+      }),
+    )
+    render(<App />)
+
+    await waitFor(() => expect(garden.changes.list).toHaveBeenCalledOnce())
+    await user.click(await screen.findByRole("button", { name: "可见性：公开" }))
+    await user.click(screen.getByRole("menuitemradio", { name: /私密/ }))
+    await user.click(
+      within(screen.getByRole("dialog", { name: "确认设为私密" })).getByRole("button", {
+        name: "确认设为私密",
+      }),
+    )
+
+    await waitFor(() => expect(garden.changes.list).toHaveBeenCalledTimes(2))
+    expect(screen.getByText("可发布变化：1")).toBeVisible()
+    await user.click(screen.getByRole("button", { name: "检查并发布" }))
+    expect(screen.getByRole("checkbox", { name: /css-grid/ })).toBeChecked()
+    expect(screen.getByText("将从公开网站移除")).toBeVisible()
+  })
+
+  it("automatically publishes the retirement and cleaned incoming links after privatizing", async () => {
+    const user = userEvent.setup()
+    const review: ChangeReview = {
+      groups: [
+        {
+          id: "modified-index",
+          label: "index",
+          kind: "modified",
+          selection: "default",
+          description: "公开文章已修改",
+          paths: ["content/technology/index.md"],
+          attachments: [],
+        },
+        {
+          id: "unpublish-css-grid",
+          label: "css-grid",
+          kind: "unpublish",
+          selection: "default",
+          description: "将从公开网站移除",
+          paths: ["content/technology/css-grid.md"],
+          attachments: [],
+        },
+        {
+          id: "added-new-links",
+          label: "new-links",
+          kind: "added",
+          selection: "default",
+          description: "新增公开文章",
+          paths: ["content/reading/new-links.md"],
+          attachments: [],
+        },
+        {
+          id: "modified-unrelated",
+          label: "unrelated",
+          kind: "modified",
+          selection: "default",
+          description: "无关修改",
+          paths: ["content/life/unrelated.md"],
+          attachments: [],
+        },
+        {
+          id: "private-css-grid",
+          label: "css-grid",
+          kind: "private",
+          selection: "locked",
+          description: "只保留在本机，不会发布",
+          paths: ["private/technology/css-grid.md"],
+          attachments: [],
+        },
+      ],
+    }
+    vi.mocked(garden.changes.list)
+      .mockResolvedValueOnce(ok({ groups: [] }))
+      .mockResolvedValue(ok(review))
+    vi.mocked(garden.notes.changeVisibility).mockResolvedValueOnce(
+      ok({
+        id: "visibility-auto",
+        changedPaths: [
+          "content/technology/css-grid.md",
+          "private/technology/css-grid.md",
+          "content/technology/index.md",
+          "content/reading/new-links.md",
+        ],
+        linkEditedPaths: ["content/reading/new-links.md", "content/technology/index.md"],
+        pendingPublicDeletion: "content/technology/css-grid.md",
+        historyWarning: false,
+        warnings: [],
+      }),
+    )
+    vi.mocked(garden.publish.start).mockResolvedValueOnce(ok({ operationId: "auto-publish" }))
+    render(<App />)
+
+    await waitFor(() => expect(garden.changes.list).toHaveBeenCalledOnce())
+    await user.click(await screen.findByRole("button", { name: "可见性：公开" }))
+    await user.click(screen.getByRole("menuitemradio", { name: /私密/ }))
+    await user.click(
+      within(screen.getByRole("dialog", { name: "确认设为私密" })).getByRole("button", {
+        name: "确认设为私密",
+      }),
+    )
+
+    await waitFor(() =>
+      expect(garden.publish.start).toHaveBeenCalledWith({
+        changeGroupIds: ["modified-index", "unpublish-css-grid"],
+      }),
+    )
+    expect(screen.getByText(/已清理 2 篇公开笔记中指向这篇笔记的旧链接/)).toBeVisible()
+    const status = screen.getByRole("status", { name: "发布状态" })
+    expect(within(status).getByText("正在自动发布下线变化…")).toBeVisible()
+  })
+
+  it("keeps the retirement pending with a visible error when automatic publication fails", async () => {
+    const user = userEvent.setup()
+    vi.mocked(garden.changes.list)
+      .mockResolvedValueOnce(ok({ groups: [] }))
+      .mockResolvedValue(
+        ok({
+          groups: [
+            {
+              id: "unpublish-css-grid",
+              label: "css-grid",
+              kind: "unpublish",
+              selection: "default",
+              description: "将从公开网站移除",
+              paths: ["content/technology/css-grid.md"],
+              attachments: [],
+            },
+          ],
+        }),
+      )
+    vi.mocked(garden.notes.changeVisibility).mockResolvedValueOnce(
+      ok({
+        id: "visibility-auto-failed",
+        changedPaths: ["content/technology/css-grid.md", "private/technology/css-grid.md"],
+        pendingPublicDeletion: "content/technology/css-grid.md",
+        historyWarning: false,
+        warnings: [],
+      }),
+    )
+    vi.mocked(garden.publish.start).mockResolvedValueOnce({
+      ok: false,
+      error: { code: "GIT_ORIGIN_UNREACHABLE", message: "远程仓库暂不可用。" },
+    })
+    render(<App />)
+
+    await waitFor(() => expect(garden.changes.list).toHaveBeenCalledOnce())
+    await user.click(await screen.findByRole("button", { name: "可见性：公开" }))
+    await user.click(screen.getByRole("menuitemradio", { name: /私密/ }))
+    await user.click(
+      within(screen.getByRole("dialog", { name: "确认设为私密" })).getByRole("button", {
+        name: "确认设为私密",
+      }),
+    )
+
+    await waitFor(() => expect(garden.publish.start).toHaveBeenCalledOnce())
+    const status = screen.getByRole("status", { name: "发布状态" })
+    expect(await within(status).findByText("远程仓库暂不可用。")).toBeVisible()
+    expect(screen.getByText("可发布变化：1")).toBeVisible()
+  })
+
+  it("does not automatically publish when a private note becomes public", async () => {
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(await screen.findByRole("button", { name: /私密阅读札记/ }))
+    await user.click(await screen.findByRole("button", { name: "可见性：私密" }))
+    await user.click(screen.getByRole("menuitemradio", { name: /公开/ }))
+
+    await waitFor(() =>
+      expect(garden.notes.changeVisibility).toHaveBeenCalledWith({
+        path: notes[1].path,
+        visibility: "public",
+      }),
+    )
+    await waitFor(() => expect(garden.changes.list).toHaveBeenCalledTimes(2))
+    expect(garden.publish.start).not.toHaveBeenCalled()
+  })
+
   it("clears the previous Markdown while a newly selected note is loading", async () => {
     const user = userEvent.setup()
     let resolvePrivate: ((value: IpcResult<NoteDocument>) => void) | undefined
@@ -1607,6 +1811,8 @@ describe("publisher main layout", () => {
     await user.click(screen.getByRole("button", { name: /私密阅读札记/ }))
     await user.click(within(preview).getByRole("tab", { name: "当前笔记" }))
     expect(within(preview).getByText("私密笔记不会映射到公开网址")).toBeVisible()
+    expect(within(preview).getByRole("heading", { name: "私密阅读札记" })).toBeVisible()
+    expect(within(preview).getByText("正文")).toBeVisible()
     expect(within(preview).queryByTitle(/私密阅读札记的 Quartz 精确预览/)).not.toBeInTheDocument()
 
     await user.click(within(preview).getByRole("tab", { name: "历史" }))
@@ -1615,6 +1821,31 @@ describe("publisher main layout", () => {
     const deploymentRequest = vi.mocked(garden.history.deployments).mock.calls.at(-1)?.[0]
     expect(gitRequest?.requestId).toMatch(/^history-/)
     expect(deploymentRequest?.requestId).toBe(gitRequest?.requestId)
+  })
+
+  it("updates the rendered private preview while editing", async () => {
+    const user = userEvent.setup()
+    vi.mocked(garden.notes.save).mockResolvedValue(
+      ok({
+        path: notes[1].path,
+        updatedAt: "2026-09-26T00:00:00.000Z",
+        mtimeMs: 5,
+        contentHash: markdownHash("# 私密阅读札记\n\n正文\n\n实时预览内容"),
+      }),
+    )
+    render(<App />)
+
+    await user.click(await screen.findByRole("button", { name: /私密阅读札记/ }))
+    const preview = screen.getByRole("region", { name: "本地预览" })
+    expect(await within(preview).findByRole("heading", { name: "私密阅读札记" })).toBeVisible()
+
+    const view = await waitFor(() =>
+      EditorView.findFromDOM(document.querySelector(".cm-content") as HTMLElement),
+    )
+    await act(async () => {
+      view!.dispatch({ changes: { from: view!.state.doc.length, insert: "\n\n实时预览内容" } })
+    })
+    expect(await within(preview).findByText("实时预览内容")).toBeVisible()
   })
 
   it("shows a safe history error when history loading rejects", async () => {

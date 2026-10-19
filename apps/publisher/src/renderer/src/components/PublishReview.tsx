@@ -7,6 +7,7 @@ interface PublishReviewProps {
   readonly state: "loading" | "ready" | "error"
   readonly review?: ChangeReview
   readonly error?: string
+  readonly refreshError?: string
   readonly onClose: () => void
   readonly onRefresh: () => void
   readonly onPublish?: (changeGroupIds: readonly string[]) => Promise<void>
@@ -33,6 +34,7 @@ export function PublishReview({
   state,
   review,
   error,
+  refreshError,
   onClose,
   onRefresh,
   onPublish,
@@ -118,6 +120,15 @@ export function PublishReview({
 
       <div className="publish-review-body">
         {state === "loading" ? <p className="review-state">正在检查可发布内容…</p> : null}
+        {refreshError ? (
+          <div className="review-state review-error" role="alert">
+            <strong>无法刷新可发布变化</strong>
+            <span>{refreshError} 当前显示上次检查结果。</span>
+            <button type="button" className="secondary-button" onClick={onRefresh}>
+              <RefreshCw size={14} aria-hidden="true" /> 重新检查
+            </button>
+          </div>
+        ) : null}
         {state === "error" ? (
           <div className="review-state review-error" role="alert">
             <strong>暂时无法检查发布内容</strong>
@@ -215,7 +226,11 @@ export function PublishReview({
           type="button"
           className="primary-button"
           disabled={
-            !onPublish || selected.size === 0 || publishing || Boolean(review?.blockedReason)
+            !onPublish ||
+            selected.size === 0 ||
+            publishing ||
+            Boolean(review?.blockedReason) ||
+            Boolean(refreshError)
           }
           aria-describedby="publish-step-note"
           onClick={() => {

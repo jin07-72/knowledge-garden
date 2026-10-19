@@ -2,11 +2,13 @@ import { useMemo, useState } from "react"
 import { Monitor, TriangleAlert } from "lucide-react"
 import type { NoteSummary, PreviewStatus } from "../../../shared/contracts"
 import { HistoryView, type HistorySnapshot } from "./HistoryView"
+import { PrivateNotePreview } from "./PrivateNotePreview"
 
 type PreviewTab = "note" | "site" | "public" | "history"
 
 interface PreviewPaneProps {
   readonly note?: NoteSummary
+  readonly markdown?: string
   readonly preview: PreviewStatus
   readonly onLoadHistory: (requestId: string) => Promise<HistorySnapshot>
   readonly onCancelHistory: (requestId: string) => Promise<void>
@@ -25,6 +27,7 @@ function notePreviewUrl(
 
 export function PreviewPane({
   note,
+  markdown,
   preview,
   onLoadHistory,
   onCancelHistory,
@@ -89,24 +92,28 @@ export function PreviewPane({
             {preview.error?.message ?? "Quartz 预览暂时不可用。"}
           </div>
         ) : null}
-        {tab === "note" && exactUrl && note ? (
+        {tab === "note" && note?.visibility === "private" ? (
+          <PrivateNotePreview markdown={markdown} title={note.title} />
+        ) : null}
+        {tab === "note" && exactUrl && note?.visibility === "public" ? (
           <iframe
             title={`${note.title}的 Quartz 精确预览`}
             src={exactUrl}
             sandbox="allow-same-origin allow-scripts"
           />
         ) : null}
-        {tab === "note" && (!exactUrl || !note) ? (
+        {tab === "note" && !note ? (
           <div className="empty-state">
             <Monitor size={28} />
-            <strong>
-              {note?.visibility === "private" ? "私密笔记不会映射到公开网址" : "等待本地预览"}
-            </strong>
-            <span>
-              {note?.visibility === "private"
-                ? "源文件仍只保留在这台电脑上，不会误载同路径的公开页面。"
-                : "选择笔记后，这里显示与线上一致的 Quartz 页面。"}
-            </span>
+            <strong>等待本地预览</strong>
+            <span>选择笔记后，这里显示与线上一致的 Quartz 页面。</span>
+          </div>
+        ) : null}
+        {tab === "note" && note?.visibility === "public" && !exactUrl ? (
+          <div className="empty-state">
+            <Monitor size={28} />
+            <strong>等待本地预览</strong>
+            <span>本地预览启动后，这里显示与线上一致的 Quartz 页面。</span>
           </div>
         ) : null}
         {tab === "site" && baseUrl ? (

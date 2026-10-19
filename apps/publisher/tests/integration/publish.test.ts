@@ -15,11 +15,17 @@ import { basename, dirname, join, resolve } from "node:path"
 import { PassThrough } from "node:stream"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { runCommand, type CommandRequest } from "../../src/main/lib/commandRunner"
+import { listChanges } from "../../src/main/services/changes"
+import {
+  executeVisibilityChange,
+  planVisibilityChange,
+} from "../../src/main/services/noteTransactions"
 import {
   Publisher,
   PublishError,
   createBoundedPublishCommandRunner,
   createProductionPublisher,
+  createProductionSiteVerifier,
   createPublisherForTest,
   resolveProductionPublishRuntime,
   type PublishCommandProcess,
@@ -237,6 +243,55 @@ describe("production publication runtime", () => {
     expect(runtimeRequests[1]?.cwd).toMatch(/[\\/]\.garden-publisher[\\/]publish[\\/]/)
   })
 
+  it("verifies the generated site without the repository formatting gate", async () => {
+    const calls: Array<{ executable: string; args: readonly string[]; cwd: string }> = []
+    const verifier = createProductionSiteVerifier({
+      run: async (request) => {
+        calls.push({
+          executable: request.executable,
+          args: request.args,
+          cwd: request.cwd,
+        })
+        return { exitCode: 0, stdout: "", stderr: "" }
+      },
+    })
+
+    const result = await verifier({
+      executable: "node",
+      args: ["ignored"],
+      cwd: "C:\\verify",
+      signal: new AbortController().signal,
+    })
+
+    expect(result).toEqual({ exitCode: 0 })
+    expect(calls).toEqual([
+      { executable: "node", args: ["--test", "scripts/*.test.mjs"], cwd: "C:\\verify" },
+      { executable: "node", args: ["scripts/validate-content.mjs"], cwd: "C:\\verify" },
+      { executable: "node", args: ["quartz/bootstrap-cli.mjs", "build"], cwd: "C:\\verify" },
+      { executable: "node", args: ["scripts/check-built-links.mjs"], cwd: "C:\\verify" },
+    ])
+  })
+
+  it("stops the production site verification at the first failing step", async () => {
+    let calls = 0
+    const verifier = createProductionSiteVerifier({
+      run: async () => {
+        calls += 1
+        return { exitCode: calls === 2 ? 1 : 0, stdout: "", stderr: "" }
+      },
+    })
+
+    await expect(
+      verifier({
+        executable: "node",
+        args: [],
+        cwd: "C:\\verify",
+        signal: new AbortController().signal,
+      }),
+    ).resolves.toEqual({ exitCode: 1 })
+    expect(calls).toBe(2)
+  })
+
   it("fails before staging when the default bundled dependency check is unsuccessful", async () => {
     const repository = await fixture()
     await put(repository.root, "content/technology/css-grid.md", "invalid dependencies\n")
@@ -386,6 +441,63 @@ describe("exact-tree publication", () => {
     await expect(
       readFile(join(repository.root, "content/life/weekly-review.md"), "utf8"),
     ).rejects.toMatchObject({ code: "ENOENT" })
+  })
+
+  it("publishes a privatization deletion and its cleaned public inbound link together", async () => {
+    const repository = await fixture()
+    await put(
+      repository.root,
+      "content/technology/index.md",
+      "---\ngardenDomain: true\ntitle: Technology\ndescription: Technology notes.\ndomainOrder: 1\n---\n\n- [[css-grid|CSS Grid]]\n",
+    )
+    await put(
+      repository.root,
+      "content/life/index.md",
+      "---\ngardenDomain: true\ntitle: Life\ndescription: Life notes.\ndomainOrder: 2\n---\n",
+    )
+    expect((await git(repository.root, ["add", "."])).exitCode).toBe(0)
+    expect((await git(repository.root, ["commit", "-m", "add domain pages"])).exitCode).toBe(0)
+    expect((await git(repository.root, ["push"])).exitCode).toBe(0)
+
+    const plan = await planVisibilityChange({
+      workspace: repository.root,
+      path: "content/technology/css-grid.md",
+      visibility: "private",
+    })
+    const receipt = await executeVisibilityChange(plan, {
+      workspace: repository.root,
+      transactionTrash: { trashItem: async () => undefined },
+    })
+    expect(receipt.linkEditedPaths).toEqual(["content/technology/index.md"])
+    expect(await readFile(join(repository.root, "private/technology/css-grid.md"), "utf8")).toBe(
+      "original grid\n",
+    )
+
+    const review = await listChanges({ workspace: repository.root })
+    const selected = review.groups.filter(
+      (group) =>
+        group.selection === "default" &&
+        (group.kind === "unpublish" || group.kind === "modified") &&
+        group.paths.some((path) => receipt.changedPaths.includes(path)),
+    )
+    const paths = [
+      ...new Set(
+        selected.flatMap((group) => group.paths).filter((path) => !path.startsWith("private/")),
+      ),
+    ].sort()
+    expect(paths).toEqual(["content/technology/css-grid.md", "content/technology/index.md"])
+
+    await publisher(repository).publish({ paths })
+
+    const names = await output(repository.root, ["ls-tree", "-r", "--name-only", "HEAD"])
+    expect(names).not.toContain("content/technology/css-grid.md")
+    expect(names).not.toContain("private/technology/css-grid.md")
+    const publishedIndex = await output(repository.root, [
+      "show",
+      "HEAD:content/technology/index.md",
+    ])
+    expect(publishedIndex).not.toContain("css-grid")
+    expect(publishedIndex).not.toContain("CSS Grid")
   })
 
   it("publishes both sides of a selected rename without taking unrelated edits", async () => {

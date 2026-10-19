@@ -175,6 +175,146 @@ describe("note visibility transactions", () => {
     ).resolves.toContain("# Transformers")
   })
 
+  it("removes incoming public Wiki-link entries when a note becomes private", async () => {
+    const workspace = await garden({ git: true })
+    await put(
+      workspace,
+      "content/technology/css-grid.md",
+      "---\ntitle: CSS Grid\n---\n\n# CSS Grid\n",
+    )
+    await put(
+      workspace,
+      "content/technology/index.md",
+      [
+        "---",
+        "gardenDomain: true",
+        "title: technology",
+        "description: Test domain.",
+        "---",
+        "",
+        "# Technology",
+        "",
+        "- [[css-grid|CSS Grid 心智模型]]",
+        "- Keep [[technology/css-grid|qualified]] inline.",
+        "- `[[css-grid]]` stays in code.",
+        "",
+        "```md",
+        "[[css-grid]]",
+        "```",
+        "",
+      ].join("\n"),
+    )
+    await put(
+      workspace,
+      "content/reading/links.md",
+      "---\ntitle: Links\n---\n\nSee [[css-grid|CSS Grid]] for details.\n",
+    )
+    await put(
+      workspace,
+      "private/reading/links.md",
+      "---\ntitle: Private links\n---\n\nSee [[css-grid|CSS Grid]].\n",
+    )
+
+    const plan = await planVisibilityChange({
+      workspace,
+      path: "content/technology/css-grid.md",
+      visibility: "private",
+    })
+    expect(plan.linkEdits).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: "content/technology/index.md",
+          oldTarget: "css-grid",
+          count: 1,
+          newTarget: null,
+        }),
+        expect.objectContaining({
+          path: "content/technology/index.md",
+          oldTarget: "technology/css-grid",
+          count: 1,
+          newTarget: null,
+        }),
+        expect.objectContaining({
+          path: "content/reading/links.md",
+          oldTarget: "css-grid",
+          count: 1,
+          newTarget: null,
+        }),
+      ]),
+    )
+
+    const receipt = await executeVisibilityChange(plan, { workspace })
+
+    expect(await readFile(join(workspace, "content/technology/index.md"), "utf8")).toBe(
+      [
+        "---",
+        "gardenDomain: true",
+        "title: technology",
+        "description: Test domain.",
+        "---",
+        "",
+        "# Technology",
+        "",
+        "- Keep inline.",
+        "- `[[css-grid]]` stays in code.",
+        "",
+        "```md",
+        "[[css-grid]]",
+        "```",
+        "",
+      ].join("\n"),
+    )
+    expect(await readFile(join(workspace, "content/reading/links.md"), "utf8")).toBe(
+      "---\ntitle: Links\n---\n\nSee for details.\n",
+    )
+    expect(await readFile(join(workspace, "private/reading/links.md"), "utf8")).toBe(
+      "---\ntitle: Private links\n---\n\nSee [[css-grid|CSS Grid]].\n",
+    )
+    expect(await readFile(join(workspace, "private/technology/css-grid.md"), "utf8")).toContain(
+      "# CSS Grid",
+    )
+    expect(receipt.linkEditedPaths).toEqual([
+      "content/reading/links.md",
+      "content/technology/index.md",
+    ])
+  })
+
+  it("removes whole link-only list lines while preserving CRLF endings", async () => {
+    const workspace = await garden({ git: true })
+    await put(workspace, "content/reading/target.md", "---\ntitle: Target\n---\n")
+    await put(
+      workspace,
+      "content/reading/index.md",
+      "---\r\ngardenDomain: true\r\ntitle: reading\r\ndescription: Test domain.\r\n---\r\n\r\n- [[target]]\r\n- keep\r\n",
+    )
+
+    const plan = await planVisibilityChange({
+      workspace,
+      path: "content/reading/target.md",
+      visibility: "private",
+    })
+    await executeVisibilityChange(plan, { workspace })
+
+    expect(await readFile(join(workspace, "content/reading/index.md"), "utf8")).toBe(
+      "---\r\ngardenDomain: true\r\ntitle: reading\r\ndescription: Test domain.\r\n---\r\n\r\n- keep\r\n",
+    )
+  })
+
+  it("blocks removing an unqualified public link when the target slug is ambiguous", async () => {
+    const workspace = await garden()
+    await put(workspace, "content/reading/topic.md", "---\ntitle: Reading topic\n---\n")
+    await put(workspace, "content/language/topic.md", "---\ntitle: Language topic\n---\n")
+    await put(workspace, "content/reading/links.md", "See [[topic]].\n")
+
+    await expect(
+      planVisibilityChange({
+        workspace,
+        path: "content/reading/topic.md",
+        visibility: "private",
+      }),
+    ).rejects.toMatchObject({ code: "TRANSACTION_PLAN_BLOCKED" })
+  })
+
   it("fails closed when a custom-domain landing page is removed before publication", async () => {
     const workspace = await garden({ git: true })
     await put(

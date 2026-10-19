@@ -417,6 +417,25 @@ describe("listChanges", () => {
     )
   })
 
+  it("groups a modified domain landing page as default public content", async () => {
+    const fixture = await repository()
+    await writeFile(
+      join(fixture.root, "content", "technology", "index.md"),
+      `${domainPage("Technology", 0)}\n\n- [[css-grid|CSS Grid]]\n`,
+    )
+
+    const review = await listChanges({ workspace: fixture.root })
+
+    expect(review.groups).toEqual([
+      expect.objectContaining({
+        kind: "modified",
+        selection: "default",
+        label: "index",
+        paths: ["content/technology/index.md"],
+      }),
+    ])
+  })
+
   it("keeps both custom-domain paths in one default group when a note is renamed", async () => {
     const fixture = await repository()
     await addCommittedDomain(fixture, "field-notes", "Field Notes", 3)

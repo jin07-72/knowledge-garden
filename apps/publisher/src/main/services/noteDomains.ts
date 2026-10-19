@@ -29,8 +29,9 @@ export async function captureNoteDomainSnapshot(
 export async function revalidateNoteDomains(
   snapshot: NoteDomainSnapshot,
   domains: Iterable<string> = snapshot.orderedSlugs,
+  allowLandingContentChangeFor: Iterable<string> = [],
 ): Promise<void> {
-  await revalidateDomainSnapshot(snapshot.discovery, domains)
+  await revalidateDomainSnapshot(snapshot.discovery, domains, allowLandingContentChangeFor)
 }
 
 export function sameNoteDomainMembership(

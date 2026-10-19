@@ -1,10 +1,21 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, net, shell } from "electron"
+import {
+  app,
+  BrowserWindow,
+  clipboard,
+  dialog,
+  ipcMain,
+  nativeImage,
+  net,
+  screen,
+  shell,
+} from "electron"
 import { existsSync } from "node:fs"
 import { readFile } from "node:fs/promises"
 import { isAbsolute, join, resolve } from "node:path"
 import { randomUUID } from "node:crypto"
 import { DEFAULT_GARDEN_PATH, IPC_CHANNELS } from "../shared/contracts"
 import { systemCommandRunner } from "./lib/commandRunner"
+import { windowBoundsForWorkArea } from "./lib/windowBounds"
 import { registerBlogManagementIpc, registerLifecycleIpc, registerPublisherIpc } from "./ipc"
 import {
   createBlogManagementAdapter,
@@ -171,10 +182,8 @@ function createWindow(): BrowserWindow {
   const { rendererFile, preloadFile } = resolveMainRuntimeFiles(import.meta.url)
   const trust = createRendererTrustPolicy(rendererFile, process.env.ELECTRON_RENDERER_URL)
   const window = new BrowserWindow({
-    width: 1440,
-    height: 900,
-    minWidth: 960,
-    minHeight: 640,
+    ...windowBoundsForWorkArea(screen.getPrimaryDisplay().workAreaSize),
+    center: true,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,

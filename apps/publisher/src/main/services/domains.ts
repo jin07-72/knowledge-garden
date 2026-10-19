@@ -8,6 +8,7 @@ import {
   mkdir,
   open,
   readdir,
+  readFile,
   realpath,
   rename,
   rmdir,
@@ -816,10 +817,27 @@ async function revalidateMutationBoundaries(
   await Promise.all(boundaries.map((boundary) => revalidateMutatedBoundary(workspace, boundary)))
 }
 
+async function landingStillMarksDomain(
+  workspace: string,
+  evidence: DiscoveredDomainEvidence,
+): Promise<boolean> {
+  try {
+    const source = await readFile(evidence.landing, "utf8")
+    const parsed = parseDomainPage(
+      { path: displayPath(workspace, evidence.landing), source },
+      evidence.slug,
+    )
+    return parsed?.slug === evidence.slug
+  } catch {
+    return false
+  }
+}
+
 async function revalidateDiscoveredDomainEvidence(
   workspace: string,
   evidence: DiscoveredDomainEvidence,
   exactDirectory: boolean,
+  allowLandingContentChange = false,
 ): Promise<void> {
   const directoryPath = displayPath(workspace, evidence.directory)
   const landingPath = displayPath(workspace, evidence.landing)
@@ -842,7 +860,9 @@ async function revalidateDiscoveredDomainEvidence(
       !pathsEqual(evidence.landing, canonicalLanding) ||
       !isInside(evidence.directory, canonicalLanding) ||
       !directoryMatches ||
-      !sameFileIdentity(evidence.landingIdentity, fileIdentity(landing))
+      (!allowLandingContentChange &&
+        !sameFileIdentity(evidence.landingIdentity, fileIdentity(landing))) ||
+      (allowLandingContentChange && !(await landingStillMarksDomain(workspace, evidence)))
     ) {
       throw unsafePath(landingPath)
     }
@@ -995,6 +1015,7 @@ export async function discoverDomainSnapshot(
 export async function revalidateDomainSnapshot(
   snapshot: DomainDiscoverySnapshot,
   slugs: Iterable<string> = snapshot.slugs,
+  allowLandingContentChangeFor: Iterable<string> = [],
 ): Promise<void> {
   const evidence = snapshot[domainSnapshotEvidence]
   await Promise.all([
@@ -1003,9 +1024,15 @@ export async function revalidateDomainSnapshot(
     revalidateMutatedBoundary(snapshot.workspace, evidence.privateRoot),
   ])
   const requested = new Set(slugs)
+  const allowedLandingChanges = new Set(allowLandingContentChangeFor)
   for (const domain of evidence.domains) {
     if (requested.has(domain.slug)) {
-      await revalidateDiscoveredDomainEvidence(snapshot.workspace, domain, false)
+      await revalidateDiscoveredDomainEvidence(
+        snapshot.workspace,
+        domain,
+        false,
+        allowedLandingChanges.has(domain.slug),
+      )
       requested.delete(domain.slug)
     }
   }

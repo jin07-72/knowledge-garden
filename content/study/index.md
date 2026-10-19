@@ -1,5 +1,5 @@
 ---
-title: 学习
+title: 课内学习
 date: "2026-10-11"
 description: 学习领域的学习记录。
 tags:

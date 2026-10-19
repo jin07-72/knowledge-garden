@@ -563,6 +563,7 @@ const noteTransactionReceiptSchema = z
   .object({
     id: z.string().min(1).max(128),
     changedPaths: z.array(pathSchema).max(1_000),
+    linkEditedPaths: z.array(pathSchema).max(1_000).optional(),
     pendingPublicDeletion: pathSchema.optional(),
     historyWarning: z.boolean(),
     warnings: z.array(warningSchema).max(100),

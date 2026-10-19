@@ -127,4 +127,27 @@ describe("PublishReview", () => {
     }
     expect(document.body).not.toHaveTextContent("porcelain")
   })
+
+  it("keeps the last review visible but blocks publishing when refreshing fails", async () => {
+    const user = userEvent.setup()
+    const refresh = vi.fn()
+    const onPublish = vi.fn(async () => undefined)
+    render(
+      <PublishReview
+        review={review}
+        state="ready"
+        refreshError="变更服务暂不可用。"
+        onClose={vi.fn()}
+        onRefresh={refresh}
+        onPublish={onPublish}
+      />,
+    )
+
+    const dialog = screen.getByRole("dialog", { name: "检查并发布" })
+    expect(within(dialog).getByRole("alert")).toHaveTextContent("变更服务暂不可用。")
+    expect(within(dialog).getByRole("checkbox", { name: /下线.*Retired/ })).toBeChecked()
+    expect(within(dialog).getByRole("button", { name: "验证并发布" })).toBeDisabled()
+    await user.click(within(dialog).getByRole("button", { name: "重新检查" }))
+    expect(refresh).toHaveBeenCalledOnce()
+  })
 })

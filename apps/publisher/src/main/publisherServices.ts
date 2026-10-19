@@ -111,6 +111,31 @@ function switchBusy(restoreSafe = false): AppError & { readonly restoreSafe: boo
   }
 }
 
+const publicationFailureReasons: Readonly<Record<string, string>> = {
+  VERIFY_FAILED: "网站验证未通过，请检查站点构建。",
+  REMOTE_DIVERGED: "远程 main 已分叉，请先同步远程分支。",
+  REMOTE_UNAVAILABLE: "无法连接远程仓库。",
+  PUSH_FAILED: "上传或确认远程版本失败。",
+  BRANCH_UNSAFE: "当前不在 main 分支。",
+  STAGED_CHANGES: "检测到已暂存的变化。",
+  DEPENDENCIES_INVALID: "站点依赖不完整。",
+  RUNTIME_MISSING: "发布运行时不可用。",
+  CLEANUP_FAILED: "临时发布文件清理失败。",
+  PUBLISH_TIMEOUT: "发布超时。",
+  PUBLISH_CANCELLED: "发布已取消。",
+}
+
+function publicationFailureMessage(failure: unknown): string {
+  const code =
+    typeof failure === "object" && failure !== null && "code" in failure
+      ? String((failure as { readonly code?: unknown }).code)
+      : undefined
+  const known = code === undefined ? undefined : publicationFailureReasons[code]
+  const detail =
+    failure instanceof Error && failure.message.trim() ? failure.message.trim() : "未知错误。"
+  return `${known ?? detail} 本地编辑内容仍已保留。`
+}
+
 export function canRestorePublisherRuntime(error: unknown): boolean {
   return (
     typeof error === "object" &&
@@ -422,7 +447,11 @@ export async function createPublisherServices(
                 message: dependencies.publishCompletionMessage ?? "发布成功，正在等待部署。",
                 percent: 100,
               }),
-            () => emitPublish({ phase: "failed", message: "发布失败；本地编辑内容仍已保留。" }),
+            (failure) =>
+              emitPublish({
+                phase: "failed",
+                message: `发布失败：${publicationFailureMessage(failure)}`,
+              }),
           )
           .finally(() => {
             if (activePublish === operationId) activePublish = undefined

@@ -151,6 +151,7 @@ export const MarkdownEditor = forwardRef<
     readonly readOnly?: boolean
     readonly onSaved?: (receipt: NoteWriteReceipt) => void
     readonly onSaveStateChange?: (label: string) => void
+    readonly onPreviewChange?: (markdown: string) => void
   }
 >(function MarkdownEditor(
   {
@@ -164,6 +165,7 @@ export const MarkdownEditor = forwardRef<
     readOnly = false,
     onSaved,
     onSaveStateChange,
+    onPreviewChange,
   },
   ref,
 ) {
@@ -179,6 +181,17 @@ export const MarkdownEditor = forwardRef<
   switchReadOnly.current = readOnly
   const refreshWritable = useRef<() => void>(() => undefined)
   const retryRecoveryLoad = useRef<() => void>(() => undefined)
+  const previewChange = useRef(onPreviewChange)
+  const previewTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  useEffect(() => {
+    previewChange.current = onPreviewChange
+  }, [onPreviewChange])
+  useEffect(
+    () => () => {
+      if (previewTimer.current) clearTimeout(previewTimer.current)
+    },
+    [],
+  )
   const [recoveryPrompt, setRecoveryPrompt] = useState<NoteRecovery>()
   const [recoveryLoadError, setRecoveryLoadError] = useState<string>()
   const [unknownRecoveryWarning, setUnknownRecoveryWarning] = useState(false)
@@ -261,7 +274,14 @@ export const MarkdownEditor = forwardRef<
               update.transactions.some((transaction) => transaction.annotation(programmaticReplace))
             )
               return
-            autosaveRef.current.change(update.state.sliceDoc())
+            const text = update.state.sliceDoc()
+            autosaveRef.current.change(text)
+            if (previewChange.current) {
+              if (previewTimer.current) clearTimeout(previewTimer.current)
+              previewTimer.current = setTimeout(() => {
+                if (mounted.current) previewChange.current?.(text)
+              }, 120)
+            }
             const cursor = update.state.selection.main.head
             if (update.state.doc.sliceString(Math.max(0, cursor - 2), cursor) === "[[") {
               queueMicrotask(() => {

@@ -198,6 +198,7 @@ export function PublisherApp({
   const [domainError, setDomainError] = useState<string>()
   const [selectedPath, setSelectedPath] = useState<string>()
   const [document, setDocument] = useState<NoteDocument>()
+  const [privatePreview, setPrivatePreview] = useState<{ path: string; markdown: string }>()
   const [documentError, setDocumentError] = useState<string>()
   const [documentRetry, setDocumentRetry] = useState(0)
   const [notesState, setNotesState] = useState<LoadState>("loading")
@@ -206,6 +207,7 @@ export function PublisherApp({
   const [changeCount, setChangeCount] = useState<number>()
   const [changeReview, setChangeReview] = useState<ChangeReview>()
   const [changeReviewState, setChangeReviewState] = useState<LoadState>("loading")
+  const [changeRefreshError, setChangeRefreshError] = useState<string>()
   const [changeReviewOpen, setChangeReviewOpen] = useState(false)
   const [publishMessage, setPublishMessage] = useState("正在检查可发布变化…")
   const [publishSubmitError, setPublishSubmitError] = useState<AppError>()
@@ -243,6 +245,7 @@ export function PublisherApp({
   const publishBlogId = useRef(initialRegistry.activeBlogId)
   const previewRequest = useRef(0)
   const changesRequest = useRef(0)
+  const hasChangeReview = useRef(false)
   const pendingPublishRequest = useRef<PublishRequest | undefined>(undefined)
   const publishAttempt = useRef(0)
   const previewStart = useRef<ReturnType<GardenApi["preview"]["start"]> | undefined>(undefined)
@@ -355,6 +358,16 @@ export function PublisherApp({
     () => notes.find((note) => note.path === selectedPath),
     [notes, selectedPath],
   )
+  const previewMarkdown =
+    selectedNote && privatePreview?.path === selectedNote.path
+      ? privatePreview.markdown
+      : selectedNote && document?.path === selectedNote.path
+        ? document.markdown
+        : undefined
+
+  useEffect(() => {
+    setPrivatePreview(undefined)
+  }, [selectedPath])
 
   const selectNote = useCallback(
     async (path: string): Promise<void> => {
@@ -501,7 +514,7 @@ export function PublisherApp({
   }, [api])
 
   const loadChanges = useCallback(
-    async (expectedPublishGeneration?: number): Promise<void> => {
+    async (expectedPublishGeneration?: number): Promise<ChangeReview | undefined> => {
       const request = ++changesRequest.current
       const stale = (): boolean =>
         request !== changesRequest.current ||
@@ -509,28 +522,45 @@ export function PublisherApp({
           expectedPublishGeneration !== publishDeploymentGeneration.current)
       pendingPublishRequest.current = undefined
       setPublishSubmitError(undefined)
-      setChangeReviewState("loading")
+      setChangeRefreshError(undefined)
+      // Keep the last successful review visible while refreshing so opening the
+      // dialog does not blank out known changes. Only an initial load blocks it.
+      if (!hasChangeReview.current) setChangeReviewState("loading")
       let result: Awaited<ReturnType<GardenApi["changes"]["list"]>>
       try {
         result = await api.changes.list()
       } catch (error) {
         if (stale()) return
+        const message = error instanceof Error ? error.message : "无法检查可发布变化"
+        if (hasChangeReview.current) {
+          setChangeRefreshError(message)
+          setPublishMessage(message)
+          return
+        }
         setChangeReview(undefined)
         setChangeCount(undefined)
         setChangeReviewState("error")
-        setPublishMessage(error instanceof Error ? error.message : "无法检查可发布变化")
+        setPublishMessage(message)
         return
       }
       if (stale()) return
       if (!result.ok) {
+        const message = messageFor(result.error, "发布检查暂不可用。")
+        if (hasChangeReview.current) {
+          setChangeRefreshError(message)
+          setPublishMessage(message)
+          return
+        }
         setChangeReview(undefined)
         setChangeCount(undefined)
         setChangeReviewState("error")
-        setPublishMessage(messageFor(result.error, "发布检查暂不可用。"))
+        setPublishMessage(message)
         return
       }
+      hasChangeReview.current = true
       setChangeReview(result.value)
       setChangeReviewState("ready")
+      setChangeRefreshError(undefined)
       const publishable = result.value.groups.filter(
         (group) => group.selection === "default",
       ).length
@@ -539,6 +569,7 @@ export function PublisherApp({
         result.value.blockedReason ??
           (result.value.groups.length === 0 ? "当前没有可发布变化" : "可查看并选择要发布的变化"),
       )
+      return result.value
     },
     [api],
   )
@@ -552,8 +583,10 @@ export function PublisherApp({
     cancelPublishDeployment()
     setPublishProgress(undefined)
     setPublishActionsUrl(undefined)
+    hasChangeReview.current = false
     setChangeReview(undefined)
     setChangeCount(undefined)
+    setChangeRefreshError(undefined)
     setChangeReviewOpen(false)
     setChangeReviewState("loading")
     setPublishMessage("正在检查可发布变化…")
@@ -781,6 +814,65 @@ export function PublisherApp({
     return undefined
   }
 
+  const autoPublishRetirement = async (
+    sourcePath: string,
+    changedPaths: readonly string[],
+  ): Promise<void> => {
+    const review = await loadChanges()
+    if (!appMounted.current) return
+    if (!review) {
+      setPublishMessage("下线变化已保留；暂时无法自动发布，请在“检查并发布”中重试。")
+      return
+    }
+    if (review.blockedReason) {
+      setPublishMessage(review.blockedReason)
+      return
+    }
+    // Only retire the published page and update already-published link sources.
+    // A never-published note that merely links here must not be auto-published.
+    const affected = review.groups.filter(
+      (group) =>
+        group.selection === "default" &&
+        (group.kind === "modified" || group.kind === "unpublish") &&
+        group.paths.some((path) => path === sourcePath || changedPaths.includes(path)),
+    )
+    if (affected.length === 0) {
+      setPublishMessage("下线变化已保留；未找到可自动发布的变化。")
+      return
+    }
+    setPublishProgress(undefined)
+    setPublishActionsUrl(undefined)
+    setPublishMessage("正在自动发布下线变化…")
+    try {
+      const result = await api.publish.start({
+        changeGroupIds: affected.map(({ id }) => id),
+      })
+      if (!appMounted.current) return
+      if (!result.ok) {
+        if (
+          result.error.code === "PUBLISH_BRANCH_REPAIR_REQUIRED" ||
+          result.error.code === "PUBLISH_BRANCH_REPAIR_BLOCKED"
+        ) {
+          setPublishSubmitError(result.error)
+          setChangeReviewOpen(true)
+          return
+        }
+        setPublishMessage(
+          messageFor(result.error, "自动发布下线失败；下线变化已保留，请在“检查并发布”中重试。"),
+        )
+        return
+      }
+      setPublishMessage("正在自动发布下线变化…")
+    } catch (error) {
+      if (!appMounted.current) return
+      setPublishMessage(
+        error instanceof Error
+          ? error.message
+          : "自动发布下线失败；下线变化已保留，请在“检查并发布”中重试。",
+      )
+    }
+  }
+
   const changeVisibility = async (note: NoteSummary, visibility: Visibility): Promise<void> => {
     if (visibility === note.visibility || visibilityBusy) return
     if (note.path === selectedPath && !((await markdownEditor.current?.flush()) ?? true)) {
@@ -810,10 +902,14 @@ export function PublisherApp({
       setDocument((current) =>
         current?.path === note.path ? { ...current, path: nextPath } : current,
       )
+      const linkEditedPaths = result.value.linkEditedPaths ?? []
       const consequenceMessages = [
         ...(result.value.pendingPublicDeletion ? ["仍在线，等待发布下架"] : []),
         ...(result.value.historyWarning ? ["Git 历史仍可能保留公开内容"] : []),
         ...result.value.warnings.map((warning) => warning.message),
+        ...(linkEditedPaths.length > 0
+          ? [`已清理 ${linkEditedPaths.length} 篇公开笔记中指向这篇笔记的旧链接`]
+          : []),
       ]
       setVisibilityNotice(
         consequenceMessages.length > 0
@@ -821,6 +917,11 @@ export function PublisherApp({
           : undefined,
       )
       void loadDomains()
+      if (visibility === "private" && result.value.pendingPublicDeletion) {
+        await autoPublishRetirement(note.path, result.value.changedPaths)
+      } else {
+        void loadChanges()
+      }
     } catch (error) {
       if (!appMounted.current) return
       setVisibilityError({
@@ -1193,6 +1294,11 @@ export function PublisherApp({
                     )
                   }}
                   onSaveStateChange={setSaveStateLabel}
+                  onPreviewChange={
+                    selectedNote?.visibility === "private"
+                      ? (markdown) => setPrivatePreview({ path: document.path, markdown })
+                      : undefined
+                  }
                 />
               ) : (
                 <p className="editor-notice">正在载入 Markdown…</p>
@@ -1209,6 +1315,7 @@ export function PublisherApp({
 
         <PreviewPane
           note={selectedNote}
+          markdown={previewMarkdown}
           preview={preview}
           onLoadHistory={loadHistory}
           onCancelHistory={cancelHistory}
@@ -1287,6 +1394,7 @@ export function PublisherApp({
           state={changeReviewState}
           review={changeReview}
           error={changeReviewState === "error" ? publishMessage : undefined}
+          refreshError={changeRefreshError}
           submitError={publishSubmitError}
           onClose={() => {
             publishAttempt.current += 1
