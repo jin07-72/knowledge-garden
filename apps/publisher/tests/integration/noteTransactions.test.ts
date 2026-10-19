@@ -298,6 +298,123 @@ describe("note visibility transactions", () => {
     expect(await exists(join(workspace, "private/reading/private-note.md"))).toBe(false)
   })
 
+  it("creates a missing private domain directory before moving a public note", async () => {
+    const workspace = await garden({ git: true })
+    const source = "content/reading/active-recall.md"
+    const targetDirectory = join(workspace, "private", "reading")
+    const target = join(targetDirectory, "active-recall.md")
+    const markdown = "---\ntitle: Active recall\n---\n\nPractice retrieval.\n"
+    await rm(targetDirectory, { recursive: true })
+    await put(workspace, source, markdown)
+
+    const plan = await planVisibilityChange({ workspace, path: source, visibility: "private" })
+    const result = await executeVisibilityChange(plan, { workspace })
+
+    expect(result.pendingPublicDeletion).toBe(source)
+    expect(await readFile(target, "utf8")).toBe(markdown)
+    expect(await exists(join(workspace, source))).toBe(false)
+  })
+
+  it("rejects a target domain replaced by a file before execution without changing the source", async () => {
+    const workspace = await garden({ git: true })
+    const source = "content/reading/active-recall.md"
+    const targetDirectory = join(workspace, "private", "reading")
+    const markdown = "---\ntitle: Active recall\n---\n\nPractice retrieval.\n"
+    await rm(targetDirectory, { recursive: true })
+    await put(workspace, source, markdown)
+
+    const plan = await planVisibilityChange({ workspace, path: source, visibility: "private" })
+    await writeFile(targetDirectory, "not a directory")
+
+    await expect(executeVisibilityChange(plan, { workspace })).rejects.toMatchObject({
+      code: "TRANSACTION_PLAN_BLOCKED",
+      details: { issue: "UNSAFE_TARGET", path: "private/reading" },
+    })
+    await expect(readFile(join(workspace, source), "utf8")).resolves.toBe(markdown)
+  })
+
+  it("rejects a target domain replaced by a link before execution without changing the source", async () => {
+    const workspace = await garden({ git: true })
+    const source = "content/reading/active-recall.md"
+    const targetDirectory = join(workspace, "private", "reading")
+    const linkedDirectory = join(workspace, "private", "linked-reading")
+    const markdown = "---\ntitle: Active recall\n---\n\nPractice retrieval.\n"
+    await rm(targetDirectory, { recursive: true })
+    await mkdir(linkedDirectory)
+    await put(workspace, source, markdown)
+
+    const plan = await planVisibilityChange({ workspace, path: source, visibility: "private" })
+    await symlink(
+      linkedDirectory,
+      targetDirectory,
+      process.platform === "win32" ? "junction" : "dir",
+    )
+
+    await expect(executeVisibilityChange(plan, { workspace })).rejects.toMatchObject({
+      code: "TRANSACTION_PLAN_BLOCKED",
+      details: { issue: "UNSAFE_TARGET", path: "private/reading" },
+    })
+    await expect(readFile(join(workspace, source), "utf8")).resolves.toBe(markdown)
+  })
+
+  it("rejects a target domain replaced by a file after planning without changing the source", async () => {
+    const workspace = await garden({ git: true })
+    const source = "content/reading/active-recall.md"
+    const targetDirectory = join(workspace, "private", "reading")
+    const markdown = "---\ntitle: Active recall\n---\n\nPractice retrieval.\n"
+    await rm(targetDirectory, { recursive: true })
+    await put(workspace, source, markdown)
+
+    const plan = await planVisibilityChange({ workspace, path: source, visibility: "private" })
+
+    await expect(
+      executeVisibilityChange(plan, {
+        workspace,
+        adapter: {
+          beforePublish: async () => {
+            await writeFile(targetDirectory, "not a directory")
+          },
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: "TRANSACTION_PLAN_BLOCKED",
+      details: { issue: "UNSAFE_TARGET", path: "private/reading" },
+    })
+    await expect(readFile(join(workspace, source), "utf8")).resolves.toBe(markdown)
+  })
+
+  it("rejects a target domain replaced by a link after planning without changing the source", async () => {
+    const workspace = await garden({ git: true })
+    const source = "content/reading/active-recall.md"
+    const targetDirectory = join(workspace, "private", "reading")
+    const linkedDirectory = join(workspace, "private", "linked-reading")
+    const markdown = "---\ntitle: Active recall\n---\n\nPractice retrieval.\n"
+    await rm(targetDirectory, { recursive: true })
+    await mkdir(linkedDirectory)
+    await put(workspace, source, markdown)
+
+    const plan = await planVisibilityChange({ workspace, path: source, visibility: "private" })
+
+    await expect(
+      executeVisibilityChange(plan, {
+        workspace,
+        adapter: {
+          beforePublish: async () => {
+            await symlink(
+              linkedDirectory,
+              targetDirectory,
+              process.platform === "win32" ? "junction" : "dir",
+            )
+          },
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: "TRANSACTION_PLAN_BLOCKED",
+      details: { issue: "UNSAFE_TARGET", path: "private/reading" },
+    })
+    await expect(readFile(join(workspace, source), "utf8")).resolves.toBe(markdown)
+  })
+
   it("reports whether a public source is tracked without taking Git locks", async () => {
     const workspace = await garden({ git: true })
     await put(workspace, "content/life/tracked.md", "---\ntitle: Tracked\n---\n")
