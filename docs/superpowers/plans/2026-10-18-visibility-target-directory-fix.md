@@ -18,6 +18,7 @@
 ### Task 1: Reproduce the missing target-domain defect
 
 **Files:**
+
 - Test: `apps/publisher/tests/integration/noteTransactions.test.ts:136-300`
 
 - [ ] **Step 1: Add a focused failing integration test**
@@ -63,6 +64,7 @@ git commit -m "test: reproduce missing visibility target directory"
 ### Task 2: Prepare the target domain safely
 
 **Files:**
+
 - Modify: `apps/publisher/src/main/services/noteTransactions.ts:408-524`
 - Modify: `apps/publisher/src/main/services/noteTransactions.ts:3075-3115`
 - Test: `apps/publisher/tests/integration/noteTransactions.test.ts:136-330`
@@ -87,9 +89,9 @@ it("rejects a target domain replaced by a file after planning without changing t
       adapter: { beforePublish: () => writeFile(targetDirectory, "occupied") },
     }),
   ).rejects.toMatchObject({
-      code: "TRANSACTION_PLAN_BLOCKED",
-      details: { issue: "UNSAFE_TARGET", path: "private/reading" },
-    })
+    code: "TRANSACTION_PLAN_BLOCKED",
+    details: { issue: "UNSAFE_TARGET", path: "private/reading" },
+  })
   await expect(readFile(join(workspace, source), "utf8")).resolves.toBe(markdown)
 })
 ```
@@ -175,11 +177,10 @@ async function ensureVisibilityTargetDomainDirectory(
   try {
     await ensureSafeDirectory(directory, root)
   } catch {
-    throw transactionError(
-      "TRANSACTION_PLAN_BLOCKED",
-      "The target domain directory is unsafe.",
-      { issue: "UNSAFE_TARGET", path: domainPath },
-    )
+    throw transactionError("TRANSACTION_PLAN_BLOCKED", "The target domain directory is unsafe.", {
+      issue: "UNSAFE_TARGET",
+      path: domainPath,
+    })
   }
 }
 ```
@@ -195,6 +196,24 @@ await publishExclusive(
 ```
 
 The second revalidation ensures the domain catalog and managed roots still match after directory creation.
+
+#### Final implementation note
+
+The completed implementation uses two visibility-only checks and deliberately
+leaves rename execution unchanged:
+
+1. Immediately after `verifyPlan`, and before `captureNoteDomainSnapshot`,
+   `validateVisibilityTargetDomainDirectory` safely validates the target root.
+   It accepts an absent exact target domain without creating it and rejects an
+   existing file, link, junction, escaped path, or other unsafe entry with
+   `TRANSACTION_PLAN_BLOCKED` and `UNSAFE_TARGET` details.
+2. After locks and journal setup, the publication order is
+   `beforePublish` -> domain revalidation -> visibility-only target-domain
+   creation/validation -> parent-root directory sync -> second domain
+   revalidation -> `publishExclusive`. Creation is non-recursive. A parent sync
+   failure prevents publication and source removal.
+3. Both checks are guarded by `plan.kind === "visibility"`; cross-domain rename
+   behavior remains supported and does not enter either path.
 
 - [ ] **Step 3: Verify the focused tests are GREEN**
 
@@ -226,6 +245,7 @@ git commit -m "fix: create missing visibility target directory"
 ### Task 3: Full verification and delivery
 
 **Files:**
+
 - Verify only: `apps/publisher/**`
 
 - [ ] **Step 1: Run static and full automated verification**

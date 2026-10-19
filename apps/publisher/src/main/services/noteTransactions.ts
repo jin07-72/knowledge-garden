@@ -562,6 +562,7 @@ async function ensureVisibilityTargetDomainDirectory(
       path: domainPath,
     })
   }
+  await syncDirectory(root)
 }
 
 async function syncDirectory(path: string): Promise<void> {

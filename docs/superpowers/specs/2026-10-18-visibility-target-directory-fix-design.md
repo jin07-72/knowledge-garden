@@ -39,8 +39,8 @@ weakened.
 The helper is safe for either visibility root, but the missing-directory case is
 reachable only for public-to-private moves: domain identity is defined by
 `content/<domain>/index.md`, so a valid private-to-public plan already has an
-existing public domain directory. Rename transactions remain unchanged because
-they stay in the same visibility and domain.
+existing public domain directory. Rename behavior is explicitly excluded from
+this change, and existing cross-domain rename support remains unchanged.
 
 ## Failure Handling
 
