@@ -36,8 +36,8 @@ jobs:
         run: npm run test:site
       - name: Validate Markdown content
         run: npm run validate:content
-      - name: Check Quartz source
-        run: npm run check
+      - name: Typecheck Quartz source
+        run: npx tsc --noEmit
       - name: Build Quartz
         run: npx quartz build
       - name: Check generated links
