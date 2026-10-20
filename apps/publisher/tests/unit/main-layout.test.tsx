@@ -1855,9 +1855,16 @@ describe("publisher main layout", () => {
     )
 
     await user.click(within(preview).getByRole("tab", { name: "线上公开站" }))
-    expect(within(preview).getByTitle("线上公开站")).toHaveAttribute(
+    const publicFrame = within(preview).getByTitle("线上公开站")
+    expect(publicFrame).toHaveAttribute(
       "src",
-      "https://jin07-72.github.io/knowledge-garden/",
+      expect.stringMatching(/^https:\/\/jin07-72\.github\.io\/knowledge-garden\/\?refresh=/),
+    )
+    const firstPublicSrc = publicFrame.getAttribute("src")
+    await user.click(within(preview).getByRole("button", { name: "刷新线上站" }))
+    expect(within(preview).getByTitle("线上公开站")).not.toHaveAttribute(
+      "src",
+      firstPublicSrc ?? "",
     )
 
     await user.click(screen.getByRole("button", { name: /私密阅读札记/ }))
