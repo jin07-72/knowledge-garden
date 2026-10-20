@@ -1,14 +1,14 @@
 # Knowledge Garden Handoff
 
-更新时间：2026-10-21 00:25（Asia/Shanghai）
+更新时间：2026-10-21 01:18（Asia/Shanghai）
 
 本文档用于在 DeepSeek Harness 临时接管结束后，让 Codex 不依赖完整聊天记录也能理解当前状态。
 
 ## 0. 当前状态
 
 - 当前分支：`main`
-- 当前发布器版本：`0.1.3`
-- 当前发布器版本提交：`8df7abbf`（`chore(publisher): release 0.1.3`）
+- 当前发布器版本：`0.1.4`
+- 当前发布器版本提交：待本次发布提交完成后更新
 - 本次代码修改已全部合并到本地 `main`，并推送到 `origin/main` 和 `publisher/main`。
 - 工作区仍保留用户原有的 `highlight.js` 依赖修改和 `.tmp-render-check.png`，未纳入本次提交。
 
@@ -104,6 +104,14 @@ Knowledge Garden 是一个公开的个人知识花园：
 - `561d25b3` `fix(publisher): use configured online preview address`
 - `8df7abbf` `chore(publisher): release 0.1.3`
 
+### 2.7 可关闭的启动检查提示
+
+- 主界面上的非阻塞启动检查提示增加右上角叉键。
+- 点击叉键只隐藏本次会话中的提示，软件仍可继续使用；重启后会重新检查并再次提示仍存在的问题。
+- 阻塞式本地安全检查页面不提供绕过按钮。
+- 点击“重新检查”后如果预览端口仍被占用，会明确显示“重新检查完成：预览端口仍被占用。”
+- 没有修改端口探测、预览服务、发布流程或私密/公开转换事务。
+
 ## 3. 当前内容状态
 
 - 最新内容提交（合并前）：`f2965202`
@@ -117,7 +125,8 @@ Knowledge Garden 是一个公开的个人知识花园：
 | 文件 | 原因 |
 |---|---|
 | `apps/publisher/src/main/services/noteTransactions.ts` | 公开→私密时自动清理入站 WikiLink |
-| `apps/publisher/src/renderer/src/App.tsx` | 部署状态复查、链接清理提示、清缓存回调、传递当前博客网站地址 |
+| `apps/publisher/src/renderer/src/App.tsx` | 部署状态复查、链接清理提示、清缓存回调、传递当前博客网站地址、启动诊断会话级隐藏和重试反馈 |
+| `apps/publisher/src/renderer/src/components/FirstRun.tsx` | 启动检查提示的可选关闭按钮和重试状态反馈 |
 | `apps/publisher/src/renderer/src/publishDeploymentStatus.ts` | 未确认部署时返回 `deploying` |
 | `apps/publisher/src/renderer/src/components/PreviewPane.tsx` | 使用当前博客网站地址、未配置提示、cache-busting、清缓存、刷新按钮布局 |
 | `apps/publisher/src/renderer/index.html` | 允许经过主进程验证的 HTTP(S) 网站作为 iframe 目标 |
@@ -145,7 +154,7 @@ Knowledge Garden 是一个公开的个人知识花园：
 - 完整 `noteTransactions.test.ts`：`102 passed`
 - 完整 `publish.test.ts`：`58 passed, 1 skipped`
 - UI/security/IPC/App smoke 合并运行：`198 passed`
-- `main-layout.test.tsx`：`82 passed`
+- `first-run.test.tsx` 与 `main-layout.test.tsx`：`94 passed`
 - `publish-deployment-status.test.ts`：`9 passed`
 - `npm --prefix apps/publisher run typecheck`：通过
 - `npm --prefix apps/publisher run build`：通过
@@ -153,7 +162,8 @@ Knowledge Garden 是一个公开的个人知识花园：
 - Prettier、`git diff --check`：通过
 - 通用线上地址 UI 回归：`90 passed`
 - 可见性事务与隔离发布回归：`161 passed, 1 skipped`
-- Windows `0.1.3` 安装包：生成成功
+- Windows `0.1.4` 安装包：生成成功
+- 正式安装目录已更新为 `0.1.4`，可执行文件 SHA256：`5C29BD942C6A544E394DD7159C71F28EC17A0F803F95585943B63DBB9390B534`
 
 尚未完成：
 
@@ -162,8 +172,9 @@ Knowledge Garden 是一个公开的个人知识花园：
 
 ## 6. 本机运行方式
 
-- 正式 `0.1.3` 安装目录：`C:\Users\11546\AppData\Local\Programs\Knowledge Garden Publisher`
-- 桌面和开始菜单中旧的 **Fixed** 快捷方式也已改为指向正式 `0.1.3` 目录。
+- 正式 `0.1.4` 安装目录：`C:\Users\11546\AppData\Local\Programs\Knowledge Garden Publisher`
+- 更新前的完整 `0.1.3` 目录保留在 `C:\Users\11546\AppData\Local\Programs\Knowledge Garden Publisher Backup 0.1.3`，可用于回滚。
+- 桌面和开始菜单中旧的 **Fixed** 快捷方式仍指向正式安装目录。
 - 旧便携目录仍保留，但常用快捷方式不再启动它。
 
 ## 7. 尚未解决的问题
@@ -190,4 +201,4 @@ Knowledge Garden 是一个公开的个人知识花园：
 - 自动清理只处理公开 Markdown 中指向本次转私密笔记的 WikiLink；不要扩大到私有 Markdown、代码块或无关链接。
 - 不要因为 Git push 成功就宣称线上页面已上线；必须等待 Pages 部署运行成功。
 - 外部浏览器缓存不属于应用控制范围；应用已清理 Electron 会话缓存并提供带 refresh 参数的线上站。
-- 正式安装目录和常用快捷方式均已更新至 `0.1.3`。
+- 正式安装目录和常用快捷方式均已更新至 `0.1.4`。
