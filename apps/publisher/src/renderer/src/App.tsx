@@ -869,6 +869,9 @@ export function PublisherApp({
         setLocalPreview({ path: nextPath, markdown: movedDocument.markdown })
       }
       const consequenceMessages = [
+        ...(result.value.linkEditedPaths?.length
+          ? [`已自动清理 ${result.value.linkEditedPaths.length} 个页面中的入站链接`]
+          : []),
         ...(result.value.pendingPublicDeletion ? ["仍在线，等待发布下架"] : []),
         ...(result.value.historyWarning ? ["Git 历史仍可能保留公开内容"] : []),
         ...result.value.warnings.map((warning) => warning.message),

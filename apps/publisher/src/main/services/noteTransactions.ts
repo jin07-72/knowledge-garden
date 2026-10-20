@@ -1088,6 +1088,42 @@ async function buildVisibilityChangePlan(
     base.domains,
   )
   const linkEdits: WikiLinkEdit[] = []
+  if (source.visibility === "public") {
+    const publicSources = await scanPublicLinkSources(base.workspace, base.domains)
+    const notes = await scanMarkdown(base.workspace, base.domains)
+    const sameSlug = notes.filter(({ note }) => note.slug === source.slug)
+    const qualified = `${source.domain}/${source.slug}`
+    for (const scanned of publicSources) {
+      if (scanned.path === source.path) continue
+      const occurrences = wikiOccurrences(scanned.file.bytes.toString("utf8"))
+      const qualifiedCount = occurrences.filter(({ target }) => target === qualified).length
+      if (qualifiedCount > 0) {
+        linkEdits.push({
+          path: scanned.path,
+          revision: scanned.file.revision,
+          oldTarget: qualified,
+          newTarget: null,
+          count: qualifiedCount,
+          qualification: "qualified",
+        })
+      }
+      const unqualifiedCount = occurrences.filter(({ target }) => target === source.slug).length
+      if (unqualifiedCount > 0 && sameSlug.length === 1) {
+        linkEdits.push({
+          path: scanned.path,
+          revision: scanned.file.revision,
+          oldTarget: source.slug,
+          newTarget: null,
+          count: unqualifiedCount,
+          qualification: "unqualified",
+        })
+      }
+    }
+    linkEdits.sort(
+      (left, right) =>
+        left.path.localeCompare(right.path) || left.oldTarget.localeCompare(right.oldTarget),
+    )
+  }
   const historyWarning =
     source.visibility === "public"
       ? await trackedByGit(base.workspace, source.path, input.runner ?? systemCommandRunner)
@@ -3529,12 +3565,9 @@ async function execute(
           },
         ] as TransactionWarning[],
     )
-    const linkEditedPaths =
-      plan.kind === "rename"
-        ? [...new Set(plan.linkEdits.map(({ path }) => path))].sort((left, right) =>
-            left.localeCompare(right),
-          )
-        : []
+    const linkEditedPaths = [...new Set(plan.linkEdits.map(({ path }) => path))].sort(
+      (left, right) => left.localeCompare(right),
+    )
     return {
       id: plan.id,
       changedPaths,

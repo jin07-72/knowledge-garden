@@ -1259,7 +1259,7 @@ describe("publisher main layout", () => {
     expect(screen.getByText("将从公开网站移除")).toBeVisible()
   })
 
-  it("only refreshes pending changes after privatizing and omits link-cleanup hints", async () => {
+  it("refreshes pending changes after privatizing and announces automatic link cleanup", async () => {
     const user = userEvent.setup()
     const review: ChangeReview = {
       groups: [
@@ -1341,7 +1341,7 @@ describe("publisher main layout", () => {
 
     await waitFor(() => expect(garden.changes.list).toHaveBeenCalledTimes(2))
     expect(garden.publish.start).not.toHaveBeenCalled()
-    expect(screen.queryByText(/已清理.*旧链接/)).not.toBeInTheDocument()
+    expect(screen.getByText("已自动清理 2 个页面中的入站链接")).toBeVisible()
     expect(screen.getByText("可发布变化：4")).toBeVisible()
   })
 

@@ -443,7 +443,7 @@ describe("exact-tree publication", () => {
     ).rejects.toMatchObject({ code: "ENOENT" })
   })
 
-  it("publishes only the privatization deletion without rewriting inbound Markdown", async () => {
+  it("publishes the privatization deletion with automatically cleaned inbound Markdown", async () => {
     const repository = await fixture()
     await put(
       repository.root,
@@ -468,14 +468,15 @@ describe("exact-tree publication", () => {
       workspace: repository.root,
       transactionTrash: { trashItem: async () => undefined },
     })
-    expect(receipt.linkEditedPaths).toBeUndefined()
+    expect(receipt.linkEditedPaths).toEqual(["content/technology/index.md"])
     expect(await readFile(join(repository.root, "private/technology/css-grid.md"), "utf8")).toBe(
       "original grid\n",
     )
-    const unchangedIndex = await readFile(
+    const cleanedIndex = await readFile(
       join(repository.root, "content/technology/index.md"),
       "utf8",
     )
+    expect(cleanedIndex).not.toContain("[[css-grid")
 
     const review = await listChanges({ workspace: repository.root })
     const selected = review.groups.filter(
@@ -489,7 +490,7 @@ describe("exact-tree publication", () => {
         selected.flatMap((group) => group.paths).filter((path) => !path.startsWith("private/")),
       ),
     ].sort()
-    expect(paths).toEqual(["content/technology/css-grid.md"])
+    expect(paths).toEqual(["content/technology/css-grid.md", "content/technology/index.md"])
 
     await publisher(repository).publish({ paths })
 
@@ -500,7 +501,8 @@ describe("exact-tree publication", () => {
       "show",
       "HEAD:content/technology/index.md",
     ])
-    expect(publishedIndex).toBe(unchangedIndex.trimEnd())
+    expect(publishedIndex).toBe(cleanedIndex.trimEnd())
+    expect(publishedIndex).not.toContain("[[css-grid")
     expect(await readFile(join(repository.root, "private/technology/css-grid.md"), "utf8")).toBe(
       "original grid\n",
     )
