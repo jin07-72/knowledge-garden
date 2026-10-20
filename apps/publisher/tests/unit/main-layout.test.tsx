@@ -301,6 +301,7 @@ function createGardenMock(): GardenApi {
       deployments: vi.fn(async () =>
         unavailable<DeploymentHistory>("部署历史将在后续任务中提供。"),
       ),
+      clearCache: vi.fn(async () => ok(undefined)),
       cancel: vi.fn(async () => ok(undefined)),
       openLink: vi.fn(async () => ok(undefined)),
     },
@@ -1861,11 +1862,13 @@ describe("publisher main layout", () => {
       expect.stringMatching(/^https:\/\/jin07-72\.github\.io\/knowledge-garden\/\?refresh=/),
     )
     const firstPublicSrc = publicFrame.getAttribute("src")
+    expect(garden.history.clearCache).toHaveBeenCalledOnce()
     await user.click(within(preview).getByRole("button", { name: "刷新线上站" }))
     expect(within(preview).getByTitle("线上公开站")).not.toHaveAttribute(
       "src",
       firstPublicSrc ?? "",
     )
+    expect(garden.history.clearCache).toHaveBeenCalledTimes(2)
 
     await user.click(screen.getByRole("button", { name: /私密阅读札记/ }))
     await user.click(within(preview).getByRole("tab", { name: "当前笔记" }))

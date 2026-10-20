@@ -13,6 +13,7 @@ interface PreviewPaneProps {
   readonly onLoadHistory: (requestId: string) => Promise<HistorySnapshot>
   readonly onCancelHistory: (requestId: string) => Promise<void>
   readonly onOpenHistoryLink: (url: string) => Promise<void>
+  readonly onClearPublicCache: () => Promise<void>
 }
 
 export function PreviewPane({
@@ -22,10 +23,15 @@ export function PreviewPane({
   onLoadHistory,
   onCancelHistory,
   onOpenHistoryLink,
+  onClearPublicCache,
 }: PreviewPaneProps): React.JSX.Element {
   const [tab, setTab] = useState<PreviewTab>("note")
   const [publicRefresh, setPublicRefresh] = useState(() => Date.now().toString(36))
-  const refreshPublicSite = (): void => setPublicRefresh(Date.now().toString(36))
+  const refreshPublicSite = (): void => {
+    void onClearPublicCache()
+      .catch(() => undefined)
+      .then(() => setPublicRefresh(Date.now().toString(36)))
+  }
   const publicUrl = `https://jin07-72.github.io/knowledge-garden/?refresh=${encodeURIComponent(publicRefresh)}`
   const baseUrl =
     preview.state === "ready" || preview.state === "building"

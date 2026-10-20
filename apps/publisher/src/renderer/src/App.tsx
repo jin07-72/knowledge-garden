@@ -1306,6 +1306,10 @@ export function PublisherApp({
           onLoadHistory={loadHistory}
           onCancelHistory={cancelHistory}
           onOpenHistoryLink={openHistoryLink}
+          onClearPublicCache={async () => {
+            const result = await api.history.clearCache?.()
+            if (result && !result.ok) throw new Error(result.error.message)
+          }}
         />
       </div>
 

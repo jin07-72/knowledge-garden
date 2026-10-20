@@ -74,6 +74,7 @@ export interface PublisherServiceDependencies {
   readonly deploymentHistory?: DeploymentHistoryService
   readonly domainCatalogFactory?: (options: DomainCatalogOptions) => DomainCatalog
   readonly openExternal?: (url: string) => Promise<void>
+  readonly clearHttpCache?: () => Promise<void>
   readonly runtime?: BundledNpmRuntime
   readonly previewPortAvailable?: () => Promise<boolean>
   readonly online?: () => boolean | Promise<boolean>
@@ -493,6 +494,15 @@ export async function createPublisherServices(
     history: {
       git: (request) => history.git(request),
       deployments: (request) => history.deployments(request),
+      clearCache: async () => {
+        if (!dependencies.clearHttpCache) {
+          throw {
+            code: "SERVICE_UNAVAILABLE",
+            message: "暂时无法清理线上站点缓存。",
+          } satisfies AppError
+        }
+        await dependencies.clearHttpCache()
+      },
       cancel: (request) => history.cancel(request),
       openLink: ({ url }) => history.openLink(url),
     },
