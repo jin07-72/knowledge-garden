@@ -1182,6 +1182,11 @@ describe("publisher main layout", () => {
       })
     })
     expect(screen.getByRole("button", { name: "可见性：私密" })).toBeVisible()
+    await user.click(screen.getByRole("button", { name: "可见性：私密" }))
+    const selectedPrivate = screen.getByRole("menuitemradio", { name: /私密/ })
+    expect(selectedPrivate).toHaveAttribute("aria-checked", "true")
+    expect(selectedPrivate).toHaveFocus()
+    await user.keyboard("{Escape}")
     await waitFor(() => expect(garden.domains.list).toHaveBeenCalledTimes(2))
   })
 

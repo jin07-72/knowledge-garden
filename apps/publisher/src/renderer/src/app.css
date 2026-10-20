@@ -771,6 +771,14 @@ button {
 .visibility-menu button:focus {
   background: #222933;
 }
+.visibility-menu button[aria-checked="true"] {
+  background: #202b31;
+  box-shadow: inset 2px 0 0 #8bd5ca;
+}
+.visibility-menu button[aria-checked="true"]:hover,
+.visibility-menu button[aria-checked="true"]:focus {
+  background: #26363d;
+}
 .visibility-menu button > span:nth-child(2) {
   display: grid;
   gap: 3px;
