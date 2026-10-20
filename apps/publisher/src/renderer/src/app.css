@@ -1044,6 +1044,18 @@ button {
   flex-direction: column;
   background: #fbfaf7;
 }
+.local-note-preview-shell > iframe {
+  min-height: 0;
+  flex: 1;
+}
+.local-note-preview-shell > .local-note-preview-shell {
+  min-height: 0;
+  flex: 1;
+}
+.local-note-preview-fallback {
+  border-bottom-color: #d9b06c;
+  background: #fff2d7;
+}
 .local-note-preview-banner {
   display: flex;
   flex-direction: column;

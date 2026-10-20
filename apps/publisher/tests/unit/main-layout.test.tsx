@@ -635,7 +635,7 @@ describe("publisher main layout", () => {
     expect(screen.queryByRole("menu", { name: "选择可见性" })).not.toBeInTheDocument()
   })
 
-  it("ignores stale preview events while retaining the last successful preview on errors", async () => {
+  it("ignores stale preview events and does not render a stale frame after an error", async () => {
     let progress: ((status: PreviewStatus) => void) | undefined
     vi.mocked(garden.preview.onProgress).mockImplementation((listener) => {
       progress = listener
@@ -672,10 +672,8 @@ describe("publisher main layout", () => {
       })
     })
     expect(within(preview).getByText("新错误")).toBeVisible()
-    expect(await within(preview).findByTitle("Quartz 本地全站预览")).toHaveAttribute(
-      "src",
-      "http://127.0.0.1:9000/",
-    )
+    expect(within(preview).queryByTitle("Quartz 本地全站预览")).not.toBeInTheDocument()
+    expect(within(preview).getByText("本地全站尚未就绪")).toBeVisible()
   })
 
   it("reports a rejected preview status request without an unhandled bootstrap failure", async () => {
@@ -1449,10 +1447,10 @@ describe("publisher main layout", () => {
       ).toBe(latestMarkdown),
     )
     expect(
-      within(screen.getByRole("region", { name: "本地预览" })).getByLabelText(
-        "私密阅读札记的本地渲染",
+      within(screen.getByRole("region", { name: "本地预览" })).getByTitle(
+        "私密阅读札记的 Quartz 精确预览",
       ),
-    ).toHaveTextContent("private-to-public latest")
+    ).toHaveAttribute("src", "http://127.0.0.1:8080/reading/private-notes")
     await waitFor(() => expect(garden.changes.list).toHaveBeenCalledTimes(2))
     expect(garden.publish.start).not.toHaveBeenCalled()
   })
@@ -1614,10 +1612,10 @@ describe("publisher main layout", () => {
       ).toContain("v2"),
     )
     expect(
-      within(screen.getByRole("region", { name: "本地预览" })).getByLabelText(
-        "CSS Grid 布局的本地渲染",
+      within(screen.getByRole("region", { name: "本地预览" })).getByTitle(
+        "CSS Grid 布局的 Quartz 精确预览",
       ),
-    ).toHaveTextContent("v2")
+    ).toHaveAttribute("src", "http://127.0.0.1:8080/technology/css-grid")
     expect(garden.publish.start).not.toHaveBeenCalled()
   })
 
@@ -1840,13 +1838,15 @@ describe("publisher main layout", () => {
     },
   )
 
-  it("keeps local-buffer note preview primary and offers secondary destinations", async () => {
+  it("keeps exact Quartz note preview primary and offers secondary destinations", async () => {
     const user = userEvent.setup()
     render(<App />)
 
     const preview = await screen.findByRole("region", { name: "本地预览" })
-    expect(await within(preview).findByRole("heading", { name: "CSS Grid 布局" })).toBeVisible()
-    expect(within(preview).queryByTitle("CSS Grid 布局的 Quartz 精确预览")).not.toBeInTheDocument()
+    expect(await within(preview).findByTitle("CSS Grid 布局的 Quartz 精确预览")).toHaveAttribute(
+      "src",
+      "http://127.0.0.1:8080/technology/css-grid",
+    )
 
     await user.click(within(preview).getByRole("tab", { name: "全站本地" }))
     expect(within(preview).getByTitle("Quartz 本地全站预览")).toHaveAttribute(
@@ -1863,9 +1863,10 @@ describe("publisher main layout", () => {
     await user.click(screen.getByRole("button", { name: /私密阅读札记/ }))
     await user.click(within(preview).getByRole("tab", { name: "当前笔记" }))
     expect(within(preview).getByText("私密笔记不会映射到公开网址")).toBeVisible()
-    expect(within(preview).getByRole("heading", { name: "私密阅读札记" })).toBeVisible()
-    expect(within(preview).getByText("正文")).toBeVisible()
-    expect(within(preview).queryByTitle(/私密阅读札记的 Quartz 精确预览/)).not.toBeInTheDocument()
+    expect(within(preview).getByTitle("私密阅读札记的 Quartz 精确预览")).toHaveAttribute(
+      "src",
+      "http://127.0.0.1:8080/reading/private-notes",
+    )
 
     await user.click(within(preview).getByRole("tab", { name: "历史" }))
     expect(await within(preview).findByText("无法读取发布历史")).toBeVisible()
@@ -1875,7 +1876,7 @@ describe("publisher main layout", () => {
     expect(deploymentRequest?.requestId).toBe(gitRequest?.requestId)
   })
 
-  it("updates the rendered private preview while editing", async () => {
+  it("keeps the private Quartz route while editing", async () => {
     const user = userEvent.setup()
     vi.mocked(garden.notes.save).mockResolvedValue(
       ok({
@@ -1889,7 +1890,10 @@ describe("publisher main layout", () => {
 
     await user.click(await screen.findByRole("button", { name: /私密阅读札记/ }))
     const preview = screen.getByRole("region", { name: "本地预览" })
-    expect(await within(preview).findByRole("heading", { name: "私密阅读札记" })).toBeVisible()
+    expect(await within(preview).findByTitle("私密阅读札记的 Quartz 精确预览")).toHaveAttribute(
+      "src",
+      "http://127.0.0.1:8080/reading/private-notes",
+    )
 
     const view = await waitFor(() =>
       EditorView.findFromDOM(document.querySelector(".cm-content") as HTMLElement),
@@ -1897,14 +1901,17 @@ describe("publisher main layout", () => {
     await act(async () => {
       view!.dispatch({ changes: { from: view!.state.doc.length, insert: "\n\n实时预览内容" } })
     })
-    expect(await within(preview).findByText("实时预览内容")).toBeVisible()
+    expect(view!.state.doc.toString()).toContain("实时预览内容")
   })
 
-  it("updates the rendered public preview while editing", async () => {
+  it("keeps the public Quartz route while editing", async () => {
     render(<App />)
 
     const preview = await screen.findByRole("region", { name: "本地预览" })
-    expect(await within(preview).findByRole("heading", { name: "CSS Grid 布局" })).toBeVisible()
+    expect(await within(preview).findByTitle("CSS Grid 布局的 Quartz 精确预览")).toHaveAttribute(
+      "src",
+      "http://127.0.0.1:8080/technology/css-grid",
+    )
 
     const view = await waitFor(() =>
       EditorView.findFromDOM(document.querySelector(".cm-content") as HTMLElement),
@@ -1912,7 +1919,7 @@ describe("publisher main layout", () => {
     await act(async () => {
       view!.dispatch({ changes: { from: view!.state.doc.length, insert: "\n\n公开实时预览" } })
     })
-    expect(await within(preview).findByText("公开实时预览")).toBeVisible()
+    expect(view!.state.doc.toString()).toContain("公开实时预览")
   })
 
   it("shows a safe history error when history loading rejects", async () => {

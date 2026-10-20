@@ -206,6 +206,69 @@ describe("PreviewManager", () => {
     ])
   })
 
+  it("serves an isolated merged input tree and disposes it after stopping", async () => {
+    const dispose = vi.fn(async () => undefined)
+    const spawn = vi.fn<PreviewDependencies["spawn"]>()
+    const deps = dependencies({
+      createBaseDir: () => "0123456789abcdef0123456789abcdef",
+      prepareWorkspace: async () => ({
+        contentDirectory: "C:\\Temp\\preview\\content",
+        outputDirectory: "C:\\Temp\\preview\\site",
+        dispose,
+      }),
+      probe: async () => true,
+      spawn: (executable, args, options) => {
+        const child = new FakeProcess()
+        deps.children.push(child)
+        spawn(executable, args, options)
+        return child
+      },
+    })
+    const manager = new PreviewManager(deps)
+
+    await manager.start({ workspace: "C:\\Garden" })
+    expect(spawn.mock.calls[0]?.[1]).toEqual(
+      expect.arrayContaining([
+        "--directory",
+        "C:\\Temp\\preview\\content",
+        "--output",
+        "C:\\Temp\\preview\\site",
+        "--baseDir",
+        "0123456789abcdef0123456789abcdef",
+      ]),
+    )
+    expect(manager.getStatus()).toMatchObject({
+      url: "http://127.0.0.1:43120/0123456789abcdef0123456789abcdef/",
+    })
+    await manager.stop()
+    expect(dispose).toHaveBeenCalledOnce()
+  })
+
+  it("retains temporary workspace ownership and retries a failed cleanup", async () => {
+    const dispose = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(new Error("C:\\private\\temporary"))
+      .mockResolvedValueOnce(undefined)
+    const deps = dependencies({
+      createBaseDir: () => "0123456789abcdef0123456789abcdef",
+      prepareWorkspace: async () => ({
+        contentDirectory: "C:\\Temp\\preview\\content",
+        outputDirectory: "C:\\Temp\\preview\\site",
+        dispose,
+      }),
+      probe: async () => true,
+    })
+    const manager = new PreviewManager(deps)
+
+    await manager.start({ workspace: "C:\\Garden" })
+    await expect(manager.stop()).resolves.toMatchObject({
+      state: "error",
+      error: { code: "PREVIEW_STOP_FAILED" },
+    })
+    await expect(manager.stop()).resolves.toEqual({ state: "stopped", generation: 1 })
+    expect(dispose).toHaveBeenCalledTimes(2)
+  })
+
   it("starts POSIX previews in a detached process group for safe tree signalling", async () => {
     const spawn = vi.fn<PreviewDependencies["spawn"]>()
     const deps = dependencies({

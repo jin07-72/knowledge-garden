@@ -24,7 +24,22 @@ export function PreviewPane({
   onOpenHistoryLink,
 }: PreviewPaneProps): React.JSX.Element {
   const [tab, setTab] = useState<PreviewTab>("note")
-  const baseUrl = preview.lastSuccessfulUrl ?? preview.url
+  const baseUrl =
+    preview.state === "ready" || preview.state === "building"
+      ? (preview.url ?? preview.lastSuccessfulUrl)
+      : undefined
+  const noteUrl = (() => {
+    if (!note || !baseUrl) return undefined
+    try {
+      const base = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`
+      return new URL(
+        `${encodeURIComponent(note.domain)}/${encodeURIComponent(note.slug)}`,
+        base,
+      ).toString()
+    } catch {
+      return undefined
+    }
+  })()
 
   const tabs: readonly { id: PreviewTab; label: string }[] = [
     { id: "note", label: "当前笔记" },
@@ -41,7 +56,7 @@ export function PreviewPane({
           <h2>当前笔记预览</h2>
         </div>
         <span className={`preview-chip preview-${preview.state}`}>
-          {preview.state === "ready" ? "实时" : "状态"}
+          {preview.state === "ready" ? "实时" : preview.state === "building" ? "重建中" : "状态"}
         </span>
       </header>
       <div className="preview-tabs" role="tablist" aria-label="预览目标">
@@ -75,18 +90,44 @@ export function PreviewPane({
         role="tabpanel"
         aria-labelledby={`preview-tab-${tab}`}
       >
+        {(tab === "note" || tab === "site") && preview.state === "building" ? (
+          <div className="preview-banner preview-building" role="status">
+            正在重建；当前显示上次成功版本。
+          </div>
+        ) : null}
         {tab === "site" && preview.state === "error" ? (
           <div className="preview-banner" role="alert">
             <TriangleAlert size={16} />
             {preview.error?.message ?? "Quartz 预览暂时不可用。"}
           </div>
         ) : null}
-        {tab === "note" && note ? (
-          <LocalNotePreview
-            markdown={markdown}
-            title={note.title}
-            privateNote={note.visibility === "private"}
-          />
+        {tab === "note" && note && noteUrl ? (
+          <div className="local-note-preview-shell" aria-label={`${note.title}的本地预览`}>
+            {note.visibility === "private" ? (
+              <div className="local-note-preview-banner">
+                <strong>私密笔记不会映射到公开网址</strong>
+                <span>仅在这台电脑上预览，不会发布。</span>
+              </div>
+            ) : null}
+            <iframe
+              title={`${note.title}的 Quartz 精确预览`}
+              src={noteUrl}
+              sandbox="allow-same-origin allow-scripts"
+            />
+          </div>
+        ) : null}
+        {tab === "note" && note && !noteUrl ? (
+          <div className="local-note-preview-shell" aria-label={`${note.title}的备用预览`}>
+            <div className="local-note-preview-banner local-note-preview-fallback">
+              <strong>Quartz 暂不可用，当前显示简化预览</strong>
+              <span>本地预览恢复后会自动显示博客的完整样式。</span>
+            </div>
+            <LocalNotePreview
+              markdown={markdown}
+              title={note.title}
+              privateNote={note.visibility === "private"}
+            />
+          </div>
         ) : null}
         {tab === "note" && !note ? (
           <div className="empty-state">

@@ -635,6 +635,21 @@ describe("exact-tree publication", () => {
     expect(await output(repository.root, ["diff", "--cached", "--name-only"])).toBe("")
   })
 
+  it("rejects publisher-owned state already present in the final publication tree", async () => {
+    const repository = await fixture()
+    await put(repository.root, ".garden-publisher/preview/private.md", "private preview state\n")
+    expect(
+      (await git(repository.root, ["add", "-f", "--", ".garden-publisher/preview/private.md"]))
+        .exitCode,
+    ).toBe(0)
+    expect((await git(repository.root, ["commit", "-m", "malicious baseline"])).exitCode).toBe(0)
+    await put(repository.root, "content/technology/css-grid.md", "publish me\n")
+
+    await expect(
+      publisher(repository).publish({ paths: ["content/technology/css-grid.md"] }),
+    ).rejects.toMatchObject({ code: "TREE_INVALID" })
+  })
+
   it("never follows a staging-index symlink substituted by verification", async ({ skip }) => {
     const repository = await fixture()
     await put(repository.root, "content/technology/css-grid.md", "verified selection\n")

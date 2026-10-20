@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto"
 import { posix, win32 } from "node:path"
 import type { AppError, PreviewStatus, SerializableValue } from "../../shared/contracts"
 
@@ -29,6 +30,13 @@ export interface PortRequest {
 
 export type PreviewTerminationOutcome = "terminated" | "root-absent" | "failed"
 
+export interface PreparedPreviewWorkspace {
+  readonly contentDirectory: string
+  readonly outputDirectory: string
+  readonly dispose: () => Promise<void>
+  readonly subscribeFailure?: (listener: (failed: boolean) => void) => () => void
+}
+
 export interface PreviewDependencies {
   readonly resolveWorkspace: (workspace: string) => Promise<string>
   readonly isDirectory: (path: string) => Promise<boolean>
@@ -44,6 +52,8 @@ export interface PreviewDependencies {
   readonly probeWs: (port: number, signal: AbortSignal) => Promise<boolean>
   readonly isPortAvailable: (port: number) => Promise<boolean>
   readonly terminate: (child: PreviewProcess) => Promise<PreviewTerminationOutcome>
+  readonly prepareWorkspace?: (workspace: string) => Promise<PreparedPreviewWorkspace>
+  readonly createBaseDir?: () => string
   readonly platform?: NodeJS.Platform
   readonly now?: () => number
   readonly delay?: (milliseconds: number, signal: AbortSignal) => Promise<void>
@@ -125,6 +135,9 @@ interface PreviewSession {
   readonly controller: AbortController
   attempt?: ProcessAttempt
   lastSuccessfulUrl?: string
+  previewWorkspace?: PreparedPreviewWorkspace
+  previewWorkspaceUnsubscribe?: () => void
+  baseDir?: string
 }
 
 const LOOPBACK_HOST = "127.0.0.1" as const
@@ -153,8 +166,8 @@ function appError(
     : ({ code, message, details } as AppError)
 }
 
-function publicUrl(port: number): string {
-  return `http://${LOOPBACK_HOST}:${port}/`
+function publicUrl(port: number, baseDir?: string): string {
+  return `http://${LOOPBACK_HOST}:${port}/${baseDir === undefined ? "" : `${baseDir}/`}`
 }
 
 function normalized(line: string): string {
@@ -534,6 +547,30 @@ export class PreviewManager {
       if (controller.signal.aborted || epoch !== this.lifecycleEpoch)
         return this.stopSession(session)
 
+      if (this.dependencies.prepareWorkspace !== undefined) {
+        session.previewWorkspace = await this.dependencies.prepareWorkspace(workspace)
+        session.baseDir =
+          this.dependencies.createBaseDir?.() ?? randomBytes(16).toString("hex")
+        session.previewWorkspaceUnsubscribe = session.previewWorkspace.subscribeFailure?.(
+          (failed) => {
+            const attempt = session.attempt
+            if (!failed || this.session !== session || attempt === undefined || attempt.stopping) return
+            this.transition({
+              state: "error",
+              generation: session.generation,
+              port: attempt.port,
+              lastSuccessfulUrl: session.lastSuccessfulUrl,
+              error: appError(
+                "PREVIEW_BUILD_FAILED",
+                "Local preview files could not be synchronized safely.",
+              ),
+            })
+          },
+        )
+        if (controller.signal.aborted || epoch !== this.lifecycleEpoch)
+          return this.stopSession(session)
+      }
+
       this.resetTail()
       const excludedPorts: number[] = []
       const maxRetries = Math.max(0, this.dependencies.maxPortRetries ?? 2)
@@ -570,9 +607,28 @@ export class PreviewManager {
         this.transition({ state: "starting", generation, port })
         let child: PreviewProcess
         try {
+          const previewArguments = [
+            quartzCli,
+            "build",
+            "--serve",
+            ...(session.previewWorkspace === undefined
+              ? []
+              : [
+                  "--directory",
+                  session.previewWorkspace.contentDirectory,
+                  "--output",
+                  session.previewWorkspace.outputDirectory,
+                  "--baseDir",
+                  session.baseDir!,
+                ]),
+            "--port",
+            String(port),
+            "--wsPort",
+            String(wsPort),
+          ]
           child = this.dependencies.spawn(
             runtime,
-            [quartzCli, "build", "--serve", "--port", String(port), "--wsPort", String(wsPort)],
+            previewArguments,
             {
               cwd: workspace,
               env: {
@@ -597,7 +653,7 @@ export class PreviewManager {
         }
         if (outcome.kind === "ready") {
           attempt.inStartup = false
-          session.lastSuccessfulUrl = publicUrl(port)
+          session.lastSuccessfulUrl = publicUrl(port, session.baseDir)
           return this.transition({
             state: "ready",
             generation,
@@ -611,6 +667,7 @@ export class PreviewManager {
           const terminated = await this.terminateAttempt(session, attempt)
           if (!terminated) return this.stopFailure(session, port)
           if (attemptIndex < maxRetries) continue
+          await this.releasePreviewWorkspace(session)
           this.clearSession(session)
           return this.transition({
             state: "error",
@@ -626,12 +683,14 @@ export class PreviewManager {
         if (outcome.kind === "build-error") {
           const terminated = await this.terminateAttempt(session, attempt)
           if (!terminated) return this.stopFailure(session, attempt.port)
+          await this.releasePreviewWorkspace(session)
           this.clearSession(session)
           return this.status
         }
         if (outcome.kind === "timeout") {
           const terminated = await this.terminateAttempt(session, attempt)
           if (!terminated) return this.stopFailure(session, attempt.port)
+          await this.releasePreviewWorkspace(session)
           this.clearSession(session)
           return this.transition({
             state: "error",
@@ -659,18 +718,21 @@ export class PreviewManager {
             this.detachAttempt(attempt)
             attempt.inStartup = false
             session.attempt = undefined
+            await this.releasePreviewWorkspace(session)
             this.clearSession(session)
             return failure
           }
 
           const terminated = await this.terminateAttempt(session, attempt)
           if (!terminated) return this.stopFailure(session, attempt.port)
+          await this.releasePreviewWorkspace(session)
           this.clearSession(session)
           return failure
         }
 
         this.detachAttempt(attempt)
         session.attempt = undefined
+        await this.releasePreviewWorkspace(session)
         this.clearSession(session)
         return this.transition({
           state: "error",
@@ -710,7 +772,7 @@ export class PreviewManager {
         const cancelPoll = (): void => pollController.abort()
         signal.addEventListener("abort", cancelPoll, { once: true })
         const probe = Promise.all([
-          this.dependencies.probe(publicUrl(attempt.port), pollController.signal),
+          this.dependencies.probe(publicUrl(attempt.port, session.baseDir), pollController.signal),
           this.dependencies.probeWs(attempt.wsPort, pollController.signal),
         ])
           .then<ReadinessRound>((readiness) =>
@@ -839,6 +901,7 @@ export class PreviewManager {
     this.detachAttempt(attempt)
     attempt.inStartup = false
     session.attempt = undefined
+    void this.releasePreviewWorkspace(session)
     this.clearSession(session)
     if (
       attempt.buildFailed ||
@@ -1004,12 +1067,14 @@ export class PreviewManager {
       lastSuccessfulUrl: session.lastSuccessfulUrl,
     })
     if (attempt === undefined) {
+      if (!(await this.releasePreviewWorkspace(session))) return this.cleanupFailure(session)
       this.clearSession(session)
       return this.transition({ state: "stopped", generation: session.generation })
     }
 
     const terminated = await this.terminateAttempt(session, attempt)
     if (!terminated) return this.stopFailure(session, attempt.port)
+    if (!(await this.releasePreviewWorkspace(session))) return this.cleanupFailure(session)
     this.clearSession(session)
     return this.transition({ state: "stopped", generation: session.generation })
   }
@@ -1089,11 +1154,12 @@ export class PreviewManager {
     })
   }
 
-  private failSession(
+  private async failSession(
     session: PreviewSession,
     code: AppError["code"],
     message: string,
-  ): PreviewStatus {
+  ): Promise<PreviewStatus> {
+    await this.releasePreviewWorkspace(session)
     this.clearSession(session)
     return this.transition({
       state: "error",
@@ -1102,8 +1168,43 @@ export class PreviewManager {
     })
   }
 
+  private async releasePreviewWorkspace(session: PreviewSession): Promise<boolean> {
+    const previewWorkspace = session.previewWorkspace
+    if (previewWorkspace === undefined) return true
+    try {
+      await previewWorkspace.dispose()
+      session.previewWorkspaceUnsubscribe?.()
+      session.previewWorkspaceUnsubscribe = undefined
+      session.previewWorkspace = undefined
+      this.clearSession(session)
+      return true
+    } catch {
+      // Retain ownership so a later stop/dispose can retry without exposing private paths.
+      return false
+    }
+  }
+
+  private cleanupFailure(session: PreviewSession): PreviewStatus {
+    return this.transition({
+      state: "error",
+      generation: session.generation,
+      port: this.status.port,
+      lastSuccessfulUrl: session.lastSuccessfulUrl,
+      error: appError(
+        "PREVIEW_STOP_FAILED",
+        "Local preview stopped, but its private temporary files could not be removed safely.",
+      ),
+    })
+  }
+
   private clearSession(session: PreviewSession): void {
-    if (this.session === session && session.attempt === undefined) this.session = undefined
+    if (
+      this.session === session &&
+      session.attempt === undefined &&
+      session.previewWorkspace === undefined
+    ) {
+      this.session = undefined
+    }
   }
 
   private detachAttempt(attempt: ProcessAttempt): void {

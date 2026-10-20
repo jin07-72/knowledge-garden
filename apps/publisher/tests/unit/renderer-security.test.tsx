@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises"
 import { resolve } from "node:path"
-import { fireEvent, render, screen } from "@testing-library/react"
-import { describe, expect, it } from "vitest"
+import { cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { afterEach, describe, expect, it } from "vitest"
 import { PreviewPane } from "../../src/renderer/src/components/PreviewPane"
 import type { NoteSummary, PreviewStatus } from "../../src/shared/contracts"
 
@@ -20,12 +20,14 @@ const note: NoteSummary = {
 const preview: PreviewStatus = {
   state: "ready",
   generation: 1,
-  url: "http://127.0.0.1:8080/",
-  lastSuccessfulUrl: "http://127.0.0.1:8080/",
+  url: "http://127.0.0.1:8080/capability-token/",
+  lastSuccessfulUrl: "http://127.0.0.1:8080/capability-token/",
 }
 
+afterEach(cleanup)
+
 describe("renderer security", () => {
-  it("renders the current public note locally and sandboxes the full-site Quartz frame", async () => {
+  it("renders the current public note through the exact Quartz route", async () => {
     render(
       <PreviewPane
         note={note}
@@ -43,8 +45,11 @@ describe("renderer security", () => {
         onOpenHistoryLink={async () => undefined}
       />,
     )
-    expect(screen.getByRole("heading", { name: "Local public buffer" })).toBeVisible()
-    expect(screen.queryByTitle("CSS Grid的 Quartz 精确预览")).not.toBeInTheDocument()
+    expect(screen.getByTitle("CSS Grid的 Quartz 精确预览")).toHaveAttribute(
+      "src",
+      "http://127.0.0.1:8080/capability-token/technology/css-grid",
+    )
+    expect(screen.queryByRole("heading", { name: "Local public buffer" })).not.toBeInTheDocument()
 
     fireEvent.click(screen.getByRole("tab", { name: "全站本地" }))
     expect(screen.getByTitle("Quartz 本地全站预览")).toHaveAttribute(
@@ -53,12 +58,74 @@ describe("renderer security", () => {
     )
   })
 
+  it("uses the same Quartz route for private notes and keeps the privacy warning", () => {
+    render(
+      <PreviewPane
+        note={{ ...note, path: "private/technology/css-grid.md", visibility: "private" }}
+        markdown="# Private buffer"
+        preview={preview}
+        onLoadHistory={async () => ({
+          commits: [],
+          deployments: { runs: [], actionsUrl: "https://example.com", liveSiteUrl: "https://example.com" },
+        })}
+        onCancelHistory={async () => undefined}
+        onOpenHistoryLink={async () => undefined}
+      />,
+    )
+
+    expect(screen.getByText("私密笔记不会映射到公开网址")).toBeVisible()
+    expect(screen.getByTitle("CSS Grid的 Quartz 精确预览")).toHaveAttribute(
+      "src",
+      "http://127.0.0.1:8080/capability-token/technology/css-grid",
+    )
+  })
+
+  it("labels the simplified renderer as a fallback when Quartz is unavailable", () => {
+    render(
+      <PreviewPane
+        note={note}
+        markdown="# Local public buffer"
+        preview={{ state: "error", generation: 2, error: { code: "PREVIEW_EXITED", message: "failed" } }}
+        onLoadHistory={async () => ({
+          commits: [],
+          deployments: { runs: [], actionsUrl: "https://example.com", liveSiteUrl: "https://example.com" },
+        })}
+        onCancelHistory={async () => undefined}
+        onOpenHistoryLink={async () => undefined}
+      />,
+    )
+
+    expect(screen.getByText("Quartz 暂不可用，当前显示简化预览")).toBeVisible()
+    expect(screen.getByRole("heading", { name: "Local public buffer" })).toBeVisible()
+    expect(screen.queryByTitle("CSS Grid的 Quartz 精确预览")).not.toBeInTheDocument()
+  })
+
+  it("labels a building frame as the last successful version", () => {
+    render(
+      <PreviewPane
+        note={note}
+        markdown="# Buffer"
+        preview={{ state: "building", generation: 2, lastSuccessfulUrl: preview.url }}
+        onLoadHistory={async () => ({
+          commits: [],
+          deployments: { runs: [], actionsUrl: "https://example.com", liveSiteUrl: "https://example.com" },
+        })}
+        onCancelHistory={async () => undefined}
+        onOpenHistoryLink={async () => undefined}
+      />,
+    )
+
+    expect(screen.getByText("正在重建；当前显示上次成功版本。")).toBeVisible()
+    expect(screen.getByText("重建中")).toBeVisible()
+    expect(screen.getByTitle("CSS Grid的 Quartz 精确预览")).toBeInTheDocument()
+  })
+
   it("treats an empty markdown string as a loaded empty note", () => {
     render(
       <PreviewPane
         note={note}
         markdown=""
-        preview={preview}
+        preview={{ state: "stopped", generation: 1 }}
         onLoadHistory={async () => ({
           commits: [],
           deployments: {

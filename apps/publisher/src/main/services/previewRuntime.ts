@@ -8,6 +8,7 @@ import {
   type PreviewDependencies,
   type PreviewProcess,
 } from "./preview"
+import { createPreviewWorkspace } from "./previewWorkspace"
 
 function pathIs(kind: "file" | "directory"): (path: string) => Promise<boolean> {
   return async (path) => {
@@ -137,6 +138,7 @@ export function createProductionPreviewManager(runtimePath: string): PreviewMana
     probeWs: probeTcp,
     isPortAvailable: isPreviewPortAvailable,
     terminate,
+    prepareWorkspace: createPreviewWorkspace,
     platform,
     safeEnvironment: {
       SystemRoot: process.env.SystemRoot,

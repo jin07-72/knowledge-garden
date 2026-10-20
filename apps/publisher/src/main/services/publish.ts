@@ -1608,6 +1608,9 @@ export class Publisher {
       if (treePaths.some((path) => /^private(?:\/|$)/i.test(path) && path !== "private/.gitkeep")) {
         throw error("PRIVATE_PATH", "The publication tree contains private content.")
       }
+      if (treePaths.some((path) => /^\.garden-publisher(?:\/|$)/i.test(path))) {
+        throw error("TREE_INVALID", "The publication tree contains publisher-owned state.")
+      }
 
       this.#emit("synthetic-commit")
       const commit = (
