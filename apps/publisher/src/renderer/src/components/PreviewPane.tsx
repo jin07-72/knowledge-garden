@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { Monitor, TriangleAlert } from "lucide-react"
+import { Monitor, RefreshCw, TriangleAlert } from "lucide-react"
 import type { NoteSummary, PreviewStatus } from "../../../shared/contracts"
 import { HistoryView, type HistorySnapshot } from "./HistoryView"
 import { LocalNotePreview } from "./PrivateNotePreview"
@@ -13,6 +13,7 @@ interface PreviewPaneProps {
   readonly onLoadHistory: (requestId: string) => Promise<HistorySnapshot>
   readonly onCancelHistory: (requestId: string) => Promise<void>
   readonly onOpenHistoryLink: (url: string) => Promise<void>
+  readonly onClearPublicCache: () => Promise<void>
 }
 
 export function PreviewPane({
@@ -22,8 +23,16 @@ export function PreviewPane({
   onLoadHistory,
   onCancelHistory,
   onOpenHistoryLink,
+  onClearPublicCache,
 }: PreviewPaneProps): React.JSX.Element {
   const [tab, setTab] = useState<PreviewTab>("note")
+  const [publicRefresh, setPublicRefresh] = useState(() => Date.now().toString(36))
+  const refreshPublicSite = (): void => {
+    void onClearPublicCache()
+      .catch(() => undefined)
+      .then(() => setPublicRefresh(Date.now().toString(36)))
+  }
+  const publicUrl = `https://jin07-72.github.io/knowledge-garden/?refresh=${encodeURIComponent(publicRefresh)}`
   const baseUrl =
     preview.state === "ready" || preview.state === "building"
       ? (preview.url ?? preview.lastSuccessfulUrl)
@@ -69,7 +78,10 @@ export function PreviewPane({
             aria-selected={tab === item.id}
             aria-controls={`preview-panel-${item.id}`}
             tabIndex={tab === item.id ? 0 : -1}
-            onClick={() => setTab(item.id)}
+            onClick={() => {
+              if (item.id === "public") refreshPublicSite()
+              setTab(item.id)
+            }}
             onKeyDown={(event) => {
               if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return
               event.preventDefault()
@@ -149,11 +161,25 @@ export function PreviewPane({
           </div>
         ) : null}
         {tab === "public" ? (
-          <iframe
-            title="线上公开站"
-            src="https://jin07-72.github.io/knowledge-garden/"
-            sandbox="allow-same-origin allow-scripts"
-          />
+          <div className="local-note-preview-shell">
+            <div className="public-preview-notice">
+              <TriangleAlert size={16} aria-hidden="true" />
+              <div className="public-preview-notice-copy">
+                <strong>线上内容可能受浏览器缓存影响</strong>
+                <span>如果刚完成发布，请刷新后再检查。</span>
+              </div>
+              <button className="public-preview-refresh" type="button" onClick={refreshPublicSite}>
+                <RefreshCw size={14} aria-hidden="true" />
+                刷新线上站
+              </button>
+            </div>
+            <iframe
+              key={publicRefresh}
+              title="线上公开站"
+              src={publicUrl}
+              sandbox="allow-same-origin allow-scripts"
+            />
+          </div>
         ) : null}
         {tab === "history" ? (
           <HistoryView

@@ -175,7 +175,7 @@ describe("note visibility transactions", () => {
     ).resolves.toContain("# Transformers")
   })
 
-  it("moves a note to private storage without changing incoming Markdown bytes", async () => {
+  it("automatically removes public incoming wiki links when moving a note to private storage", async () => {
     const workspace = await garden({ git: true })
     await put(
       workspace,
@@ -215,8 +215,6 @@ describe("note visibility transactions", () => {
       "---\ntitle: Private links\n---\n\nSee [[css-grid|CSS Grid]].\n",
     )
 
-    const publicIndexBefore = await readFile(join(workspace, "content/technology/index.md"))
-    const publicLinksBefore = await readFile(join(workspace, "content/reading/links.md"))
     const privateLinksBefore = await readFile(join(workspace, "private/reading/links.md"))
 
     const plan = await planVisibilityChange({
@@ -224,22 +222,59 @@ describe("note visibility transactions", () => {
       path: "content/technology/css-grid.md",
       visibility: "private",
     })
-    expect(plan.linkEdits).toEqual([])
+    expect(
+      plan.linkEdits.map(({ path, oldTarget, newTarget, count, qualification }) => ({
+        path,
+        oldTarget,
+        newTarget,
+        count,
+        qualification,
+      })),
+    ).toEqual([
+      {
+        path: "content/reading/links.md",
+        oldTarget: "css-grid",
+        newTarget: null,
+        count: 1,
+        qualification: "unqualified",
+      },
+      {
+        path: "content/technology/index.md",
+        oldTarget: "css-grid",
+        newTarget: null,
+        count: 1,
+        qualification: "unqualified",
+      },
+      {
+        path: "content/technology/index.md",
+        oldTarget: "technology/css-grid",
+        newTarget: null,
+        count: 1,
+        qualification: "qualified",
+      },
+    ])
 
     const receipt = await executeVisibilityChange(plan, { workspace })
 
-    expect(await readFile(join(workspace, "content/technology/index.md"))).toEqual(
-      publicIndexBefore,
+    const publicIndex = await readFile(join(workspace, "content/technology/index.md"), "utf8")
+    expect(publicIndex).not.toContain("[[css-grid|")
+    expect(publicIndex).not.toContain("[[technology/css-grid|")
+    expect(publicIndex).toContain("`[[css-grid]]` stays in code.")
+    expect(publicIndex).toContain("```md\n[[css-grid]]\n```")
+    expect(await readFile(join(workspace, "content/reading/links.md"), "utf8")).not.toContain(
+      "[[css-grid",
     )
-    expect(await readFile(join(workspace, "content/reading/links.md"))).toEqual(publicLinksBefore)
     expect(await readFile(join(workspace, "private/reading/links.md"))).toEqual(privateLinksBefore)
     expect(await readFile(join(workspace, "private/technology/css-grid.md"), "utf8")).toContain(
       "# CSS Grid",
     )
-    expect(receipt).not.toHaveProperty("linkEditedPaths")
+    expect(receipt.linkEditedPaths).toEqual([
+      "content/reading/links.md",
+      "content/technology/index.md",
+    ])
   })
 
-  it("preserves incoming CRLF Markdown byte-for-byte", async () => {
+  it("removes incoming links while preserving CRLF line endings", async () => {
     const workspace = await garden({ git: true })
     await put(workspace, "content/reading/target.md", "---\ntitle: Target\n---\n")
     await put(
@@ -248,7 +283,6 @@ describe("note visibility transactions", () => {
       "---\r\ngardenDomain: true\r\ntitle: reading\r\ndescription: Test domain.\r\n---\r\n\r\n- [[target]]\r\n- keep\r\n",
     )
 
-    const incomingBefore = await readFile(join(workspace, "content/reading/index.md"))
     const plan = await planVisibilityChange({
       workspace,
       path: "content/reading/target.md",
@@ -256,15 +290,17 @@ describe("note visibility transactions", () => {
     })
     await executeVisibilityChange(plan, { workspace })
 
-    expect(await readFile(join(workspace, "content/reading/index.md"))).toEqual(incomingBefore)
+    const updated = await readFile(join(workspace, "content/reading/index.md"), "utf8")
+    expect(updated).not.toContain("[[target]]")
+    expect(updated).toContain("- keep\r\n")
+    expect(updated.replaceAll("\r\n", "")).not.toContain("\n")
   })
 
-  it("leaves an unqualified incoming link unchanged while changing visibility", async () => {
+  it("removes an unqualified incoming link when the target is unique", async () => {
     const workspace = await garden({ git: true })
     await put(workspace, "content/reading/topic.md", "---\ntitle: Reading topic\n---\n")
     await put(workspace, "content/reading/links.md", "See [[topic]].\n")
 
-    const incomingBefore = await readFile(join(workspace, "content/reading/links.md"))
     const plan = await planVisibilityChange({
       workspace,
       path: "content/reading/topic.md",
@@ -274,7 +310,9 @@ describe("note visibility transactions", () => {
     await expect(executeVisibilityChange(plan, { workspace })).resolves.toMatchObject({
       id: plan.id,
     })
-    expect(await readFile(join(workspace, "content/reading/links.md"))).toEqual(incomingBefore)
+    expect(await readFile(join(workspace, "content/reading/links.md"), "utf8")).not.toContain(
+      "[[topic]]",
+    )
   })
 
   it("fails closed when a custom-domain landing page is removed before publication", async () => {

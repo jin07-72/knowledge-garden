@@ -152,6 +152,7 @@ function gardenApi(): GardenApi {
     history: {
       git: vi.fn(),
       deployments: vi.fn(),
+      clearCache: vi.fn(async () => ok(undefined)),
       cancel: vi.fn(async () => ok(undefined)),
       openLink: vi.fn(async () => ok(undefined)),
     },

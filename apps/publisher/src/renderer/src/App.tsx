@@ -52,6 +52,8 @@ const MIN_EDITOR = 360
 const MAX_EDITOR = 900
 const MIN_PREVIEW = 360
 const COMPACT_PANE_BREAKPOINT = 1050
+const DEPLOYMENT_RECHECK_DELAY_MS = 15_000
+const MAX_DEPLOYMENT_RECHECKS = 3
 let publishDeploymentRequestSequence = 0
 
 function nextPublishDeploymentRequestId(): string {
@@ -254,6 +256,7 @@ export function PublisherApp({
   const previewStart = useRef<ReturnType<GardenApi["preview"]["start"]> | undefined>(undefined)
   const publishDeploymentGeneration = useRef(0)
   const publishDeploymentRequest = useRef<string | undefined>(undefined)
+  const publishDeploymentTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const publishCompletionHandled = useRef(false)
 
   const cancelPublishDeployment = useCallback((): void => {
@@ -261,6 +264,10 @@ export function PublisherApp({
     publishDeploymentGeneration.current += 1
     publishDeploymentRequest.current = undefined
     publishCompletionHandled.current = false
+    if (publishDeploymentTimer.current !== undefined) {
+      clearTimeout(publishDeploymentTimer.current)
+      publishDeploymentTimer.current = undefined
+    }
     if (requestId) {
       void Promise.resolve()
         .then(() => api.history.cancel({ requestId }))
@@ -616,14 +623,22 @@ export function PublisherApp({
 
       publishCompletionHandled.current = true
       const generation = ++publishDeploymentGeneration.current
-      const requestId = nextPublishDeploymentRequestId()
-      publishDeploymentRequest.current = requestId
-      setPublishProgress({ phase: "deploying", message: "发布成功，正在部署…", percent: 100 })
+      setPublishProgress({
+        phase: "deploying",
+        message: "代码已推送，正在等待 GitHub Pages 部署…",
+        percent: 100,
+      })
       void loadChanges(generation)
-      void Promise.allSettled([
-        api.history.git({ limit: 1, requestId }),
-        api.history.deployments({ limit: 20, requestId }),
-      ]).then(([gitOutcome, deploymentsOutcome]) => {
+
+      let rechecks = 0
+      const checkDeployment = async (): Promise<void> => {
+        if (!appMounted.current || generation !== publishDeploymentGeneration.current) return
+        const requestId = nextPublishDeploymentRequestId()
+        publishDeploymentRequest.current = requestId
+        const [gitOutcome, deploymentsOutcome] = await Promise.allSettled([
+          api.history.git({ limit: 1, requestId }),
+          api.history.deployments({ limit: 20, requestId }),
+        ])
         if (
           !appMounted.current ||
           generation !== publishDeploymentGeneration.current ||
@@ -635,19 +650,33 @@ export function PublisherApp({
         const git = gitOutcome.status === "fulfilled" ? gitOutcome.value : undefined
         const deployments =
           deploymentsOutcome.status === "fulfilled" ? deploymentsOutcome.value : undefined
+        let keepWaiting = true
         if (deployments?.ok) setPublishActionsUrl(deployments.value.actionsUrl)
         if (!git?.ok || !deployments?.ok) {
           setPublishProgress({
-            phase: "complete",
-            message: "发布成功，暂时无法确认部署状态。",
+            phase: "deploying",
+            message: "代码已推送，暂时无法确认部署状态。",
             percent: 100,
           })
-          return
+        } else {
+          const status = publishedDeploymentStatus(git.value[0], deployments.value)
+          setPublishActionsUrl(status.actionsUrl)
+          setPublishProgress(status.progress)
+          keepWaiting = status.progress.phase === "deploying"
         }
-        const status = publishedDeploymentStatus(git.value[0], deployments.value)
-        setPublishActionsUrl(status.actionsUrl)
-        setPublishProgress(status.progress)
-      })
+        if (
+          keepWaiting &&
+          rechecks < MAX_DEPLOYMENT_RECHECKS &&
+          generation === publishDeploymentGeneration.current
+        ) {
+          rechecks += 1
+          publishDeploymentTimer.current = setTimeout(() => {
+            publishDeploymentTimer.current = undefined
+            void checkDeployment()
+          }, DEPLOYMENT_RECHECK_DELAY_MS)
+        }
+      }
+      void checkDeployment()
     },
     [api, cancelPublishDeployment, loadChanges],
   )
@@ -869,6 +898,9 @@ export function PublisherApp({
         setLocalPreview({ path: nextPath, markdown: movedDocument.markdown })
       }
       const consequenceMessages = [
+        ...(result.value.linkEditedPaths?.length
+          ? [`已自动清理 ${result.value.linkEditedPaths.length} 个页面中的入站链接`]
+          : []),
         ...(result.value.pendingPublicDeletion ? ["仍在线，等待发布下架"] : []),
         ...(result.value.historyWarning ? ["Git 历史仍可能保留公开内容"] : []),
         ...result.value.warnings.map((warning) => warning.message),
@@ -1274,6 +1306,10 @@ export function PublisherApp({
           onLoadHistory={loadHistory}
           onCancelHistory={cancelHistory}
           onOpenHistoryLink={openHistoryLink}
+          onClearPublicCache={async () => {
+            const result = await api.history.clearCache?.()
+            if (result && !result.ok) throw new Error(result.error.message)
+          }}
         />
       </div>
 

@@ -157,6 +157,7 @@ export interface PublisherIpcServices {
   readonly history: {
     git(request: HistoryRequest): Promise<readonly GitCommit[]>
     deployments(request: HistoryRequest): Promise<DeploymentHistory>
+    clearCache(): Promise<void>
     cancel(request: HistoryCancelRequest): Promise<void>
     openLink(request: HistoryLinkRequest): Promise<void>
   }
@@ -1045,6 +1046,12 @@ export function registerPublisherIpc(options: RegisterPublisherIpcOptions): () =
         historySchema,
         isTrustedSender,
         (request) => services.history.deployments(request),
+      ),
+    ],
+    [
+      IPC_CHANNELS.requests.historyClearCache,
+      secureHandler(IPC_CHANNELS.requests.historyClearCache, z.undefined(), isTrustedSender, () =>
+        services.history.clearCache(),
       ),
     ],
     [

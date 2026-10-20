@@ -25,7 +25,13 @@ export function VisibilityMenu({
   const selected = options.find((option) => option.value === value) ?? options[0]
 
   useEffect(() => {
-    if (open) menu.current?.querySelector<HTMLButtonElement>("[role='menuitemradio']")?.focus()
+    if (!open) return
+    const selectedOption = menu.current?.querySelector<HTMLButtonElement>(
+      "[role='menuitemradio'][aria-checked='true']",
+    )
+    const firstOption = menu.current?.querySelector<HTMLButtonElement>("[role='menuitemradio']")
+    const initialOption = selectedOption ?? firstOption
+    initialOption?.focus()
   }, [open])
 
   useEffect(() => {

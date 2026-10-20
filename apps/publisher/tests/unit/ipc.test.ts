@@ -126,6 +126,7 @@ function services(): PublisherIpcServices & {
     history: {
       git: call("historyGit"),
       deployments: call("historyDeployments"),
+      clearCache: call("historyClearCache"),
       cancel: call("historyCancel"),
       openLink: call("historyOpenLink"),
     },
@@ -2040,6 +2041,7 @@ describe("preload garden API", () => {
     await api.publish.cancel({ operationId: "publish-1" })
     await api.history.git({ limit: 20, requestId: "history-1" })
     await api.history.deployments({ limit: 20, requestId: "history-1" })
+    await api.history.clearCache?.()
     await api.history.cancel({ requestId: "history-1" })
     await api.history.openLink({
       url: "https://github.com/octocat/garden/actions/workflows/deploy.yml",

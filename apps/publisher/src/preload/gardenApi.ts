@@ -262,6 +262,7 @@ export function createGardenApi(ipc: IpcRendererPort): GardenApi {
       invoke<readonly GitCommit[]>(ipc, IPC_CHANNELS.requests.historyGit, request),
     deployments: (request?: HistoryRequest) =>
       invoke<DeploymentHistory>(ipc, IPC_CHANNELS.requests.historyDeployments, request),
+    clearCache: () => invoke<void>(ipc, IPC_CHANNELS.requests.historyClearCache),
     cancel: (request: HistoryCancelRequest) =>
       invoke<void>(ipc, IPC_CHANNELS.requests.historyCancel, request),
     openLink: (request: HistoryLinkRequest) =>

@@ -486,6 +486,7 @@ export const IPC_CHANNELS = {
     publishCancel: "garden:publish:cancel",
     historyGit: "garden:history:git",
     historyDeployments: "garden:history:deployments",
+    historyClearCache: "garden:history:clear-cache",
     historyCancel: "garden:history:cancel",
     historyOpenLink: "garden:history:open-link",
     lifecycleCloseAck: "garden:lifecycle:close-ack",
@@ -778,6 +779,7 @@ export interface GardenApi {
   readonly history: {
     git(request?: HistoryRequest): Promise<IpcResult<readonly GitCommit[]>>
     deployments(request?: HistoryRequest): Promise<IpcResult<DeploymentHistory>>
+    clearCache?(): Promise<IpcResult<void>>
     cancel(request: HistoryCancelRequest): Promise<IpcResult<void>>
     openLink(request: HistoryLinkRequest): Promise<IpcResult<void>>
   }

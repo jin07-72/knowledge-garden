@@ -7,6 +7,7 @@ import {
   nativeImage,
   net,
   screen,
+  session,
   shell,
 } from "electron"
 import { existsSync } from "node:fs"
@@ -453,6 +454,7 @@ app.whenReady().then(async () => {
       preview: previewManager,
       imageLibraryAdapter,
       openExternal: (url) => shell.openExternal(url),
+      clearHttpCache: () => session.defaultSession.clearCache(),
       ...(bundledRuntime ? { runtime: bundledRuntime } : {}),
       ...(e2e ? {} : { previewPortAvailable: () => isPreviewPortAvailable(8080) }),
       online: () => (e2e ? true : net.isOnline()),

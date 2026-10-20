@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises"
+﻿import { readFile } from "node:fs/promises"
 import { resolve } from "node:path"
 import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, describe, expect, it } from "vitest"
@@ -43,6 +43,7 @@ describe("renderer security", () => {
         })}
         onCancelHistory={async () => undefined}
         onOpenHistoryLink={async () => undefined}
+        onClearPublicCache={async () => undefined}
       />,
     )
     expect(screen.getByTitle("CSS Grid的 Quartz 精确预览")).toHaveAttribute(
@@ -66,10 +67,15 @@ describe("renderer security", () => {
         preview={preview}
         onLoadHistory={async () => ({
           commits: [],
-          deployments: { runs: [], actionsUrl: "https://example.com", liveSiteUrl: "https://example.com" },
+          deployments: {
+            runs: [],
+            actionsUrl: "https://example.com",
+            liveSiteUrl: "https://example.com",
+          },
         })}
         onCancelHistory={async () => undefined}
         onOpenHistoryLink={async () => undefined}
+        onClearPublicCache={async () => undefined}
       />,
     )
 
@@ -85,13 +91,22 @@ describe("renderer security", () => {
       <PreviewPane
         note={note}
         markdown="# Local public buffer"
-        preview={{ state: "error", generation: 2, error: { code: "PREVIEW_EXITED", message: "failed" } }}
+        preview={{
+          state: "error",
+          generation: 2,
+          error: { code: "PREVIEW_EXITED", message: "failed" },
+        }}
         onLoadHistory={async () => ({
           commits: [],
-          deployments: { runs: [], actionsUrl: "https://example.com", liveSiteUrl: "https://example.com" },
+          deployments: {
+            runs: [],
+            actionsUrl: "https://example.com",
+            liveSiteUrl: "https://example.com",
+          },
         })}
         onCancelHistory={async () => undefined}
         onOpenHistoryLink={async () => undefined}
+        onClearPublicCache={async () => undefined}
       />,
     )
 
@@ -108,10 +123,15 @@ describe("renderer security", () => {
         preview={{ state: "building", generation: 2, lastSuccessfulUrl: preview.url }}
         onLoadHistory={async () => ({
           commits: [],
-          deployments: { runs: [], actionsUrl: "https://example.com", liveSiteUrl: "https://example.com" },
+          deployments: {
+            runs: [],
+            actionsUrl: "https://example.com",
+            liveSiteUrl: "https://example.com",
+          },
         })}
         onCancelHistory={async () => undefined}
         onOpenHistoryLink={async () => undefined}
+        onClearPublicCache={async () => undefined}
       />,
     )
 
@@ -136,6 +156,7 @@ describe("renderer security", () => {
         })}
         onCancelHistory={async () => undefined}
         onOpenHistoryLink={async () => undefined}
+        onClearPublicCache={async () => undefined}
       />,
     )
 
