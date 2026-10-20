@@ -508,6 +508,55 @@ describe("exact-tree publication", () => {
     )
   })
 
+  it("publishes a note moved from private storage into the public tree", async () => {
+    const repository = await fixture()
+    await put(
+      repository.root,
+      "content/reading/index.md",
+      "---\ngardenDomain: true\ntitle: Reading\ndescription: Reading notes.\ndomainOrder: 1\n---\n",
+    )
+    await put(
+      repository.root,
+      "private/reading/private-new.md",
+      "---\ntitle: Private new\ndate: 2026-10-20\ndescription: New public note\ntags:\n  - reading\n---\n\nnew public body\n",
+    )
+    expect((await git(repository.root, ["add", "."])).exitCode).toBe(0)
+    expect((await git(repository.root, ["commit", "-m", "add reading domain"])).exitCode).toBe(0)
+    expect((await git(repository.root, ["push"])).exitCode).toBe(0)
+
+    const plan = await planVisibilityChange({
+      workspace: repository.root,
+      path: "private/reading/private-new.md",
+      visibility: "public",
+    })
+    const receipt = await executeVisibilityChange(plan, {
+      workspace: repository.root,
+      transactionTrash: { trashItem: async () => undefined },
+    })
+    expect(receipt.changedPaths).toEqual([
+      "content/reading/private-new.md",
+      "private/reading/private-new.md",
+    ])
+
+    const review = await listChanges({ workspace: repository.root })
+    const added = review.groups.find(
+      (group) => group.kind === "added" && group.paths.includes("content/reading/private-new.md"),
+    )
+    expect(added).toBeDefined()
+
+    await publisher(repository).publish({ paths: ["content/reading/private-new.md"] })
+
+    expect(
+      await output(repository.root, ["show", "HEAD:content/reading/private-new.md"]),
+    ).toContain("new public body")
+    expect(await output(repository.root, ["ls-tree", "-r", "--name-only", "HEAD", "private"])).toBe(
+      "private/.gitkeep",
+    )
+    await expect(
+      readFile(join(repository.root, "private/reading/private-new.md"), "utf8"),
+    ).rejects.toMatchObject({ code: "ENOENT" })
+  })
+
   it("publishes both sides of a selected rename without taking unrelated edits", async () => {
     const repository = await fixture()
     await rename(
