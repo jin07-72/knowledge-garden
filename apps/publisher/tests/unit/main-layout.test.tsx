@@ -643,6 +643,7 @@ describe("publisher main layout", () => {
     })
     render(<App />)
     const preview = await screen.findByRole("region", { name: "本地预览" })
+    await userEvent.click(within(preview).getByRole("tab", { name: "全站本地" }))
 
     act(() => {
       progress?.({
@@ -658,9 +659,9 @@ describe("publisher main layout", () => {
       })
     })
     expect(within(preview).queryByText("旧错误")).not.toBeInTheDocument()
-    expect(await within(preview).findByTitle("CSS Grid 布局的 Quartz 精确预览")).toHaveAttribute(
+    expect(await within(preview).findByTitle("Quartz 本地全站预览")).toHaveAttribute(
       "src",
-      "http://127.0.0.1:9000/technology/css-grid",
+      "http://127.0.0.1:9000/",
     )
 
     act(() => {
@@ -671,9 +672,9 @@ describe("publisher main layout", () => {
       })
     })
     expect(within(preview).getByText("新错误")).toBeVisible()
-    expect(await within(preview).findByTitle("CSS Grid 布局的 Quartz 精确预览")).toHaveAttribute(
+    expect(await within(preview).findByTitle("Quartz 本地全站预览")).toHaveAttribute(
       "src",
-      "http://127.0.0.1:9000/technology/css-grid",
+      "http://127.0.0.1:9000/",
     )
   })
 
@@ -682,6 +683,7 @@ describe("publisher main layout", () => {
     render(<App />)
 
     const preview = await screen.findByRole("region", { name: "本地预览" })
+    await userEvent.click(within(preview).getByRole("tab", { name: "全站本地" }))
     expect(await within(preview).findByRole("alert")).toHaveTextContent("状态通道断开")
   })
 
@@ -1259,7 +1261,7 @@ describe("publisher main layout", () => {
     expect(screen.getByText("将从公开网站移除")).toBeVisible()
   })
 
-  it("automatically publishes the retirement and cleaned incoming links after privatizing", async () => {
+  it("only refreshes pending changes after privatizing and omits link-cleanup hints", async () => {
     const user = userEvent.setup()
     const review: ChangeReview = {
       groups: [
@@ -1328,7 +1330,6 @@ describe("publisher main layout", () => {
         warnings: [],
       }),
     )
-    vi.mocked(garden.publish.start).mockResolvedValueOnce(ok({ operationId: "auto-publish" }))
     render(<App />)
 
     await waitFor(() => expect(garden.changes.list).toHaveBeenCalledOnce())
@@ -1340,17 +1341,13 @@ describe("publisher main layout", () => {
       }),
     )
 
-    await waitFor(() =>
-      expect(garden.publish.start).toHaveBeenCalledWith({
-        changeGroupIds: ["modified-index", "unpublish-css-grid"],
-      }),
-    )
-    expect(screen.getByText(/已清理 2 篇公开笔记中指向这篇笔记的旧链接/)).toBeVisible()
-    const status = screen.getByRole("status", { name: "发布状态" })
-    expect(within(status).getByText("正在自动发布下线变化…")).toBeVisible()
+    await waitFor(() => expect(garden.changes.list).toHaveBeenCalledTimes(2))
+    expect(garden.publish.start).not.toHaveBeenCalled()
+    expect(screen.queryByText(/已清理.*旧链接/)).not.toBeInTheDocument()
+    expect(screen.getByText("可发布变化：4")).toBeVisible()
   })
 
-  it("keeps the retirement pending with a visible error when automatic publication fails", async () => {
+  it("does not call publish even when a privatized note has a pending public deletion", async () => {
     const user = userEvent.setup()
     vi.mocked(garden.changes.list)
       .mockResolvedValueOnce(ok({ groups: [] }))
@@ -1378,10 +1375,6 @@ describe("publisher main layout", () => {
         warnings: [],
       }),
     )
-    vi.mocked(garden.publish.start).mockResolvedValueOnce({
-      ok: false,
-      error: { code: "GIT_ORIGIN_UNREACHABLE", message: "远程仓库暂不可用。" },
-    })
     render(<App />)
 
     await waitFor(() => expect(garden.changes.list).toHaveBeenCalledOnce())
@@ -1393,26 +1386,73 @@ describe("publisher main layout", () => {
       }),
     )
 
-    await waitFor(() => expect(garden.publish.start).toHaveBeenCalledOnce())
-    const status = screen.getByRole("status", { name: "发布状态" })
-    expect(await within(status).findByText("远程仓库暂不可用。")).toBeVisible()
+    await waitFor(() => expect(garden.changes.list).toHaveBeenCalledTimes(2))
+    expect(garden.publish.start).not.toHaveBeenCalled()
     expect(screen.getByText("可发布变化：1")).toBeVisible()
   })
 
-  it("does not automatically publish when a private note becomes public", async () => {
+  it("retains the latest private buffer in the editor and local preview after making it public", async () => {
     const user = userEvent.setup()
+    const nextPath = "content/reading/private-notes.md"
+    const latestMarkdown = "# 私密阅读札记\n\n正文\n\nprivate-to-public latest"
+    vi.mocked(garden.notes.save).mockResolvedValueOnce(
+      ok({
+        path: notes[1].path,
+        updatedAt: "2026-09-25T02:00:00.000Z",
+        mtimeMs: 5,
+        contentHash: markdownHash(latestMarkdown),
+      }),
+    )
+    vi.mocked(garden.notes.read).mockImplementation(async ({ path }) =>
+      ok(
+        path === nextPath
+          ? {
+              ...documents.get(notes[1].path)!,
+              path,
+              markdown: latestMarkdown,
+              mtimeMs: 5,
+              contentHash: markdownHash(latestMarkdown),
+            }
+          : documents.get(path)!,
+      ),
+    )
     render(<App />)
 
     await user.click(await screen.findByRole("button", { name: /私密阅读札记/ }))
+    await screen.findByText("# 私密阅读札记", { exact: false })
+    const beforeMove = EditorView.findFromDOM(document.querySelector(".cm-content") as HTMLElement)!
+    act(() =>
+      beforeMove.dispatch({
+        changes: { from: beforeMove.state.doc.length, insert: "\n\nprivate-to-public latest" },
+      }),
+    )
     await user.click(await screen.findByRole("button", { name: "可见性：私密" }))
     await user.click(screen.getByRole("menuitemradio", { name: /公开/ }))
 
+    await waitFor(() =>
+      expect(garden.notes.save).toHaveBeenCalledWith(
+        expect.objectContaining({ path: notes[1].path, markdown: latestMarkdown }),
+      ),
+    )
     await waitFor(() =>
       expect(garden.notes.changeVisibility).toHaveBeenCalledWith({
         path: notes[1].path,
         visibility: "public",
       }),
     )
+    expect(await screen.findByText(nextPath)).toBeVisible()
+    await waitFor(() =>
+      expect(
+        EditorView.findFromDOM(
+          document.querySelector(".cm-content") as HTMLElement,
+        )?.state.doc.toString(),
+      ).toBe(latestMarkdown),
+    )
+    expect(
+      within(screen.getByRole("region", { name: "本地预览" })).getByLabelText(
+        "私密阅读札记的本地渲染",
+      ),
+    ).toHaveTextContent("private-to-public latest")
     await waitFor(() => expect(garden.changes.list).toHaveBeenCalledTimes(2))
     expect(garden.publish.start).not.toHaveBeenCalled()
   })
@@ -1565,6 +1605,20 @@ describe("publisher main layout", () => {
         path: "private/technology/css-grid.md",
       }),
     )
+    expect(await screen.findByText("private/technology/css-grid.md")).toBeVisible()
+    await waitFor(() =>
+      expect(
+        EditorView.findFromDOM(
+          document.querySelector(".cm-content") as HTMLElement,
+        )?.state.doc.toString(),
+      ).toContain("v2"),
+    )
+    expect(
+      within(screen.getByRole("region", { name: "本地预览" })).getByLabelText(
+        "CSS Grid 布局的本地渲染",
+      ),
+    ).toHaveTextContent("v2")
+    expect(garden.publish.start).not.toHaveBeenCalled()
   })
 
   it("blocks a visibility move when the latest save in the flush barrier fails", async () => {
@@ -1786,15 +1840,13 @@ describe("publisher main layout", () => {
     },
   )
 
-  it("keeps exact-note preview primary and offers secondary destinations", async () => {
+  it("keeps local-buffer note preview primary and offers secondary destinations", async () => {
     const user = userEvent.setup()
     render(<App />)
 
     const preview = await screen.findByRole("region", { name: "本地预览" })
-    expect(await within(preview).findByTitle("CSS Grid 布局的 Quartz 精确预览")).toHaveAttribute(
-      "src",
-      "http://127.0.0.1:8080/technology/css-grid",
-    )
+    expect(await within(preview).findByRole("heading", { name: "CSS Grid 布局" })).toBeVisible()
+    expect(within(preview).queryByTitle("CSS Grid 布局的 Quartz 精确预览")).not.toBeInTheDocument()
 
     await user.click(within(preview).getByRole("tab", { name: "全站本地" }))
     expect(within(preview).getByTitle("Quartz 本地全站预览")).toHaveAttribute(
@@ -1846,6 +1898,21 @@ describe("publisher main layout", () => {
       view!.dispatch({ changes: { from: view!.state.doc.length, insert: "\n\n实时预览内容" } })
     })
     expect(await within(preview).findByText("实时预览内容")).toBeVisible()
+  })
+
+  it("updates the rendered public preview while editing", async () => {
+    render(<App />)
+
+    const preview = await screen.findByRole("region", { name: "本地预览" })
+    expect(await within(preview).findByRole("heading", { name: "CSS Grid 布局" })).toBeVisible()
+
+    const view = await waitFor(() =>
+      EditorView.findFromDOM(document.querySelector(".cm-content") as HTMLElement),
+    )
+    await act(async () => {
+      view!.dispatch({ changes: { from: view!.state.doc.length, insert: "\n\n公开实时预览" } })
+    })
+    expect(await within(preview).findByText("公开实时预览")).toBeVisible()
   })
 
   it("shows a safe history error when history loading rejects", async () => {

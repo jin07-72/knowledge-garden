@@ -43,7 +43,7 @@ function replaceWikiLinks(source: string): string {
     .join("\n")
 }
 
-export function renderPrivateMarkdown(source: string): string {
+export function renderLocalMarkdown(source: string): string {
   const html = markdown.parse(replaceWikiLinks(stripFrontmatter(source))) as string
   return DOMPurify.sanitize(html, {
     USE_PROFILES: { html: true },
@@ -52,28 +52,34 @@ export function renderPrivateMarkdown(source: string): string {
   })
 }
 
-export function PrivateNotePreview({
+export function LocalNotePreview({
   title,
   markdown: source,
+  privateNote,
 }: {
   readonly title: string
   readonly markdown?: string
+  readonly privateNote: boolean
 }): React.JSX.Element {
-  const html = useMemo(() => (source ? renderPrivateMarkdown(source) : ""), [source])
+  const html = useMemo(() => (source === undefined ? "" : renderLocalMarkdown(source)), [source])
   return (
-    <div className="private-preview-shell" aria-label={`${title}的私密预览`}>
-      <div className="private-preview-banner">
-        <strong>私密笔记不会映射到公开网址</strong>
-        <span>仅在这台电脑上预览，不会发布。</span>
-      </div>
+    <div className="local-note-preview-shell" aria-label={`${title}的本地预览`}>
+      {privateNote ? (
+        <div className="local-note-preview-banner">
+          <strong>私密笔记不会映射到公开网址</strong>
+          <span>仅在这台电脑上预览，不会发布。</span>
+        </div>
+      ) : null}
       {html ? (
         <article
-          className="private-preview"
+          className="local-note-preview"
           aria-label={`${title}的本地渲染`}
           dangerouslySetInnerHTML={{ __html: html }}
         />
+      ) : source === undefined ? (
+        <p className="local-note-preview-empty">正在载入预览…</p>
       ) : (
-        <p className="private-preview-empty">正在载入预览…</p>
+        <p className="local-note-preview-empty">当前笔记内容为空。</p>
       )}
     </div>
   )

@@ -1,8 +1,8 @@
-import { useMemo, useState } from "react"
+import { useState } from "react"
 import { Monitor, TriangleAlert } from "lucide-react"
 import type { NoteSummary, PreviewStatus } from "../../../shared/contracts"
 import { HistoryView, type HistorySnapshot } from "./HistoryView"
-import { PrivateNotePreview } from "./PrivateNotePreview"
+import { LocalNotePreview } from "./PrivateNotePreview"
 
 type PreviewTab = "note" | "site" | "public" | "history"
 
@@ -15,16 +15,6 @@ interface PreviewPaneProps {
   readonly onOpenHistoryLink: (url: string) => Promise<void>
 }
 
-function notePreviewUrl(
-  baseUrl: string | undefined,
-  note: NoteSummary | undefined,
-): string | undefined {
-  if (!baseUrl || !note || note.visibility === "private") return undefined
-  const base = new URL(baseUrl)
-  base.pathname = `/${note.domain}/${note.slug}`
-  return base.toString().replace(/\/$/, "")
-}
-
 export function PreviewPane({
   note,
   markdown,
@@ -35,7 +25,6 @@ export function PreviewPane({
 }: PreviewPaneProps): React.JSX.Element {
   const [tab, setTab] = useState<PreviewTab>("note")
   const baseUrl = preview.lastSuccessfulUrl ?? preview.url
-  const exactUrl = useMemo(() => notePreviewUrl(baseUrl, note), [baseUrl, note])
 
   const tabs: readonly { id: PreviewTab; label: string }[] = [
     { id: "note", label: "当前笔记" },
@@ -48,8 +37,8 @@ export function PreviewPane({
     <section className="preview-pane pane" aria-label="本地预览" role="region">
       <header className="preview-header">
         <div>
-          <span className="eyebrow">Quartz</span>
-          <h2>精确预览</h2>
+          <span className="eyebrow">本地 Markdown</span>
+          <h2>当前笔记预览</h2>
         </div>
         <span className={`preview-chip preview-${preview.state}`}>
           {preview.state === "ready" ? "实时" : "状态"}
@@ -86,34 +75,24 @@ export function PreviewPane({
         role="tabpanel"
         aria-labelledby={`preview-tab-${tab}`}
       >
-        {preview.state === "error" ? (
+        {tab === "site" && preview.state === "error" ? (
           <div className="preview-banner" role="alert">
             <TriangleAlert size={16} />
             {preview.error?.message ?? "Quartz 预览暂时不可用。"}
           </div>
         ) : null}
-        {tab === "note" && note?.visibility === "private" ? (
-          <PrivateNotePreview markdown={markdown} title={note.title} />
-        ) : null}
-        {tab === "note" && exactUrl && note?.visibility === "public" ? (
-          <iframe
-            title={`${note.title}的 Quartz 精确预览`}
-            src={exactUrl}
-            sandbox="allow-same-origin allow-scripts"
+        {tab === "note" && note ? (
+          <LocalNotePreview
+            markdown={markdown}
+            title={note.title}
+            privateNote={note.visibility === "private"}
           />
         ) : null}
         {tab === "note" && !note ? (
           <div className="empty-state">
             <Monitor size={28} />
             <strong>等待本地预览</strong>
-            <span>选择笔记后，这里显示与线上一致的 Quartz 页面。</span>
-          </div>
-        ) : null}
-        {tab === "note" && note?.visibility === "public" && !exactUrl ? (
-          <div className="empty-state">
-            <Monitor size={28} />
-            <strong>等待本地预览</strong>
-            <span>本地预览启动后，这里显示与线上一致的 Quartz 页面。</span>
+            <span>选择笔记后，这里显示当前本地 Markdown 内容。</span>
           </div>
         ) : null}
         {tab === "site" && baseUrl ? (

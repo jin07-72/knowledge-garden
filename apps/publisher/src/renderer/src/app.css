@@ -1037,14 +1037,14 @@ button {
   border: 0;
   background: white;
 }
-.private-preview-shell {
+.local-note-preview-shell {
   display: flex;
   height: 100%;
   min-height: 0;
   flex-direction: column;
   background: #fbfaf7;
 }
-.private-preview-banner {
+.local-note-preview-banner {
   display: flex;
   flex-direction: column;
   gap: 3px;
@@ -1054,10 +1054,10 @@ button {
   background: #fff7e5;
   font-size: 11px;
 }
-.private-preview-banner strong {
+.local-note-preview-banner strong {
   font-size: 12px;
 }
-.private-preview {
+.local-note-preview {
   min-height: 0;
   flex: 1;
   overflow: auto;
@@ -1067,69 +1067,69 @@ button {
   font-size: 14px;
   line-height: 1.75;
 }
-.private-preview > :first-child {
+.local-note-preview > :first-child {
   margin-top: 0;
 }
-.private-preview h1,
-.private-preview h2,
-.private-preview h3,
-.private-preview h4,
-.private-preview h5,
-.private-preview h6 {
+.local-note-preview h1,
+.local-note-preview h2,
+.local-note-preview h3,
+.local-note-preview h4,
+.local-note-preview h5,
+.local-note-preview h6 {
   margin: 1.2em 0 0.5em;
   line-height: 1.3;
 }
-.private-preview h1 {
+.local-note-preview h1 {
   padding-bottom: 0.3em;
   border-bottom: 1px solid #d8d2c6;
   font-size: 1.8em;
 }
-.private-preview h2 {
+.local-note-preview h2 {
   font-size: 1.4em;
 }
-.private-preview h3 {
+.local-note-preview h3 {
   font-size: 1.2em;
 }
-.private-preview p,
-.private-preview ul,
-.private-preview ol,
-.private-preview blockquote,
-.private-preview pre,
-.private-preview table {
+.local-note-preview p,
+.local-note-preview ul,
+.local-note-preview ol,
+.local-note-preview blockquote,
+.local-note-preview pre,
+.local-note-preview table {
   margin: 0.85em 0;
 }
-.private-preview code {
+.local-note-preview code {
   padding: 0.15em 0.35em;
   border-radius: 4px;
   background: #f0ece4;
   font-family: "Cascadia Code", Consolas, monospace;
   font-size: 0.9em;
 }
-.private-preview pre {
+.local-note-preview pre {
   overflow: auto;
   padding: 12px 14px;
   border: 1px solid #e2ddd2;
   border-radius: 7px;
   background: #f5f1e9;
 }
-.private-preview pre code {
+.local-note-preview pre code {
   padding: 0;
   background: transparent;
 }
-.private-preview blockquote {
+.local-note-preview blockquote {
   margin-left: 0;
   padding-left: 13px;
   border-left: 3px solid #cfc6b6;
   color: #59626c;
 }
-.private-preview .wiki-link {
+.local-note-preview .wiki-link {
   color: #0969da;
 }
-.private-preview img {
+.local-note-preview img {
   max-width: 100%;
   border-radius: 6px;
 }
-.private-preview-empty {
+.local-note-preview-empty {
   margin: 0;
   padding: 24px 30px;
   color: #59626c;

@@ -130,6 +130,7 @@ function Comparison({
 export interface MarkdownEditorHandle {
   flush(): Promise<boolean>
   flushSave(): Promise<boolean>
+  currentMarkdown(): string
 }
 
 interface RecoveryPort {
@@ -230,6 +231,7 @@ export const MarkdownEditor = forwardRef<
       flush: () => (reloadPending.current ? Promise.resolve(false) : autosaveRef.current.flush()),
       flushSave: () =>
         reloadPending.current ? Promise.resolve(false) : autosaveRef.current.flush(),
+      currentMarkdown: () => editor.current?.state.sliceDoc() ?? document.markdown,
     }),
     [],
   )

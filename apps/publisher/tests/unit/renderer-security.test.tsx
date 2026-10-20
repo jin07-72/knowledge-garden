@@ -25,10 +25,11 @@ const preview: PreviewStatus = {
 }
 
 describe("renderer security", () => {
-  it("sandboxes both local Quartz frames without navigation, popup, or download capabilities", async () => {
+  it("renders the current public note locally and sandboxes the full-site Quartz frame", async () => {
     render(
       <PreviewPane
         note={note}
+        markdown="# Local public buffer"
         preview={preview}
         onLoadHistory={async () => ({
           commits: [],
@@ -42,16 +43,37 @@ describe("renderer security", () => {
         onOpenHistoryLink={async () => undefined}
       />,
     )
-    expect(screen.getByTitle("CSS Grid的 Quartz 精确预览")).toHaveAttribute(
-      "sandbox",
-      "allow-same-origin allow-scripts",
-    )
+    expect(screen.getByRole("heading", { name: "Local public buffer" })).toBeVisible()
+    expect(screen.queryByTitle("CSS Grid的 Quartz 精确预览")).not.toBeInTheDocument()
 
     fireEvent.click(screen.getByRole("tab", { name: "全站本地" }))
     expect(screen.getByTitle("Quartz 本地全站预览")).toHaveAttribute(
       "sandbox",
       "allow-same-origin allow-scripts",
     )
+  })
+
+  it("treats an empty markdown string as a loaded empty note", () => {
+    render(
+      <PreviewPane
+        note={note}
+        markdown=""
+        preview={preview}
+        onLoadHistory={async () => ({
+          commits: [],
+          deployments: {
+            runs: [],
+            actionsUrl: "https://github.com/octocat/garden/actions/workflows/deploy.yml",
+            liveSiteUrl: "https://octocat.github.io/garden/",
+          },
+        })}
+        onCancelHistory={async () => undefined}
+        onOpenHistoryLink={async () => undefined}
+      />,
+    )
+
+    expect(screen.getByText("当前笔记内容为空。")).toBeVisible()
+    expect(screen.queryByText("正在载入预览…")).not.toBeInTheDocument()
   })
 
   it("declares a strict renderer CSP for local dev and production frame targets", async () => {

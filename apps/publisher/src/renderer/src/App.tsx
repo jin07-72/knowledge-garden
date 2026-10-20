@@ -198,7 +198,10 @@ export function PublisherApp({
   const [domainError, setDomainError] = useState<string>()
   const [selectedPath, setSelectedPath] = useState<string>()
   const [document, setDocument] = useState<NoteDocument>()
-  const [privatePreview, setPrivatePreview] = useState<{ path: string; markdown: string }>()
+  const documentRef = useRef(document)
+  documentRef.current = document
+  const visibilityMoveDocument = useRef<NoteDocument | undefined>(undefined)
+  const [localPreview, setLocalPreview] = useState<{ path: string; markdown: string }>()
   const [documentError, setDocumentError] = useState<string>()
   const [documentRetry, setDocumentRetry] = useState(0)
   const [notesState, setNotesState] = useState<LoadState>("loading")
@@ -359,14 +362,14 @@ export function PublisherApp({
     [notes, selectedPath],
   )
   const previewMarkdown =
-    selectedNote && privatePreview?.path === selectedNote.path
-      ? privatePreview.markdown
+    selectedNote && localPreview?.path === selectedNote.path
+      ? localPreview.markdown
       : selectedNote && document?.path === selectedNote.path
         ? document.markdown
         : undefined
 
   useEffect(() => {
-    setPrivatePreview(undefined)
+    setLocalPreview(undefined)
   }, [selectedPath])
 
   const selectNote = useCallback(
@@ -765,6 +768,13 @@ export function PublisherApp({
       setDocumentError(undefined)
       return
     }
+    if (visibilityMoveDocument.current?.path === selectedPath) {
+      const movedDocument = visibilityMoveDocument.current
+      visibilityMoveDocument.current = undefined
+      setDocument(movedDocument)
+      setDocumentError(undefined)
+      return
+    }
     let active = true
     setDocument(undefined)
     setDocumentError(undefined)
@@ -814,74 +824,19 @@ export function PublisherApp({
     return undefined
   }
 
-  const autoPublishRetirement = async (
-    sourcePath: string,
-    changedPaths: readonly string[],
-  ): Promise<void> => {
-    const review = await loadChanges()
-    if (!appMounted.current) return
-    if (!review) {
-      setPublishMessage("下线变化已保留；暂时无法自动发布，请在“检查并发布”中重试。")
-      return
-    }
-    if (review.blockedReason) {
-      setPublishMessage(review.blockedReason)
-      return
-    }
-    // Only retire the published page and update already-published link sources.
-    // A never-published note that merely links here must not be auto-published.
-    const affected = review.groups.filter(
-      (group) =>
-        group.selection === "default" &&
-        (group.kind === "modified" || group.kind === "unpublish") &&
-        group.paths.some((path) => path === sourcePath || changedPaths.includes(path)),
-    )
-    if (affected.length === 0) {
-      setPublishMessage("下线变化已保留；未找到可自动发布的变化。")
-      return
-    }
-    setPublishProgress(undefined)
-    setPublishActionsUrl(undefined)
-    setPublishMessage("正在自动发布下线变化…")
-    try {
-      const result = await api.publish.start({
-        changeGroupIds: affected.map(({ id }) => id),
-      })
-      if (!appMounted.current) return
-      if (!result.ok) {
-        if (
-          result.error.code === "PUBLISH_BRANCH_REPAIR_REQUIRED" ||
-          result.error.code === "PUBLISH_BRANCH_REPAIR_BLOCKED"
-        ) {
-          setPublishSubmitError(result.error)
-          setChangeReviewOpen(true)
-          return
-        }
-        setPublishMessage(
-          messageFor(result.error, "自动发布下线失败；下线变化已保留，请在“检查并发布”中重试。"),
-        )
-        return
-      }
-      setPublishMessage("正在自动发布下线变化…")
-    } catch (error) {
-      if (!appMounted.current) return
-      setPublishMessage(
-        error instanceof Error
-          ? error.message
-          : "自动发布下线失败；下线变化已保留，请在“检查并发布”中重试。",
-      )
-    }
-  }
-
   const changeVisibility = async (note: NoteSummary, visibility: Visibility): Promise<void> => {
     if (visibility === note.visibility || visibilityBusy) return
-    if (note.path === selectedPath && !((await markdownEditor.current?.flush()) ?? true)) {
-      setVisibilityError({
-        path: note.path,
-        title: note.title,
-        message: "当前笔记保存失败，已保留编辑内容。",
-      })
-      return
+    let flushedMarkdown: string | undefined
+    if (note.path === selectedPath) {
+      if (!((await markdownEditor.current?.flush()) ?? true)) {
+        setVisibilityError({
+          path: note.path,
+          title: note.title,
+          message: "当前笔记保存失败，已保留编辑内容。",
+        })
+        return
+      }
+      flushedMarkdown = markdownEditor.current?.currentMarkdown()
     }
     setVisibilityBusy(true)
     setVisibilityError(undefined)
@@ -893,23 +848,30 @@ export function PublisherApp({
         return
       }
       const nextPath = movedPath(note, visibility)
+      const currentDocument = documentRef.current
+      const movedDocument =
+        currentDocument?.path === note.path
+          ? {
+              ...currentDocument,
+              path: nextPath,
+              markdown: flushedMarkdown ?? currentDocument.markdown,
+            }
+          : undefined
+      visibilityMoveDocument.current = movedDocument
       setNotes((current) =>
         current.map((candidate) =>
           candidate.path === note.path ? { ...candidate, visibility, path: nextPath } : candidate,
         ),
       )
       setSelectedPath((current) => (current === note.path ? nextPath : current))
-      setDocument((current) =>
-        current?.path === note.path ? { ...current, path: nextPath } : current,
-      )
-      const linkEditedPaths = result.value.linkEditedPaths ?? []
+      if (movedDocument) {
+        setDocument(movedDocument)
+        setLocalPreview({ path: nextPath, markdown: movedDocument.markdown })
+      }
       const consequenceMessages = [
         ...(result.value.pendingPublicDeletion ? ["仍在线，等待发布下架"] : []),
         ...(result.value.historyWarning ? ["Git 历史仍可能保留公开内容"] : []),
         ...result.value.warnings.map((warning) => warning.message),
-        ...(linkEditedPaths.length > 0
-          ? [`已清理 ${linkEditedPaths.length} 篇公开笔记中指向这篇笔记的旧链接`]
-          : []),
       ]
       setVisibilityNotice(
         consequenceMessages.length > 0
@@ -917,11 +879,7 @@ export function PublisherApp({
           : undefined,
       )
       void loadDomains()
-      if (visibility === "private" && result.value.pendingPublicDeletion) {
-        await autoPublishRetirement(note.path, result.value.changedPaths)
-      } else {
-        void loadChanges()
-      }
+      void loadChanges()
     } catch (error) {
       if (!appMounted.current) return
       setVisibilityError({
@@ -1294,11 +1252,7 @@ export function PublisherApp({
                     )
                   }}
                   onSaveStateChange={setSaveStateLabel}
-                  onPreviewChange={
-                    selectedNote?.visibility === "private"
-                      ? (markdown) => setPrivatePreview({ path: document.path, markdown })
-                      : undefined
-                  }
+                  onPreviewChange={(markdown) => setLocalPreview({ path: document.path, markdown })}
                 />
               ) : (
                 <p className="editor-notice">正在载入 Markdown…</p>

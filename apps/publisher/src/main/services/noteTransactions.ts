@@ -1088,37 +1088,6 @@ async function buildVisibilityChangePlan(
     base.domains,
   )
   const linkEdits: WikiLinkEdit[] = []
-  if (source.visibility === "public" && input.visibility === "private") {
-    const notes = await scanMarkdown(base.workspace, base.domains)
-    const sameSlugCount = notes.filter(({ note }) => note.slug === source.slug).length
-    for (const scanned of await scanPublicLinkSources(base.workspace, base.domains)) {
-      if (scanned.path === source.path) continue
-      const occurrences = wikiOccurrences(scanned.file.bytes.toString("utf8"))
-      const targets: Array<[string, WikiLinkEdit["qualification"]]> = [
-        [`${source.domain}/${source.slug}`, "qualified"],
-        [source.slug, "unqualified"],
-      ]
-      for (const [target, qualification] of targets) {
-        const count = occurrences.filter(({ target: link }) => link === target).length
-        if (count === 0) continue
-        if (qualification === "unqualified" && sameSlugCount !== 1) {
-          throw blocked("AMBIGUOUS_WIKI_LINK", scanned.path)
-        }
-        linkEdits.push({
-          path: scanned.path,
-          revision: scanned.file.revision,
-          oldTarget: target,
-          newTarget: null,
-          count,
-          qualification,
-        })
-      }
-    }
-    linkEdits.sort(
-      (left, right) =>
-        left.path.localeCompare(right.path) || left.oldTarget.localeCompare(right.oldTarget),
-    )
-  }
   const historyWarning =
     source.visibility === "public"
       ? await trackedByGit(base.workspace, source.path, input.runner ?? systemCommandRunner)
@@ -2321,6 +2290,49 @@ async function publishAttachments(
   }
 }
 
+async function assertPublishedTargets(
+  workspace: string,
+  plan: NoteTransactionPlan,
+  appliedHashes: ReadonlyMap<string, string>,
+  publishedRoots: ReadonlySet<string>,
+  installedIdentities: ReadonlyMap<string, string>,
+): Promise<void> {
+  for (const root of publishedRoots) {
+    const expectedIdentity = installedIdentities.get(root)
+    const expectedTree = expectedAttachmentTree(
+      plan.moves.filter(
+        ({ kind, target }) => kind === "attachment" && target.startsWith(`${root}/`),
+      ),
+      root,
+      "target",
+    )
+    if (
+      expectedIdentity === undefined ||
+      (await currentDirectoryIdentity(absolutePath(workspace, root))) !== expectedIdentity ||
+      canonicalJson(await treeSnapshot(absolutePath(workspace, root))) !==
+        canonicalJson(expectedTree)
+    ) {
+      throw transactionError("TRANSACTION_STALE", "A published target changed during execution.", {
+        path: root,
+      })
+    }
+  }
+  for (const [path, expectedHash] of appliedHashes) {
+    const expectedIdentity = installedIdentities.get(path)
+    const current = await safeFile(workspace, path).catch(() => undefined)
+    if (
+      expectedIdentity === undefined ||
+      current === undefined ||
+      current.identity !== expectedIdentity ||
+      current.revision.contentHash !== expectedHash
+    ) {
+      throw transactionError("TRANSACTION_STALE", "A published target changed during execution.", {
+        path,
+      })
+    }
+  }
+}
+
 async function removeSources(
   workspace: string,
   plan: NoteTransactionPlan,
@@ -3470,6 +3482,13 @@ async function execute(
     await locks.assertOwned()
     await updateJournal(journal, "source-remove-intent", key)
     await revalidateDomains()
+    await assertPublishedTargets(
+      workspace,
+      plan,
+      appliedHashes,
+      publishedRoots,
+      installedIdentities,
+    )
     await removeSources(workspace, plan, journal.directory, removedSources, adapter)
     if (removedSources.size > 0) mutationStarted = true
     await locks.assertOwned()
@@ -3487,6 +3506,13 @@ async function execute(
 
     await locks.assertOwned()
     await revalidateDomains()
+    await assertPublishedTargets(
+      workspace,
+      plan,
+      appliedHashes,
+      publishedRoots,
+      installedIdentities,
+    )
     await updateJournal(journal, "complete", key)
     const changedPaths = planPaths(plan).sort((left, right) => left.localeCompare(right))
     const cleanupWarnings = await locks.release()
@@ -3503,9 +3529,12 @@ async function execute(
           },
         ] as TransactionWarning[],
     )
-    const linkEditedPaths = [...new Set(plan.linkEdits.map(({ path }) => path))].sort(
-      (left, right) => left.localeCompare(right),
-    )
+    const linkEditedPaths =
+      plan.kind === "rename"
+        ? [...new Set(plan.linkEdits.map(({ path }) => path))].sort((left, right) =>
+            left.localeCompare(right),
+          )
+        : []
     return {
       id: plan.id,
       changedPaths,
