@@ -1864,7 +1864,7 @@ describe("publisher main layout", () => {
     const publicFrame = within(preview).getByTitle("线上公开站")
     expect(publicFrame).toHaveAttribute(
       "src",
-      expect.stringMatching(/^https:\/\/jin07-72\.github\.io\/knowledge-garden\/\?refresh=/),
+      expect.stringMatching(/^https:\/\/garden\.example\.com\/\?refresh=/),
     )
     const firstPublicSrc = publicFrame.getAttribute("src")
     expect(garden.history.clearCache).toHaveBeenCalledOnce()

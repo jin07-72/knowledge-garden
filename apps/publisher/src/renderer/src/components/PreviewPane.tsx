@@ -10,6 +10,7 @@ interface PreviewPaneProps {
   readonly note?: NoteSummary
   readonly markdown?: string
   readonly preview: PreviewStatus
+  readonly publicWebsiteUrl?: string
   readonly onLoadHistory: (requestId: string) => Promise<HistorySnapshot>
   readonly onCancelHistory: (requestId: string) => Promise<void>
   readonly onOpenHistoryLink: (url: string) => Promise<void>
@@ -20,6 +21,7 @@ export function PreviewPane({
   note,
   markdown,
   preview,
+  publicWebsiteUrl,
   onLoadHistory,
   onCancelHistory,
   onOpenHistoryLink,
@@ -28,11 +30,21 @@ export function PreviewPane({
   const [tab, setTab] = useState<PreviewTab>("note")
   const [publicRefresh, setPublicRefresh] = useState(() => Date.now().toString(36))
   const refreshPublicSite = (): void => {
+    if (!publicWebsiteUrl) return
     void onClearPublicCache()
       .catch(() => undefined)
       .then(() => setPublicRefresh(Date.now().toString(36)))
   }
-  const publicUrl = `https://jin07-72.github.io/knowledge-garden/?refresh=${encodeURIComponent(publicRefresh)}`
+  const publicUrl = (() => {
+    if (!publicWebsiteUrl) return undefined
+    try {
+      const url = new URL(publicWebsiteUrl)
+      url.searchParams.set("refresh", publicRefresh)
+      return url.toString()
+    } catch {
+      return undefined
+    }
+  })()
   const baseUrl =
     preview.state === "ready" || preview.state === "building"
       ? (preview.url ?? preview.lastSuccessfulUrl)
@@ -79,7 +91,7 @@ export function PreviewPane({
             aria-controls={`preview-panel-${item.id}`}
             tabIndex={tab === item.id ? 0 : -1}
             onClick={() => {
-              if (item.id === "public") refreshPublicSite()
+              if (item.id === "public" && publicUrl) refreshPublicSite()
               setTab(item.id)
             }}
             onKeyDown={(event) => {
@@ -160,7 +172,7 @@ export function PreviewPane({
             <strong>本地全站尚未就绪</strong>
           </div>
         ) : null}
-        {tab === "public" ? (
+        {tab === "public" && publicUrl ? (
           <div className="local-note-preview-shell">
             <div className="public-preview-notice">
               <TriangleAlert size={16} aria-hidden="true" />
@@ -179,6 +191,13 @@ export function PreviewPane({
               src={publicUrl}
               sandbox="allow-same-origin allow-scripts"
             />
+          </div>
+        ) : null}
+        {tab === "public" && !publicUrl ? (
+          <div className="empty-state">
+            <Monitor size={28} />
+            <strong>请在管理博客中配置网站地址</strong>
+            <span>配置后，这里会显示当前博客的线上公开站。</span>
           </div>
         ) : null}
         {tab === "history" ? (

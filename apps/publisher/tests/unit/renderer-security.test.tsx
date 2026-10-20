@@ -27,6 +27,61 @@ const preview: PreviewStatus = {
 afterEach(cleanup)
 
 describe("renderer security", () => {
+  it("uses the configured public website for the online preview", () => {
+    render(
+      <PreviewPane
+        note={note}
+        markdown="# Local public buffer"
+        preview={preview}
+        publicWebsiteUrl="https://notes.example.net/garden/?lang=zh"
+        onLoadHistory={async () => ({
+          commits: [],
+          deployments: {
+            runs: [],
+            actionsUrl: "https://example.com/actions",
+            liveSiteUrl: "https://notes.example.net/garden/",
+          },
+        })}
+        onCancelHistory={async () => undefined}
+        onOpenHistoryLink={async () => undefined}
+        onClearPublicCache={async () => undefined}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole("tab", { name: "线上公开站" }))
+    expect(screen.getByTitle("线上公开站")).toHaveAttribute(
+      "src",
+      expect.stringMatching(
+        /^https:\/\/notes\.example\.net\/garden\/\?lang=zh&refresh=/,
+      ),
+    )
+  })
+
+  it("shows configuration guidance instead of an online iframe without a website", () => {
+    render(
+      <PreviewPane
+        note={note}
+        markdown="# Local public buffer"
+        preview={preview}
+        onLoadHistory={async () => ({
+          commits: [],
+          deployments: {
+            runs: [],
+            actionsUrl: "https://example.com/actions",
+            liveSiteUrl: "https://example.com/",
+          },
+        })}
+        onCancelHistory={async () => undefined}
+        onOpenHistoryLink={async () => undefined}
+        onClearPublicCache={async () => undefined}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole("tab", { name: "线上公开站" }))
+    expect(screen.getByText("请在管理博客中配置网站地址")).toBeVisible()
+    expect(screen.queryByTitle("线上公开站")).not.toBeInTheDocument()
+  })
+
   it("renders the current public note through the exact Quartz route", async () => {
     render(
       <PreviewPane
@@ -169,7 +224,7 @@ describe("renderer security", () => {
     expect(html).toContain("Content-Security-Policy")
     expect(html).toContain("default-src 'self'")
     expect(html).toContain("script-src 'self'")
-    expect(html).toContain("frame-src http://127.0.0.1:* https://jin07-72.github.io")
+    expect(html).toContain("frame-src http://127.0.0.1:* https: http:")
     expect(html).not.toContain("script-src 'self' 'unsafe-inline'")
     expect(html).not.toContain("unsafe-eval")
   })

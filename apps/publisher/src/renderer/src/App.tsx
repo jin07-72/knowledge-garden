@@ -280,6 +280,11 @@ export function PublisherApp({
     [paneSizes, workspaceWidth],
   )
   const compactPanes = workspaceWidth <= COMPACT_PANE_BREAKPOINT
+  const activeBlog = registry.blogs.find((blog) => blog.id === registry.activeBlogId)
+  const publicWebsiteUrl =
+    activeBlog?.website.source === "manual" || activeBlog?.website.source === "quartz"
+      ? activeBlog.website.url
+      : undefined
 
   const showUnexpectedPublishError = (error: unknown, fallback: string): void => {
     const message = error instanceof Error ? error.message : fallback
@@ -1303,6 +1308,7 @@ export function PublisherApp({
           note={selectedNote}
           markdown={previewMarkdown}
           preview={preview}
+          publicWebsiteUrl={publicWebsiteUrl}
           onLoadHistory={loadHistory}
           onCancelHistory={cancelHistory}
           onOpenHistoryLink={openHistoryLink}
