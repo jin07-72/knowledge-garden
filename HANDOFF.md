@@ -1,16 +1,15 @@
 # Knowledge Garden Handoff
 
-更新时间：2026-10-20 22:48（Asia/Shanghai）
+更新时间：2026-10-21 00:25（Asia/Shanghai）
 
 本文档用于在 DeepSeek Harness 临时接管结束后，让 Codex 不依赖完整聊天记录也能理解当前状态。
 
 ## 0. 当前状态
 
 - 当前分支：`main`
-- 当前 HEAD：`a1c6c47e`（`merge: publisher visibility, cache, and deployment fixes`）
-- 合并来源：`codex/auto-private-link-repair`
-- `main` 比 `origin/main` 领先 11 个提交，尚未推送远端。
-- 本次代码修改已全部合并到本地 `main`。
+- 当前发布器版本：`0.1.3`
+- 当前发布器版本提交：`8df7abbf`（`chore(publisher): release 0.1.3`）
+- 本次代码修改已全部合并到本地 `main`，并推送到 `origin/main` 和 `publisher/main`。
 - 工作区仍保留用户原有的 `highlight.js` 依赖修改和 `.tmp-render-check.png`，未纳入本次提交。
 
 ## 1. 项目目标
@@ -29,6 +28,7 @@ Knowledge Garden 是一个公开的个人知识花园：
 - `docs/superpowers/specs/2026-09-18-knowledge-garden-publisher-design.md`
 - `docs/superpowers/specs/2026-10-20-visibility-roundtrip-design.md`
 - `docs/superpowers/specs/2026-10-20-private-quartz-preview-design.md`
+- `docs/superpowers/specs/2026-10-21-configured-online-preview-design.md`
 
 ## 2. 本次合并包含的修复
 
@@ -91,6 +91,19 @@ Knowledge Garden 是一个公开的个人知识花园：
 
 - `cf05d10e` `fix(publisher): highlight selected visibility option`
 
+### 2.6 通用线上预览地址
+
+- “线上公开站”不再硬编码 `jin07-72.github.io/knowledge-garden`。
+- 预览使用当前博客已经解析并验证的网站地址：手动配置优先，否则读取 `quartz.config.yaml` 的 `configuration.baseUrl`。
+- 没有配置网站地址时不加载 iframe，并提示在“管理博客”中配置。
+- 原有缓存清理、refresh 参数、刷新按钮和 iframe sandbox 保持不变。
+- 此项修改没有触碰公开/私密转换事务。
+
+关键提交：
+
+- `561d25b3` `fix(publisher): use configured online preview address`
+- `8df7abbf` `chore(publisher): release 0.1.3`
+
 ## 3. 当前内容状态
 
 - 最新内容提交（合并前）：`f2965202`
@@ -104,9 +117,10 @@ Knowledge Garden 是一个公开的个人知识花园：
 | 文件 | 原因 |
 |---|---|
 | `apps/publisher/src/main/services/noteTransactions.ts` | 公开→私密时自动清理入站 WikiLink |
-| `apps/publisher/src/renderer/src/App.tsx` | 部署状态复查、链接清理提示、清缓存回调 |
+| `apps/publisher/src/renderer/src/App.tsx` | 部署状态复查、链接清理提示、清缓存回调、传递当前博客网站地址 |
 | `apps/publisher/src/renderer/src/publishDeploymentStatus.ts` | 未确认部署时返回 `deploying` |
-| `apps/publisher/src/renderer/src/components/PreviewPane.tsx` | 线上站 cache-busting、清缓存、刷新按钮布局 |
+| `apps/publisher/src/renderer/src/components/PreviewPane.tsx` | 使用当前博客网站地址、未配置提示、cache-busting、清缓存、刷新按钮布局 |
+| `apps/publisher/src/renderer/index.html` | 允许经过主进程验证的 HTTP(S) 网站作为 iframe 目标 |
 | `apps/publisher/src/renderer/src/components/VisibilityMenu.tsx` | 打开菜单时聚焦当前选中项 |
 | `apps/publisher/src/renderer/src/app.css` | 刷新按钮、提示条、选中可见性样式 |
 | `apps/publisher/src/main/index.ts` | 注入 `session.defaultSession.clearCache()` |
@@ -137,49 +151,43 @@ Knowledge Garden 是一个公开的个人知识花园：
 - `npm --prefix apps/publisher run build`：通过
 - 站点构建和站内链接检查：`FAILURES=0`
 - Prettier、`git diff --check`：通过
+- 通用线上地址 UI 回归：`90 passed`
+- 可见性事务与隔离发布回归：`161 passed, 1 skipped`
+- Windows `0.1.3` 安装包：生成成功
 
 尚未完成：
 
 - 完整 1600+ 项发布器测试套件未重跑。
 - Electron E2E 曾因本机 Electron 启动失败而无法完成断言验证。
-- 未生成正式新版安装包，未覆盖原安装目录。
-- `main` 尚未 push 到远端。
 
 ## 6. 本机运行方式
 
-- 原安装版：`C:\Users\11546\AppData\Local\Programs\Knowledge Garden Publisher`
-- 当前包含全部修复的便携版：`C:\Users\11546\AppData\Local\Programs\Knowledge Garden Publisher Fixed`
-- 桌面快捷方式：`Knowledge Garden Publisher (Fixed).lnk`
-- 开始菜单快捷方式：`Knowledge Garden Publisher Fixed.lnk`
-
-原安装版仍是旧构建，不应再使用；应使用 **Fixed** 版本。
+- 正式 `0.1.3` 安装目录：`C:\Users\11546\AppData\Local\Programs\Knowledge Garden Publisher`
+- 桌面和开始菜单中旧的 **Fixed** 快捷方式也已改为指向正式 `0.1.3` 目录。
+- 旧便携目录仍保留，但常用快捷方式不再启动它。
 
 ## 7. 尚未解决的问题
 
-1. 正式安装包尚未更新；当前修复运行在便携副本中。
-2. Electron E2E 需要在可正常启动 Electron 的桌面环境复测。
-3. 完整发布器测试套件尚未重跑。
-4. 非限定 WikiLink 在跨领域 slug 冲突时会保留而不是猜测目标；极端情况下仍可能被严格链接检查阻挡。
-5. 外部浏览器自身缓存无法由应用清除；应用只能清理 Electron 会话缓存，外部浏览器仍需强制刷新。
+1. Electron E2E 仍需复测。
+2. 完整发布器测试套件尚未重跑。
+3. 非限定 WikiLink 在跨领域 slug 冲突时会保留而不是猜测目标；极端情况下仍可能被严格链接检查阻挡。
+4. 外部浏览器自身缓存无法由应用清除；应用只能清理 Electron 会话缓存，外部浏览器仍需强制刷新。
 
 ## 8. 建议下一步
 
-1. 将本地 `main` 推送到远端前，先审阅 `a1c6c47e` 及其父提交。
-2. 在正常桌面环境运行完整测试和 Electron E2E。
-3. 升级发布器版本并生成正式安装包，覆盖原安装目录，移除对便携副本的依赖。
-4. 用真实博客再验证一次：
+1. 在正常桌面环境运行完整测试和 Electron E2E。
+2. 用真实博客再验证一次：
    - 私密→公开并发布，确认线上新增。
    - 公开→私密并发布，确认线上 404 和入站链接自动清理。
    - 软件“线上公开站”刷新后显示最新内容。
-5. 保留并最终由用户决定如何处理 `highlight.js` 和 `.tmp-render-check.png`。
+3. 保留并最终由用户决定如何处理 `highlight.js` 和 `.tmp-render-check.png`。
 
 ## 9. 给 Codex 的注意事项
 
-- 本次代码修改已合并到本地 `main`，不要重复合并或回退。
-- `main` 尚未推送；推送前先确认用户意图。
+- 本次代码修改已合并并推送，不要重复合并或回退。
 - 不要丢弃工作区中的 `apps/publisher/package*.json` 修改和 `.tmp-render-check.png`。
-- 自动清理入站 WikiLink 是当前用户明确要求，不要恢复“完全不动其他 Markdown”的旧行为。
+- 用户要求本次发布保留现有自动清理入站 WikiLink 行为，不在通用线上地址修复中改动它。
 - 自动清理只处理公开 Markdown 中指向本次转私密笔记的 WikiLink；不要扩大到私有 Markdown、代码块或无关链接。
 - 不要因为 Git push 成功就宣称线上页面已上线；必须等待 Pages 部署运行成功。
 - 外部浏览器缓存不属于应用控制范围；应用已清理 Electron 会话缓存并提供带 refresh 参数的线上站。
-- 正式安装版仍可能是旧构建；确认用户启动的是 Fixed 版本。
+- 正式安装目录和常用快捷方式均已更新至 `0.1.3`。
