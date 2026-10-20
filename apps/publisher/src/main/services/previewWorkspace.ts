@@ -22,6 +22,7 @@ export interface PreviewWorkspace {
 
 interface PreviewWorkspaceOptions {
   readonly debounceMs?: number
+  readonly removeRoot?: (root: string) => Promise<void>
 }
 
 function inside(root: string, target: string): boolean {
@@ -115,6 +116,7 @@ export async function createPreviewWorkspace(
   let watcher: FSWatcher | undefined
   let timer: NodeJS.Timeout | undefined
   let disposed = false
+  let disposeFlight: Promise<void> | undefined
   let syncTail = Promise.resolve()
   const failureListeners = new Set<(failed: boolean) => void>()
   const reportFailure = (failed: boolean): void => {
@@ -156,15 +158,25 @@ export async function createPreviewWorkspace(
 
   const dispose = async (): Promise<void> => {
     if (disposed) return
-    disposed = true
-    if (timer !== undefined) clearTimeout(timer)
-    await watcher?.close()
-    await syncTail
-    const details = await lstat(root).catch(() => undefined)
-    if (details?.isDirectory() && !details.isSymbolicLink()) {
-      await rm(root, { recursive: true, force: true })
+    if (disposeFlight !== undefined) return disposeFlight
+    const cleanup = (async () => {
+      if (timer !== undefined) clearTimeout(timer)
+      await watcher?.close()
+      await syncTail
+      const details = await lstat(root).catch(() => undefined)
+      if (details?.isDirectory() && !details.isSymbolicLink()) {
+        await (options.removeRoot ?? ((path) => rm(path, { recursive: true, force: true })))(root)
+      }
+      disposed = true
+      failureListeners.clear()
+    })()
+    disposeFlight = cleanup
+    try {
+      await cleanup
+    } catch (error) {
+      disposeFlight = undefined
+      throw error
     }
-    failureListeners.clear()
   }
 
   const subscribeFailure = (listener: (failed: boolean) => void): (() => void) => {

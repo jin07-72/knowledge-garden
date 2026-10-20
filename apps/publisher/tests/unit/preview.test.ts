@@ -269,6 +269,33 @@ describe("PreviewManager", () => {
     expect(dispose).toHaveBeenCalledTimes(2)
   })
 
+  it("moves from sync failure to rebuilding after the overlay recovers", async () => {
+    let report: ((failed: boolean) => void) | undefined
+    const deps = dependencies({
+      createBaseDir: () => "0123456789abcdef0123456789abcdef",
+      prepareWorkspace: async () => ({
+        contentDirectory: "C:\\Temp\\preview\\content",
+        outputDirectory: "C:\\Temp\\preview\\site",
+        dispose: async () => undefined,
+        subscribeFailure: (listener) => {
+          report = listener
+          return () => undefined
+        },
+      }),
+      probe: async () => true,
+    })
+    const manager = new PreviewManager(deps)
+    await manager.start({ workspace: "C:\\Garden" })
+
+    report?.(true)
+    expect(manager.getStatus()).toMatchObject({
+      state: "error",
+      error: { code: "PREVIEW_BUILD_FAILED" },
+    })
+    report?.(false)
+    expect(manager.getStatus()).toMatchObject({ state: "building" })
+  })
+
   it("starts POSIX previews in a detached process group for safe tree signalling", async () => {
     const spawn = vi.fn<PreviewDependencies["spawn"]>()
     const deps = dependencies({

@@ -138,6 +138,7 @@ interface PreviewSession {
   previewWorkspace?: PreparedPreviewWorkspace
   previewWorkspaceUnsubscribe?: () => void
   baseDir?: string
+  workspaceSyncFailed?: boolean
 }
 
 const LOOPBACK_HOST = "127.0.0.1" as const
@@ -554,17 +555,30 @@ export class PreviewManager {
         session.previewWorkspaceUnsubscribe = session.previewWorkspace.subscribeFailure?.(
           (failed) => {
             const attempt = session.attempt
-            if (!failed || this.session !== session || attempt === undefined || attempt.stopping) return
-            this.transition({
-              state: "error",
-              generation: session.generation,
-              port: attempt.port,
-              lastSuccessfulUrl: session.lastSuccessfulUrl,
-              error: appError(
-                "PREVIEW_BUILD_FAILED",
-                "Local preview files could not be synchronized safely.",
-              ),
-            })
+            if (this.session !== session || attempt === undefined || attempt.stopping) return
+            if (failed) {
+              session.workspaceSyncFailed = true
+              this.transition({
+                state: "error",
+                generation: session.generation,
+                port: attempt.port,
+                lastSuccessfulUrl: session.lastSuccessfulUrl,
+                error: appError(
+                  "PREVIEW_BUILD_FAILED",
+                  "Local preview files could not be synchronized safely.",
+                ),
+              })
+            } else if (session.workspaceSyncFailed) {
+              session.workspaceSyncFailed = false
+              if (session.lastSuccessfulUrl !== undefined && this.status.state === "error") {
+                this.transition({
+                  state: "building",
+                  generation: session.generation,
+                  port: attempt.port,
+                  lastSuccessfulUrl: session.lastSuccessfulUrl,
+                })
+              }
+            }
           },
         )
         if (controller.signal.aborted || epoch !== this.lifecycleEpoch)
@@ -667,7 +681,7 @@ export class PreviewManager {
           const terminated = await this.terminateAttempt(session, attempt)
           if (!terminated) return this.stopFailure(session, port)
           if (attemptIndex < maxRetries) continue
-          await this.releasePreviewWorkspace(session)
+          if (!(await this.releasePreviewWorkspace(session))) return this.cleanupFailure(session)
           this.clearSession(session)
           return this.transition({
             state: "error",
@@ -683,14 +697,14 @@ export class PreviewManager {
         if (outcome.kind === "build-error") {
           const terminated = await this.terminateAttempt(session, attempt)
           if (!terminated) return this.stopFailure(session, attempt.port)
-          await this.releasePreviewWorkspace(session)
+          if (!(await this.releasePreviewWorkspace(session))) return this.cleanupFailure(session)
           this.clearSession(session)
           return this.status
         }
         if (outcome.kind === "timeout") {
           const terminated = await this.terminateAttempt(session, attempt)
           if (!terminated) return this.stopFailure(session, attempt.port)
-          await this.releasePreviewWorkspace(session)
+          if (!(await this.releasePreviewWorkspace(session))) return this.cleanupFailure(session)
           this.clearSession(session)
           return this.transition({
             state: "error",
@@ -718,21 +732,21 @@ export class PreviewManager {
             this.detachAttempt(attempt)
             attempt.inStartup = false
             session.attempt = undefined
-            await this.releasePreviewWorkspace(session)
+            if (!(await this.releasePreviewWorkspace(session))) return this.cleanupFailure(session)
             this.clearSession(session)
             return failure
           }
 
           const terminated = await this.terminateAttempt(session, attempt)
           if (!terminated) return this.stopFailure(session, attempt.port)
-          await this.releasePreviewWorkspace(session)
+          if (!(await this.releasePreviewWorkspace(session))) return this.cleanupFailure(session)
           this.clearSession(session)
           return failure
         }
 
         this.detachAttempt(attempt)
         session.attempt = undefined
-        await this.releasePreviewWorkspace(session)
+        if (!(await this.releasePreviewWorkspace(session))) return this.cleanupFailure(session)
         this.clearSession(session)
         return this.transition({
           state: "error",
@@ -901,8 +915,10 @@ export class PreviewManager {
     this.detachAttempt(attempt)
     attempt.inStartup = false
     session.attempt = undefined
-    void this.releasePreviewWorkspace(session)
-    this.clearSession(session)
+    void this.releasePreviewWorkspace(session).then((released) => {
+      if (released) this.clearSession(session)
+      else this.cleanupFailure(session)
+    })
     if (
       attempt.buildFailed ||
       (this.status.state === "error" && this.status.error?.code === "PREVIEW_STOP_FAILED")
@@ -1159,7 +1175,7 @@ export class PreviewManager {
     code: AppError["code"],
     message: string,
   ): Promise<PreviewStatus> {
-    await this.releasePreviewWorkspace(session)
+    if (!(await this.releasePreviewWorkspace(session))) return this.cleanupFailure(session)
     this.clearSession(session)
     return this.transition({
       state: "error",

@@ -1,7 +1,7 @@
-import { mkdtemp, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises"
+import { mkdtemp, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { createPreviewWorkspace } from "../../src/main/services/previewWorkspace"
 
 const disposers: Array<() => Promise<void>> = []
@@ -43,6 +43,21 @@ describe("preview workspace", () => {
     await expect(createPreviewWorkspace(root)).rejects.toThrow(/duplicate/i)
   })
 
+  it("retries real workspace disposal after a temporary removal failure", async () => {
+    const root = await fixture()
+    const removeRoot = vi
+      .fn<(path: string) => Promise<void>>()
+      .mockRejectedValueOnce(new Error("busy"))
+      .mockImplementationOnce((path) => rm(path, { recursive: true, force: true }))
+    const preview = await createPreviewWorkspace(root, { removeRoot })
+
+    await expect(preview.dispose()).rejects.toThrow("busy")
+    await expect(stat(preview.root)).resolves.toBeDefined()
+    await expect(preview.dispose()).resolves.toBeUndefined()
+    await expect(stat(preview.root)).rejects.toMatchObject({ code: "ENOENT" })
+    expect(removeRoot).toHaveBeenCalledTimes(2)
+  })
+
   it("mirrors edits and both visibility moves without changing note bytes", async () => {
     const root = await fixture()
     const preview = await createPreviewWorkspace(root, { debounceMs: 10 })
@@ -59,16 +74,18 @@ describe("preview workspace", () => {
       join(root, "private", "life", "secret.md"),
       join(root, "content", "life", "secret.md"),
     )
+    await writeFile(join(root, "content", "life", "secret.md"), "public-version")
     await expect
       .poll(() => readFile(join(preview.contentDirectory, "life", "secret.md"), "utf8"))
-      .toBe("updated")
+      .toBe("public-version")
     await rename(
       join(root, "content", "life", "secret.md"),
       join(root, "private", "life", "secret.md"),
     )
+    await writeFile(join(root, "private", "life", "secret.md"), "private-version")
     await expect
       .poll(() => readFile(join(preview.contentDirectory, "life", "secret.md"), "utf8"))
-      .toBe("updated")
+      .toBe("private-version")
 
     const temporaryRoot = preview.root
     await preview.dispose()
