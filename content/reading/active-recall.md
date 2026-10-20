@@ -19,4 +19,4 @@ tags:
 3. 重新打开材料，只校验这些缺口。
 4. 把仍然模糊的内容安排进下一次复习。
 
-这套方法可以与 [[language/spaced-vocabulary|间隔重复词汇练习]] 和 [[life/weekly-review|每周复盘]] 组合使用。
+这套方法可以与 [[language/spaced-vocabulary|间隔重复词汇练习]] 组合使用，也可以配合每周复盘来安排下一轮练习。
