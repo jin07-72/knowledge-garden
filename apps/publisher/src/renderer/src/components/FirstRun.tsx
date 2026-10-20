@@ -1,4 +1,4 @@
-import { AlertTriangle, CheckCircle2, RefreshCw, Wrench } from "lucide-react"
+import { AlertTriangle, CheckCircle2, RefreshCw, Wrench, X } from "lucide-react"
 import type {
   WorkspaceInspection,
   WorkspaceIssue,
@@ -10,6 +10,7 @@ interface FirstRunProps {
   readonly busy: boolean
   readonly error?: string
   readonly compact?: boolean
+  readonly onClose?: () => void
   readonly onRetry: () => void
   readonly onRepair: (action: WorkspaceRepairAction) => Promise<void>
 }
@@ -35,12 +36,23 @@ export function FirstRun({
   busy,
   error,
   compact = false,
+  onClose,
   onRetry,
   onRepair,
 }: FirstRunProps): React.JSX.Element {
   const issues = inspection?.ok === false ? inspection.issues : []
   const card = (
     <section className="first-run-card" role="region" aria-label="启动检查">
+      {onClose ? (
+        <button
+          type="button"
+          className="icon-button first-run-close"
+          aria-label="关闭启动检查提示"
+          onClick={onClose}
+        >
+          <X size={18} aria-hidden="true" />
+        </button>
+      ) : null}
       <header>
         <span className="first-run-icon" aria-hidden="true">
           {inspection?.ok ? <CheckCircle2 /> : <Wrench />}

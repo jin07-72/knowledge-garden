@@ -58,6 +58,29 @@ describe("first-run diagnostics", () => {
     expect(region).not.toHaveTextContent(/粘贴.*token|输入.*令牌/i)
   })
 
+  it("offers an accessible close action only when dismissal is supported", async () => {
+    const user = userEvent.setup()
+    const onClose = vi.fn()
+    const view = render(
+      <FirstRun
+        compact
+        inspection={diagnostics}
+        busy={false}
+        onRetry={vi.fn()}
+        onRepair={vi.fn()}
+        onClose={onClose}
+      />,
+    )
+
+    await user.click(screen.getByRole("button", { name: "关闭启动检查提示" }))
+    expect(onClose).toHaveBeenCalledOnce()
+
+    view.rerender(
+      <FirstRun inspection={diagnostics} busy={false} onRetry={vi.fn()} onRepair={vi.fn()} />,
+    )
+    expect(screen.queryByRole("button", { name: "关闭启动检查提示" })).not.toBeInTheDocument()
+  })
+
   it("runs dependency installation only after the explicit repair button is pressed", async () => {
     const user = userEvent.setup()
     const onRepair = vi.fn(async () => undefined)
