@@ -5,7 +5,7 @@ export interface PublishedDeploymentStatus {
   readonly actionsUrl?: string
 }
 
-const uncertainMessage = "发布成功，暂时无法确认部署状态。"
+const waitingMessage = "代码已推送，正在等待 GitHub Pages 部署…"
 
 export function publishedDeploymentStatus(
   latestCommit: GitCommit | undefined,
@@ -37,7 +37,7 @@ export function publishedDeploymentStatus(
   }
 
   return {
-    progress: { phase: "complete", message: uncertainMessage, percent: 100 },
+    progress: { phase: "deploying", message: waitingMessage, percent: 100 },
     actionsUrl: deployments.actionsUrl,
   }
 }

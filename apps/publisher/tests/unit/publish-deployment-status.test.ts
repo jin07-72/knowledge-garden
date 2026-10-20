@@ -69,9 +69,13 @@ describe("publishedDeploymentStatus", () => {
       latestCommit,
       { ...deployments, unavailableMessage: "部署历史请求超时。", runs: [run("running")] },
     ],
-  ])("uses uncertainty for %s", (_name, commit, history) => {
+  ])("keeps waiting for %s", (_name, commit, history) => {
     expect(publishedDeploymentStatus(commit, history)).toEqual({
-      progress: { phase: "complete", message: "发布成功，暂时无法确认部署状态。", percent: 100 },
+      progress: {
+        phase: "deploying",
+        message: "代码已推送，正在等待 GitHub Pages 部署…",
+        percent: 100,
+      },
       actionsUrl: deployments.actionsUrl,
     })
   })

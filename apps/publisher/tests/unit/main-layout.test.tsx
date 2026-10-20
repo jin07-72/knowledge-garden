@@ -2166,11 +2166,11 @@ describe("publisher main layout", () => {
 
     progress.emit({ phase: "complete", message: "发布成功，正在等待部署。", percent: 100 })
 
-    expect(await screen.findByText("发布成功，暂时无法确认部署状态。")).toBeVisible()
+    expect(await screen.findByText("代码已推送，暂时无法确认部署状态。")).toBeVisible()
     expect(screen.queryByText("发布失败")).not.toBeInTheDocument()
   })
 
-  it("uses deployment uncertainty when the returned run belongs to another commit", async () => {
+  it("keeps waiting when the returned run belongs to another commit", async () => {
     const progress = capturePublishProgress(garden)
     const commitId = "a".repeat(40)
     vi.mocked(garden.changes.list).mockResolvedValue(ok({ groups: [] }))
@@ -2184,8 +2184,35 @@ describe("publisher main layout", () => {
 
     progress.emit({ phase: "complete", message: "发布成功，正在等待部署。", percent: 100 })
 
-    expect(await screen.findByText("发布成功，暂时无法确认部署状态。")).toBeVisible()
+    expect(await screen.findByText("代码已推送，正在等待 GitHub Pages 部署…")).toBeVisible()
     expect(screen.queryByText("发布成功，部署已完成。")).not.toBeInTheDocument()
+  })
+
+  it("rechecks a pending deployment until it succeeds", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true, advanceTimeDelta: 20 })
+    try {
+      const progress = capturePublishProgress(garden)
+      const commitId = "a".repeat(40)
+      vi.mocked(garden.changes.list).mockResolvedValue(ok({ groups: [] }))
+      vi.mocked(garden.history.git).mockResolvedValue(
+        ok([{ id: commitId, authoredAt: "2026-10-15T00:00:00.000Z", subject: "Publish" }]),
+      )
+      vi.mocked(garden.history.deployments)
+        .mockResolvedValueOnce(ok(deploymentHistory(commitId, "pending")))
+        .mockResolvedValueOnce(ok(deploymentHistory(commitId, "succeeded")))
+      render(<App />)
+
+      progress.emit({ phase: "complete", message: "发布成功，正在等待部署。", percent: 100 })
+
+      expect(await screen.findByText("代码已推送，正在等待 GitHub Pages 部署…")).toBeVisible()
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(15_000)
+      })
+      expect(await screen.findByText("发布成功，部署已完成。")).toBeVisible()
+      expect(garden.history.deployments).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it("starts only one deployment query for repeated complete events in one publication", async () => {
@@ -2288,7 +2315,7 @@ describe("publisher main layout", () => {
     expect(vi.mocked(garden.history.cancel).mock.invocationCallOrder[0]).toBeLessThan(
       vi.mocked(garden.blogs.switch).mock.invocationCallOrder[0],
     )
-    expect(screen.queryByText("发布成功，正在部署…")).not.toBeInTheDocument()
+    expect(screen.queryByText("代码已推送，正在等待 GitHub Pages 部署…")).not.toBeInTheDocument()
 
     deployments.resolve(ok(deploymentHistory(commitId)))
     await act(async () => void (await deployments.promise))
@@ -2325,7 +2352,7 @@ describe("publisher main layout", () => {
     await user.click(screen.getByRole("button", { name: "保存名称" }))
 
     await waitFor(() => expect(garden.history.cancel).toHaveBeenCalledWith({ requestId }))
-    expect(screen.queryByText("发布成功，正在部署…")).not.toBeInTheDocument()
+    expect(screen.queryByText("代码已推送，正在等待 GitHub Pages 部署…")).not.toBeInTheDocument()
 
     deployments.resolve(ok(deploymentHistory(commitId)))
     await act(async () => void (await deployments.promise))
@@ -2432,12 +2459,12 @@ describe("publisher main layout", () => {
     progress.emit({ phase: "complete", message: "上一轮完成", percent: 100 })
     await waitFor(() => expect(garden.history.deployments).toHaveBeenCalledOnce())
     const requestId = vi.mocked(garden.history.deployments).mock.calls[0]?.[0]?.requestId
-    expect(screen.getByText("发布成功，正在部署…")).toBeVisible()
+    expect(screen.getByText("代码已推送，正在等待 GitHub Pages 部署…")).toBeVisible()
 
     await user.click(screen.getByRole("button", { name: "检查并发布" }))
     await user.click(await screen.findByRole("button", { name: "验证并发布" }))
 
-    expect(screen.queryByText("发布成功，正在部署…")).not.toBeInTheDocument()
+    expect(screen.queryByText("代码已推送，正在等待 GitHub Pages 部署…")).not.toBeInTheDocument()
     publishStart.resolve(ok({ operationId: "publish-2" }))
     await waitFor(() => expect(garden.publish.start).toHaveBeenCalledOnce())
     expect(garden.history.cancel).toHaveBeenCalledWith({ requestId })

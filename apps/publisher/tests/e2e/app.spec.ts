@@ -1016,7 +1016,7 @@ test("edits, changes visibility, and publishes only the selected public note", a
     await expect(alphaChange).toBeChecked()
     await review.getByRole("button", { name: "验证并发布" }).click()
     await expect(page.getByRole("status", { name: "发布状态" })).toContainText(
-      "发布成功，暂时无法确认部署状态。",
+      "代码已推送，正在等待 GitHub Pages 部署…",
     )
 
     const remoteAlpha = await git(repository.root, ["show", "origin/main:content/life/alpha.md"])
@@ -1104,7 +1104,7 @@ test("repairs legacy master and publishes the exact selection", async () => {
     await review.getByRole("button", { name: "安全切换到 main 并继续" }).click()
     await expect(review).toHaveCount(0)
     await expect(page.getByRole("status", { name: "发布状态" })).toContainText(
-      "发布成功，暂时无法确认部署状态。",
+      "代码已推送，正在等待 GitHub Pages 部署…",
     )
 
     await expect.poll(() => gitOutput(garden.root, ["branch", "--show-current"])).toBe("main")
