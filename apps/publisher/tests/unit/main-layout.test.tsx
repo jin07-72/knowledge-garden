@@ -508,6 +508,7 @@ describe("publisher main layout", () => {
   })
 
   it("keeps editing available while transient remote and preferred-port diagnostics remain visible", async () => {
+    const user = userEvent.setup()
     vi.mocked(garden.workspace.inspect).mockResolvedValueOnce(
       ok({
         ok: false,
@@ -529,6 +530,33 @@ describe("publisher main layout", () => {
     })
     expect(screen.getByText("origin/main is temporarily unreachable.")).toBeVisible()
     expect(screen.getByText("The preferred preview port is occupied.")).toBeVisible()
+
+    await user.click(screen.getByRole("button", { name: "关闭启动检查提示" }))
+    expect(screen.queryByRole("region", { name: "启动检查" })).not.toBeInTheDocument()
+    expect(screen.getByRole("region", { name: "Markdown 编辑器" })).toBeVisible()
+  })
+
+  it("reports when the preview port remains occupied after retrying diagnostics", async () => {
+    vi.mocked(garden.workspace.inspect).mockResolvedValue(
+      ok({
+        ok: false,
+        root: String.raw`C:\Users\11546\Desktop\web`,
+        capabilities: { files: true, preview: true, git: true, publish: false },
+        issues: [
+          { code: "PREVIEW_PORT_UNAVAILABLE", message: "The preferred preview port is occupied." },
+        ],
+      }),
+    )
+
+    render(<StartupApp />)
+
+    await screen.findByRole("button", { name: "重新检查" })
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "重新检查" })).toBeEnabled(),
+    )
+    fireEvent.click(screen.getByRole("button", { name: "重新检查" }))
+    await waitFor(() => expect(garden.workspace.inspect).toHaveBeenCalledTimes(2))
+    expect(await screen.findByText("重新检查完成：预览端口仍被占用。")).toBeVisible()
   })
 
   it("mounts the editor after local safety passes while slow diagnostics remain pending", async () => {

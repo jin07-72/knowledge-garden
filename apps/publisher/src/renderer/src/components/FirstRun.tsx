@@ -9,6 +9,7 @@ interface FirstRunProps {
   readonly inspection?: WorkspaceInspection
   readonly busy: boolean
   readonly error?: string
+  readonly status?: string
   readonly compact?: boolean
   readonly onClose?: () => void
   readonly onRetry: () => void
@@ -35,6 +36,7 @@ export function FirstRun({
   inspection,
   busy,
   error,
+  status,
   compact = false,
   onClose,
   onRetry,
@@ -91,6 +93,11 @@ export function FirstRun({
       {error ? (
         <p className="first-run-error" role="alert">
           {error}
+        </p>
+      ) : null}
+      {status ? (
+        <p className="first-run-status" role="status">
+          {status}
         </p>
       ) : null}
       <button type="button" className="secondary-button" disabled={busy} onClick={onRetry}>

@@ -1602,6 +1602,8 @@ function PublisherStartup({
   const [inspection, setInspection] = useState<WorkspaceInspection>()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string>()
+  const [diagnosticsDismissed, setDiagnosticsDismissed] = useState(false)
+  const [retryNotice, setRetryNotice] = useState<string>()
   const mounted = useRef(true)
   useEffect(() => {
     mounted.current = true
@@ -1610,9 +1612,10 @@ function PublisherStartup({
     }
   }, [])
 
-  const inspectDiagnostics = useCallback(async (): Promise<void> => {
+  const inspectDiagnostics = useCallback(async (afterRetry = false): Promise<void> => {
     setBusy(true)
     setError(undefined)
+    if (afterRetry) setRetryNotice(undefined)
     try {
       const result = await api.workspace.inspect()
       if (!mounted.current) return
@@ -1621,6 +1624,13 @@ function PublisherStartup({
         setInspection(undefined)
       } else {
         setInspection(result.value)
+        if (afterRetry) {
+          setRetryNotice(
+            result.value.issues.some((issue) => issue.code === "PREVIEW_PORT_UNAVAILABLE")
+              ? "重新检查完成：预览端口仍被占用。"
+              : undefined,
+          )
+        }
       }
     } catch (failure) {
       if (mounted.current)
@@ -1657,13 +1667,15 @@ function PublisherStartup({
   if (safety?.capabilities.files) {
     return (
       <>
-        {inspection?.ok === false || error ? (
+        {(inspection?.ok === false || error) && !diagnosticsDismissed ? (
           <FirstRun
             compact
             inspection={inspection}
             busy={busy}
             error={error}
-            onRetry={() => void inspectDiagnostics()}
+            status={retryNotice}
+            onClose={() => setDiagnosticsDismissed(true)}
+            onRetry={() => void inspectDiagnostics(true)}
             onRepair={async (action: WorkspaceRepairAction) => {
               setBusy(true)
               setError(undefined)

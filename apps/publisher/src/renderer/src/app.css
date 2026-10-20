@@ -144,6 +144,9 @@ button {
 .first-run-error {
   color: #f38ba8;
 }
+.first-run-status {
+  color: #fab387;
+}
 .first-run-card > .secondary-button {
   display: inline-flex;
   align-items: center;
