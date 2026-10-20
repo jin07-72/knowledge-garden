@@ -24,6 +24,9 @@ export function PreviewPane({
   onOpenHistoryLink,
 }: PreviewPaneProps): React.JSX.Element {
   const [tab, setTab] = useState<PreviewTab>("note")
+  const [publicRefresh, setPublicRefresh] = useState(() => Date.now().toString(36))
+  const refreshPublicSite = (): void => setPublicRefresh(Date.now().toString(36))
+  const publicUrl = `https://jin07-72.github.io/knowledge-garden/?refresh=${encodeURIComponent(publicRefresh)}`
   const baseUrl =
     preview.state === "ready" || preview.state === "building"
       ? (preview.url ?? preview.lastSuccessfulUrl)
@@ -69,7 +72,10 @@ export function PreviewPane({
             aria-selected={tab === item.id}
             aria-controls={`preview-panel-${item.id}`}
             tabIndex={tab === item.id ? 0 : -1}
-            onClick={() => setTab(item.id)}
+            onClick={() => {
+              if (item.id === "public") refreshPublicSite()
+              setTab(item.id)
+            }}
             onKeyDown={(event) => {
               if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return
               event.preventDefault()
@@ -149,11 +155,21 @@ export function PreviewPane({
           </div>
         ) : null}
         {tab === "public" ? (
-          <iframe
-            title="线上公开站"
-            src="https://jin07-72.github.io/knowledge-garden/"
-            sandbox="allow-same-origin allow-scripts"
-          />
+          <div className="local-note-preview-shell">
+            <div className="local-note-preview-banner">
+              <strong>线上内容可能受浏览器缓存影响</strong>
+              <span>如果刚完成发布，请刷新后再检查。</span>
+              <button className="publish-actions-link" type="button" onClick={refreshPublicSite}>
+                刷新线上站
+              </button>
+            </div>
+            <iframe
+              key={publicRefresh}
+              title="线上公开站"
+              src={publicUrl}
+              sandbox="allow-same-origin allow-scripts"
+            />
+          </div>
         ) : null}
         {tab === "history" ? (
           <HistoryView
