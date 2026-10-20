@@ -1069,6 +1069,70 @@ button {
 .local-note-preview-banner strong {
   font-size: 12px;
 }
+.public-preview-notice {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 9px 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #e2ddd2;
+  color: #6b4e13;
+  background: #fff8e8;
+}
+.public-preview-notice > svg {
+  flex: none;
+  color: #b7791f;
+}
+.public-preview-notice-copy {
+  display: flex;
+  min-width: 180px;
+  flex: 1;
+  flex-direction: column;
+  gap: 1px;
+}
+.public-preview-notice-copy strong {
+  font-size: 11px;
+  line-height: 1.4;
+}
+.public-preview-notice-copy span {
+  color: #806b44;
+  font-size: 10px;
+  line-height: 1.4;
+}
+.public-preview-refresh {
+  display: inline-flex;
+  min-height: 30px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex: none;
+  margin-left: auto;
+  padding: 6px 11px;
+  border: 1px solid #0f766e;
+  border-radius: 6px;
+  color: #fff;
+  background: #0f766e;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    transform 120ms ease;
+}
+.public-preview-refresh:hover {
+  border-color: #115e59;
+  background: #115e59;
+}
+.public-preview-refresh:active {
+  transform: translateY(1px);
+}
+.public-preview-refresh:focus-visible {
+  outline: 2px solid #5eead4;
+  outline-offset: 2px;
+}
 .local-note-preview {
   min-height: 0;
   flex: 1;

@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { Monitor, TriangleAlert } from "lucide-react"
+import { Monitor, RefreshCw, TriangleAlert } from "lucide-react"
 import type { NoteSummary, PreviewStatus } from "../../../shared/contracts"
 import { HistoryView, type HistorySnapshot } from "./HistoryView"
 import { LocalNotePreview } from "./PrivateNotePreview"
@@ -162,10 +162,14 @@ export function PreviewPane({
         ) : null}
         {tab === "public" ? (
           <div className="local-note-preview-shell">
-            <div className="local-note-preview-banner">
-              <strong>线上内容可能受浏览器缓存影响</strong>
-              <span>如果刚完成发布，请刷新后再检查。</span>
-              <button className="publish-actions-link" type="button" onClick={refreshPublicSite}>
+            <div className="public-preview-notice">
+              <TriangleAlert size={16} aria-hidden="true" />
+              <div className="public-preview-notice-copy">
+                <strong>线上内容可能受浏览器缓存影响</strong>
+                <span>如果刚完成发布，请刷新后再检查。</span>
+              </div>
+              <button className="public-preview-refresh" type="button" onClick={refreshPublicSite}>
+                <RefreshCw size={14} aria-hidden="true" />
                 刷新线上站
               </button>
             </div>
