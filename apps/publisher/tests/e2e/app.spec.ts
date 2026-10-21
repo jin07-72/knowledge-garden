@@ -180,7 +180,15 @@ async function launchApplication(
     Object.entries(env).filter((entry): entry is [string, string] => entry[1] !== undefined),
   )
   const application = await electron.launch({
-    args: [".", `--user-data-dir=${userData}`],
+    // Raw Electron binaries can hit a Windows sandbox breakpoint (0x80000003)
+    // before app startup on this host. E2E uses only disposable fixtures and a
+    // dedicated user-data directory, so disabling that host sandbox is scoped
+    // to the Windows test process rather than the packaged application.
+    args: [
+      ...(process.platform === "win32" ? ["--no-sandbox"] : []),
+      ".",
+      `--user-data-dir=${userData}`,
+    ],
     cwd: publisherRoot,
     env: launchEnvironment,
   })
@@ -195,11 +203,9 @@ async function captureTrashTargets(
   receipt: string,
 ): Promise<void> {
   await application.evaluate(({ shell }, receiptPath) => {
-    const originalTrashItem = shell.trashItem.bind(shell)
     shell.trashItem = async (target: string): Promise<void> => {
       const fileSystem = process.getBuiltinModule("node:fs/promises")
       await fileSystem.appendFile(receiptPath, `${target}\n`, "utf8")
-      await originalTrashItem(target)
     }
   }, receipt)
 }
@@ -1564,7 +1570,7 @@ test("manages custom domains across restarts and blogs", async () => {
     manager = page.getByRole("dialog", { name: "管理领域" })
     await manager
       .getByRole("article", { name: "待删除领域" })
-      .getByRole("button", { name: "删除" })
+      .getByRole("button", { name: "删除", exact: true })
       .click()
     const confirmation = page.getByRole("dialog", { name: "确认删除领域？" })
     await confirmation.getByRole("button", { name: "确认删除" }).click()

@@ -169,6 +169,9 @@ Knowledge Garden 是一个公开的个人知识花园：
 - 本次 `npm run typecheck`：通过。
 - 本次对变更文件执行 Prettier：通过。
 - 本次 `git diff --check`：通过。
+- 本次 `npm run build`：通过（仅生成已忽略的 `apps/publisher/out/`，未打包或安装）。
+- 本次定向 Electron E2E：将 `TEMP` / `TMP` 指向工作树内已忽略的 `apps/publisher/.garden-publisher/e2e-temp` 后，`npm run test:e2e -- --grep "manages custom domains"` 为 `1 passed`；对照测试 `--grep "recovers a corrupt registry"` 也为 `1 passed`。
+- E2E 启动诊断：本机原始 Electron 44.4.2 在 Chromium Windows sandbox 初始化时以 `0x80000003` 退出，且 Codex 运行边界外的系统临时目录对 Electron 写入返回 `EPERM`。测试启动器仅在 Windows E2E 进程加入 `--no-sandbox`，并使用工作树内临时目录；正式打包应用的 sandbox 配置未修改。
 
 - 完整 `noteTransactions.test.ts`：`102 passed`
 - 完整 `publish.test.ts`：`58 passed, 1 skipped`
@@ -187,7 +190,6 @@ Knowledge Garden 是一个公开的个人知识花园：
 
 尚未完成：
 
-- 本次定向 Electron E2E `npm run test:e2e -- --grep "manages custom domains"` 已尝试，但 Electron 在窗口创建前报 `Error: Process failed to launch!`，因此没有完成 UI 断言验证。
 - `0.1.5` 尚未打包或安装，也尚未合并、推送；这些步骤由后续发布操作完成。
 
 ## 6. 本机运行方式
