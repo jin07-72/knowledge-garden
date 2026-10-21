@@ -110,6 +110,7 @@ Knowledge Garden 是一个公开的个人知识花园：
 - 点击叉键只隐藏本次会话中的提示，软件仍可继续使用；重启后会重新检查并再次提示仍存在的问题。
 - 阻塞式本地安全检查页面不提供绕过按钮。
 - 点击“重新检查”后如果预览端口仍被占用，会明确显示“重新检查完成：预览端口仍被占用。”
+- 后续修复动作再次检查时会先清除旧的端口占用结论，避免在端口已经释放后继续显示过期提示。
 - 没有修改端口探测、预览服务、发布流程或私密/公开转换事务。
 
 ## 3. 当前内容状态
@@ -164,7 +165,7 @@ Knowledge Garden 是一个公开的个人知识花园：
 - 可见性事务与隔离发布回归：`161 passed, 1 skipped`
 - 完整发布器测试套件（单工作线程）：`1649 passed, 16 skipped`
 - Windows `0.1.4` 安装包：生成成功
-- 正式安装目录已更新为 `0.1.4`，可执行文件 SHA256：`5C29BD942C6A544E394DD7159C71F28EC17A0F803F95585943B63DBB9390B534`
+- 正式安装目录已更新为 `0.1.4`，可执行文件 SHA256：`A057E25944607119C4E571F74DE5A136C6098224289FFB2E065E9C0D4AC8C6A3`
 
 尚未完成：
 
@@ -174,6 +175,7 @@ Knowledge Garden 是一个公开的个人知识花园：
 
 - 正式 `0.1.4` 安装目录：`C:\Users\11546\AppData\Local\Programs\Knowledge Garden Publisher`
 - 更新前的完整 `0.1.3` 目录保留在 `C:\Users\11546\AppData\Local\Programs\Knowledge Garden Publisher Backup 0.1.3`，可用于回滚。
+- 审查补丁前的完整 `0.1.4` 目录保留在 `C:\Users\11546\AppData\Local\Programs\Knowledge Garden Publisher Backup 0.1.4-pre-review-20261021-104628`。
 - 桌面和开始菜单中旧的 **Fixed** 快捷方式仍指向正式安装目录。
 - 旧便携目录仍保留，但常用快捷方式不再启动它。
 
