@@ -1615,7 +1615,7 @@ function PublisherStartup({
   const inspectDiagnostics = useCallback(async (afterRetry = false): Promise<void> => {
     setBusy(true)
     setError(undefined)
-    if (afterRetry) setRetryNotice(undefined)
+    setRetryNotice(undefined)
     try {
       const result = await api.workspace.inspect()
       if (!mounted.current) return

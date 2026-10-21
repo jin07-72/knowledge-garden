@@ -559,6 +559,48 @@ describe("publisher main layout", () => {
     expect(await screen.findByText("重新检查完成：预览端口仍被占用。")).toBeVisible()
   })
 
+  it("clears stale occupied-port feedback before a repair-triggered reinspection", async () => {
+    const occupiedWithRepair = ok<WorkspaceInspection>({
+      ok: false,
+      root: String.raw`C:\Users\11546\Desktop\web`,
+      capabilities: { files: true, preview: false, git: true, publish: false },
+      issues: [
+        {
+          code: "DEPENDENCIES_MISSING",
+          message: "Dependencies are missing.",
+          repair: "install-dependencies",
+        },
+        { code: "PREVIEW_PORT_UNAVAILABLE", message: "The preferred preview port is occupied." },
+      ],
+    })
+    vi.mocked(garden.workspace.inspect).mockReset().mockResolvedValue(occupiedWithRepair)
+
+    render(<StartupApp />)
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "重新检查" })).toBeEnabled(),
+    )
+    await waitFor(() => expect(garden.workspace.inspect).toHaveBeenCalledOnce())
+    fireEvent.click(screen.getByRole("button", { name: "重新检查" }))
+    await waitFor(() => expect(garden.workspace.inspect).toHaveBeenCalledTimes(2))
+    expect(await screen.findByText("重新检查完成：预览端口仍被占用。")).toBeVisible()
+
+    vi.mocked(garden.workspace.inspect).mockResolvedValue(
+      ok({
+        ok: false,
+        root: String.raw`C:\Users\11546\Desktop\web`,
+        capabilities: { files: true, preview: true, git: false, publish: false },
+        issues: [
+          { code: "GIT_ORIGIN_UNREACHABLE", message: "origin/main is temporarily unreachable." },
+        ],
+      }),
+    )
+    fireEvent.click(screen.getByRole("button", { name: "安装仓库依赖" }))
+    await waitFor(() => expect(garden.workspace.inspect).toHaveBeenCalledTimes(3))
+    expect(screen.queryByText("重新检查完成：预览端口仍被占用。")).not.toBeInTheDocument()
+    expect(screen.getByText("origin/main is temporarily unreachable.")).toBeVisible()
+  })
+
   it("mounts the editor after local safety passes while slow diagnostics remain pending", async () => {
     vi.mocked(garden.workspace.inspect).mockImplementationOnce(() => new Promise(() => undefined))
 
