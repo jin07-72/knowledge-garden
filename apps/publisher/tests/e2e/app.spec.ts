@@ -3,6 +3,7 @@ import type { ChildProcess } from "node:child_process"
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises"
 import { basename, dirname, join, resolve } from "node:path"
 import { deflateSync } from "node:zlib"
+import matter from "gray-matter"
 import {
   createQuartzGardenFixture,
   createTemporaryGitRepository,
@@ -1367,6 +1368,7 @@ test("manages custom domains across restarts and blogs", async () => {
   }
   const publicPath = "content/artificial-intelligence/public-ai-note.md"
   const privatePath = "private/artificial-intelligence/private-ai-note.md"
+  const domainIndexPath = join(first.root, "content", "artificial-intelligence", "index.md")
   let application: ElectronApplication | undefined
   try {
     application = await launchApplication(stateRoot, environment)
@@ -1406,6 +1408,17 @@ test("manages custom domains across restarts and blogs", async () => {
     await expect(page.getByRole("region", { name: "Markdown 编辑器" })).toContainText(privatePath)
     expect(await exists(join(first.root, ...publicPath.split("/")))).toBe(true)
     expect(await exists(join(first.root, ...privatePath.split("/")))).toBe(true)
+    const publicNoteBeforeMetadata = await readFile(
+      join(first.root, ...publicPath.split("/")),
+      "utf8",
+    )
+    const privateNoteBeforeMetadata = await readFile(
+      join(first.root, ...privatePath.split("/")),
+      "utf8",
+    )
+    const privatePathsBeforeMetadata = await readdir(
+      join(first.root, "private", "artificial-intelligence"),
+    )
 
     await page.getByRole("button", { name: "管理领域" }).click()
     let manager = page.getByRole("dialog", { name: "管理领域" })
@@ -1415,7 +1428,32 @@ test("manages custom domains across restarts and blogs", async () => {
     await expect(
       nonEmptyDomain.getByRole("button", { name: "删除（公开 1，私密 1）" }),
     ).toBeDisabled()
+    await nonEmptyDomain.getByRole("button", { name: "编辑 人工智能 的信息" }).click()
+    const metadataEditor = page.getByRole("dialog", { name: "编辑领域信息" })
+    await metadataEditor.getByLabel("描述（选填）").fill("人工智能领域说明")
+    await metadataEditor.getByLabel("标签（选填）").fill("AI，研究, AI")
+    await metadataEditor.getByRole("button", { name: "保存信息" }).click()
+    manager = page.getByRole("dialog", { name: "管理领域" })
+    await expect(manager.getByRole("article", { name: "人工智能" })).toContainText(
+      "人工智能领域说明",
+    )
+    const populatedTags = manager.getByRole("article", { name: "人工智能" }).getByLabel("领域标签")
+    await expect(populatedTags.getByText("AI", { exact: true })).toBeVisible()
+    await expect(populatedTags.getByText("研究", { exact: true })).toBeVisible()
     await manager.getByRole("button", { name: "关闭" }).click()
+
+    const populatedDomainMetadata = matter(await readFile(domainIndexPath, "utf8")).data
+    expect(populatedDomainMetadata.description).toBe("人工智能领域说明")
+    expect(populatedDomainMetadata.tags).toEqual(["AI", "研究"])
+    expect(await readFile(join(first.root, ...publicPath.split("/")), "utf8")).toBe(
+      publicNoteBeforeMetadata,
+    )
+    expect(await readFile(join(first.root, ...privatePath.split("/")), "utf8")).toBe(
+      privateNoteBeforeMetadata,
+    )
+    expect(await readdir(join(first.root, "private", "artificial-intelligence"))).toEqual(
+      privatePathsBeforeMetadata,
+    )
 
     await closeApplication(application)
     application = undefined
@@ -1424,6 +1462,51 @@ test("manages custom domains across restarts and blogs", async () => {
     await expect(page.getByRole("button", { name: "人工智能" })).toBeVisible()
     await expect(page.getByRole("button", { name: "公开 AI 笔记，公开" })).toBeVisible()
     await expect(page.getByRole("button", { name: "私密 AI 笔记，私密" })).toBeVisible()
+    await page.getByRole("button", { name: "管理领域" }).click()
+    manager = page.getByRole("dialog", { name: "管理领域" })
+    const persistedDomain = manager.getByRole("article", { name: "人工智能" })
+    await expect(persistedDomain).toContainText("人工智能领域说明")
+    await expect(
+      persistedDomain.getByLabel("领域标签").getByText("AI", { exact: true }),
+    ).toBeVisible()
+    await expect(
+      persistedDomain.getByLabel("领域标签").getByText("研究", { exact: true }),
+    ).toBeVisible()
+    await persistedDomain.getByRole("button", { name: "编辑 人工智能 的信息" }).click()
+    const persistedMetadataEditor = page.getByRole("dialog", { name: "编辑领域信息" })
+    await expect(persistedMetadataEditor.getByLabel("描述（选填）")).toHaveValue("人工智能领域说明")
+    await expect(persistedMetadataEditor.getByLabel("标签（选填）")).toHaveValue("AI, 研究")
+    await persistedMetadataEditor.getByLabel("描述（选填）").fill("")
+    await persistedMetadataEditor.getByLabel("标签（选填）").fill("")
+    await persistedMetadataEditor.getByRole("button", { name: "保存信息" }).click()
+    manager = page.getByRole("dialog", { name: "管理领域" })
+    await expect(manager.getByRole("article", { name: "人工智能" })).toContainText("未填写描述")
+    await expect(manager.getByRole("article", { name: "人工智能" })).toContainText("无标签")
+    await manager.getByRole("button", { name: "关闭" }).click()
+
+    const clearedDomainMetadata = matter(await readFile(domainIndexPath, "utf8")).data
+    expect(clearedDomainMetadata).not.toHaveProperty("description")
+    expect(clearedDomainMetadata).not.toHaveProperty("tags")
+    expect(await readFile(join(first.root, ...publicPath.split("/")), "utf8")).toBe(
+      publicNoteBeforeMetadata,
+    )
+    expect(await readFile(join(first.root, ...privatePath.split("/")), "utf8")).toBe(
+      privateNoteBeforeMetadata,
+    )
+    expect(await readdir(join(first.root, "private", "artificial-intelligence"))).toEqual(
+      privatePathsBeforeMetadata,
+    )
+
+    await closeApplication(application)
+    application = undefined
+    application = await launchApplication(stateRoot, environment)
+    page = await application.firstWindow()
+    await page.getByRole("button", { name: "管理领域" }).click()
+    manager = page.getByRole("dialog", { name: "管理领域" })
+    const clearedPersistedDomain = manager.getByRole("article", { name: "人工智能" })
+    await expect(clearedPersistedDomain).toContainText("未填写描述")
+    await expect(clearedPersistedDomain).toContainText("无标签")
+    await manager.getByRole("button", { name: "关闭" }).click()
 
     await page.getByRole("button", { name: "切换博客：Blog A" }).click()
     await page.getByRole("menuitem", { name: "添加本地博客" }).click()

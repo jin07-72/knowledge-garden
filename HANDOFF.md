@@ -6,10 +6,11 @@
 
 ## 0. 当前状态
 
-- 当前分支：`main`
-- 当前发布器版本：`0.1.4`
-- 当前发布器版本提交：待本次发布提交完成后更新
-- 本次代码修改已全部合并到本地 `main`，并推送到 `origin/main` 和 `publisher/main`。
+- 当前发布准备分支：`codex/editable-domain-metadata`
+- 当前发布器源码版本：`0.1.5`
+- 当前发布器版本提交：见 `codex/editable-domain-metadata` 当前 HEAD（不在文档内嵌 SHA，避免 amend 后失效）
+- `0.1.5` 仍处于发布准备状态：尚未打包、安装、合并或推送；正式安装目录仍是 `0.1.4`。
+- 此前 `0.1.4` 的代码修改已合并到本地 `main`，并推送到 `origin/main` 和 `publisher/main`。
 - 工作区仍保留用户原有的 `highlight.js` 依赖修改和 `.tmp-render-check.png`，未纳入本次提交。
 
 ## 1. 项目目标
@@ -113,6 +114,14 @@ Knowledge Garden 是一个公开的个人知识花园：
 - 后续修复动作再次检查时会先清除旧的端口占用结论，避免在端口已经释放后继续显示过期提示。
 - 没有修改端口探测、预览服务、发布流程或私密/公开转换事务。
 
+### 2.8 可编辑的领域描述与标签（`0.1.5` 待发布）
+
+- “管理领域”可编辑自定义领域的描述和标签；保存后原子更新 `content/<slug>/index.md` 的 YAML frontmatter。
+- 描述和标签均可留空；清空后对应 `description` / `tags` 键会从 YAML 中删除，管理器显示“未填写描述”和“无标签”，不会写入占位值。
+- 标签支持中英文逗号分隔、去除首尾空白并按首次出现顺序去重；重启应用后从领域入口页重新读取并显示持久化值。
+- 元数据更新只允许作用于已验证的公开领域入口页，不修改领域内公开笔记、`private/` 内容或私密目录结构，也不触发发布。
+- 写入使用领域事务、revision/identity 校验和回滚证据；并发修改、路径替换或恢复不确定时安全失败，不越过工作区边界。
+
 ## 3. 当前内容状态
 
 - 最新内容提交（合并前）：`f2965202`
@@ -123,34 +132,43 @@ Knowledge Garden 是一个公开的个人知识花园：
 
 ## 4. 修改的主要文件
 
-| 文件 | 原因 |
-|---|---|
-| `apps/publisher/src/main/services/noteTransactions.ts` | 公开→私密时自动清理入站 WikiLink |
-| `apps/publisher/src/renderer/src/App.tsx` | 部署状态复查、链接清理提示、清缓存回调、传递当前博客网站地址、启动诊断会话级隐藏和重试反馈 |
-| `apps/publisher/src/renderer/src/components/FirstRun.tsx` | 启动检查提示的可选关闭按钮和重试状态反馈 |
-| `apps/publisher/src/renderer/src/publishDeploymentStatus.ts` | 未确认部署时返回 `deploying` |
-| `apps/publisher/src/renderer/src/components/PreviewPane.tsx` | 使用当前博客网站地址、未配置提示、cache-busting、清缓存、刷新按钮布局 |
-| `apps/publisher/src/renderer/index.html` | 允许经过主进程验证的 HTTP(S) 网站作为 iframe 目标 |
-| `apps/publisher/src/renderer/src/components/VisibilityMenu.tsx` | 打开菜单时聚焦当前选中项 |
-| `apps/publisher/src/renderer/src/app.css` | 刷新按钮、提示条、选中可见性样式 |
-| `apps/publisher/src/main/index.ts` | 注入 `session.defaultSession.clearCache()` |
-| `apps/publisher/src/main/ipc.ts` | 新增清缓存 IPC |
-| `apps/publisher/src/preload/gardenApi.ts` | 暴露 `history.clearCache()` |
-| `apps/publisher/src/shared/contracts.ts` | 新增 IPC 通道和 API 类型 |
-| `apps/publisher/src/shared/ipcSchemas.ts` | 新增清缓存通道 schema |
-| `apps/publisher/tests/integration/noteTransactions.test.ts` | 自动链接清理、CRLF、事务回滚测试 |
-| `apps/publisher/tests/integration/publish.test.ts` | 私密→公开发布、清理后发布测试 |
-| `apps/publisher/tests/unit/main-layout.test.tsx` | 部署状态、缓存、可见性高亮、刷新按钮测试 |
-| `apps/publisher/tests/unit/renderer-security.test.tsx` | 缓存回调和新 PreviewPane 属性 |
-| `apps/publisher/tests/unit/ipc.test.ts` | 新 IPC/preload 通道 |
-| `apps/publisher/tests/unit/app-smoke.test.tsx` | 新 history API mock |
-| `README.md` | 记录自动链接清理行为 |
-| `docs/superpowers/specs/2026-10-20-visibility-roundtrip-design.md` | 更新隐私往返设计 |
-| `docs/superpowers/plans/2026-10-20-visibility-roundtrip.md` | 标注新需求覆盖旧计划 |
+| 文件                                                               | 原因                                                                                       |
+| ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------ |
+| `apps/publisher/src/main/services/noteTransactions.ts`             | 公开→私密时自动清理入站 WikiLink                                                           |
+| `apps/publisher/src/renderer/src/App.tsx`                          | 部署状态复查、链接清理提示、清缓存回调、传递当前博客网站地址、启动诊断会话级隐藏和重试反馈 |
+| `apps/publisher/src/renderer/src/components/FirstRun.tsx`          | 启动检查提示的可选关闭按钮和重试状态反馈                                                   |
+| `apps/publisher/src/renderer/src/publishDeploymentStatus.ts`       | 未确认部署时返回 `deploying`                                                               |
+| `apps/publisher/src/renderer/src/components/PreviewPane.tsx`       | 使用当前博客网站地址、未配置提示、cache-busting、清缓存、刷新按钮布局                      |
+| `apps/publisher/src/renderer/index.html`                           | 允许经过主进程验证的 HTTP(S) 网站作为 iframe 目标                                          |
+| `apps/publisher/src/renderer/src/components/VisibilityMenu.tsx`    | 打开菜单时聚焦当前选中项                                                                   |
+| `apps/publisher/src/renderer/src/app.css`                          | 刷新按钮、提示条、选中可见性样式                                                           |
+| `apps/publisher/src/main/index.ts`                                 | 注入 `session.defaultSession.clearCache()`                                                 |
+| `apps/publisher/src/main/ipc.ts`                                   | 新增清缓存 IPC                                                                             |
+| `apps/publisher/src/preload/gardenApi.ts`                          | 暴露 `history.clearCache()`                                                                |
+| `apps/publisher/src/shared/contracts.ts`                           | 新增 IPC 通道和 API 类型                                                                   |
+| `apps/publisher/src/shared/ipcSchemas.ts`                          | 新增清缓存通道 schema                                                                      |
+| `apps/publisher/tests/integration/noteTransactions.test.ts`        | 自动链接清理、CRLF、事务回滚测试                                                           |
+| `apps/publisher/tests/integration/publish.test.ts`                 | 私密→公开发布、清理后发布测试                                                              |
+| `apps/publisher/tests/unit/main-layout.test.tsx`                   | 部署状态、缓存、可见性高亮、刷新按钮测试                                                   |
+| `apps/publisher/tests/unit/renderer-security.test.tsx`             | 缓存回调和新 PreviewPane 属性                                                              |
+| `apps/publisher/tests/unit/ipc.test.ts`                            | 新 IPC/preload 通道                                                                        |
+| `apps/publisher/tests/unit/app-smoke.test.tsx`                     | 新 history API mock                                                                        |
+| `README.md`                                                        | 记录自动链接清理行为                                                                       |
+| `docs/superpowers/specs/2026-10-20-visibility-roundtrip-design.md` | 更新隐私往返设计                                                                           |
+| `docs/superpowers/plans/2026-10-20-visibility-roundtrip.md`        | 标注新需求覆盖旧计划                                                                       |
+| `apps/publisher/src/main/services/domains.ts`                      | 原子更新领域入口页描述和标签，保留其余 frontmatter 与正文                                  |
+| `apps/publisher/src/renderer/src/components/DomainManager.tsx`     | 编辑、清空并展示领域描述和标签                                                             |
+| `apps/publisher/tests/e2e/app.spec.ts`                             | 覆盖填写、清空、重启持久化及笔记/private 隔离                                              |
+| `apps/publisher/package.json`、`package-lock.json`                 | 发布器 patch 版本更新为 `0.1.5`                                                            |
 
 ## 5. 验证结果
 
 已执行：
+
+- 本次 `0.1.5` 定向单元测试：`ipc-schemas`、`domains`、`ipc`、`publisher-services`、`domain-manager`、`main-layout`，共 `6` 个文件、`431 passed`。
+- 本次 `npm run typecheck`：通过。
+- 本次对变更文件执行 Prettier：通过。
+- 本次 `git diff --check`：通过。
 
 - 完整 `noteTransactions.test.ts`：`102 passed`
 - 完整 `publish.test.ts`：`58 passed, 1 skipped`
@@ -169,7 +187,8 @@ Knowledge Garden 是一个公开的个人知识花园：
 
 尚未完成：
 
-- Electron E2E 曾因本机 Electron 启动失败而无法完成断言验证。
+- 本次定向 Electron E2E `npm run test:e2e -- --grep "manages custom domains"` 已尝试，但 Electron 在窗口创建前报 `Error: Process failed to launch!`，因此没有完成 UI 断言验证。
+- `0.1.5` 尚未打包或安装，也尚未合并、推送；这些步骤由后续发布操作完成。
 
 ## 6. 本机运行方式
 
