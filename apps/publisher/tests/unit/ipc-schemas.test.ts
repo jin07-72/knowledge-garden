@@ -867,9 +867,7 @@ describe("IPC success schemas", () => {
   })
 
   it("defines the domain metadata update channel and accepts empty metadata", () => {
-    expect(IPC_CHANNELS.requests.domainsUpdateMetadata).toBe(
-      "garden:domains:update-metadata",
-    )
+    expect(IPC_CHANNELS.requests.domainsUpdateMetadata).toBe("garden:domains:update-metadata")
     expect(
       domainUpdateMetadataSchema.parse({
         slug: "artificial-intelligence",
@@ -901,9 +899,9 @@ describe("IPC success schemas", () => {
       tags: ["ai", "machine-learning"],
     }
 
-    expect(
-      domainUpdateMetadataSchema.safeParse({ ...request, tags: ["ai", "ai"] }).success,
-    ).toBe(false)
+    expect(domainUpdateMetadataSchema.safeParse({ ...request, tags: ["ai", "ai"] }).success).toBe(
+      false,
+    )
     expect(
       domainUpdateMetadataSchema.safeParse({ ...request, description: " Models and systems." })
         .success,
@@ -928,8 +926,7 @@ describe("IPC success schemas", () => {
     }
 
     expect(
-      domainUpdateMetadataSchema.safeParse({ ...request, description: "x".repeat(2_001) })
-        .success,
+      domainUpdateMetadataSchema.safeParse({ ...request, description: "x".repeat(2_001) }).success,
     ).toBe(false)
     expect(
       domainUpdateMetadataSchema.safeParse({ ...request, tags: ["x".repeat(129)] }).success,

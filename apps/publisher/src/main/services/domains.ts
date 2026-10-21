@@ -954,6 +954,7 @@ async function discoverDomainScan(
       slug: metadata.slug,
       name: metadata.name,
       description: metadata.description,
+      tags: [],
       order: metadata.order,
       publicNotes,
       privateNotes,

@@ -24,6 +24,7 @@ import {
   type DomainRemoveRequest,
   type DomainRenameRequest,
   type DomainSummary,
+  type DomainUpdateMetadataRequest,
   type GitCommit,
   type HistoryCancelRequest,
   type HistoryRequest,
@@ -193,6 +194,8 @@ export function createGardenApi(ipc: IpcRendererPort): GardenApi {
       invoke<readonly DomainSummary[]>(ipc, IPC_CHANNELS.requests.domainsCreate, request),
     rename: (request: DomainRenameRequest) =>
       invoke<readonly DomainSummary[]>(ipc, IPC_CHANNELS.requests.domainsRename, request),
+    updateMetadata: (request: DomainUpdateMetadataRequest) =>
+      invoke<readonly DomainSummary[]>(ipc, IPC_CHANNELS.requests.domainsUpdateMetadata, request),
     remove: (request: DomainRemoveRequest) =>
       invoke<readonly DomainSummary[]>(ipc, IPC_CHANNELS.requests.domainsRemove, request),
   })

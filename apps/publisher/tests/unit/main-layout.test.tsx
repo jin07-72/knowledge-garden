@@ -56,10 +56,42 @@ const notes: readonly NoteSummary[] = [
 ]
 
 const domainSummaries: readonly DomainSummary[] = [
-  { slug: "technology", name: "技术", description: "", order: 1, publicNotes: 1, privateNotes: 0 },
-  { slug: "reading", name: "阅读", description: "", order: 2, publicNotes: 0, privateNotes: 1 },
-  { slug: "language", name: "语言", description: "", order: 3, publicNotes: 0, privateNotes: 0 },
-  { slug: "life", name: "生活", description: "", order: 4, publicNotes: 0, privateNotes: 0 },
+  {
+    slug: "technology",
+    name: "技术",
+    description: "",
+    tags: [],
+    order: 1,
+    publicNotes: 1,
+    privateNotes: 0,
+  },
+  {
+    slug: "reading",
+    name: "阅读",
+    description: "",
+    tags: [],
+    order: 2,
+    publicNotes: 0,
+    privateNotes: 1,
+  },
+  {
+    slug: "language",
+    name: "语言",
+    description: "",
+    tags: [],
+    order: 3,
+    publicNotes: 0,
+    privateNotes: 0,
+  },
+  {
+    slug: "life",
+    name: "生活",
+    description: "",
+    tags: [],
+    order: 4,
+    publicNotes: 0,
+    privateNotes: 0,
+  },
 ]
 
 const documents = new Map<string, NoteDocument>([
@@ -244,6 +276,7 @@ function createGardenMock(): GardenApi {
       list: vi.fn(async () => ok(domainSummaries)),
       create: vi.fn(async () => ok(domainSummaries)),
       rename: vi.fn(async () => ok(domainSummaries)),
+      updateMetadata: vi.fn(async () => ok(domainSummaries)),
       remove: vi.fn(async () => ok(domainSummaries)),
     },
     notes: {
@@ -854,7 +887,15 @@ describe("publisher main layout", () => {
     const user = userEvent.setup()
     const customDomains = [
       ...domainSummaries,
-      { slug: "craft", name: "创作", description: "", order: 5, publicNotes: 0, privateNotes: 0 },
+      {
+        slug: "craft",
+        name: "创作",
+        description: "",
+        tags: [],
+        order: 5,
+        publicNotes: 0,
+        privateNotes: 0,
+      },
     ] as const
     vi.mocked(garden.domains.list).mockResolvedValueOnce(ok(customDomains))
     render(<App />)
@@ -873,7 +914,15 @@ describe("publisher main layout", () => {
     const user = userEvent.setup()
     const customDomains = [
       ...domainSummaries,
-      { slug: "all", name: "全量资料", description: "", order: 5, publicNotes: 0, privateNotes: 0 },
+      {
+        slug: "all",
+        name: "全量资料",
+        description: "",
+        tags: [],
+        order: 5,
+        publicNotes: 0,
+        privateNotes: 0,
+      },
     ] as const
     const customNote: NoteSummary = {
       path: "content/all/custom.md",
@@ -929,7 +978,15 @@ describe("publisher main layout", () => {
     const oldLoad = deferred<IpcResult<readonly DomainSummary[]>>()
     const createdDomains = [
       ...domainSummaries,
-      { slug: "craft", name: "创作", description: "", order: 5, publicNotes: 0, privateNotes: 0 },
+      {
+        slug: "craft",
+        name: "创作",
+        description: "",
+        tags: [],
+        order: 5,
+        publicNotes: 0,
+        privateNotes: 0,
+      },
     ] as const
     vi.mocked(garden.domains.list).mockReturnValueOnce(oldLoad.promise)
     vi.mocked(garden.domains.create).mockResolvedValueOnce(ok(createdDomains))

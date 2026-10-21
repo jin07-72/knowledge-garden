@@ -7,8 +7,24 @@ import type { DomainSummary, IpcResult } from "../../src/shared/contracts"
 import { createGardenApi } from "../../src/preload/gardenApi"
 
 const domains: readonly DomainSummary[] = [
-  { slug: "technology", name: "技术", description: "", order: 1, publicNotes: 2, privateNotes: 1 },
-  { slug: "empty", name: "空领域", description: "", order: 2, publicNotes: 0, privateNotes: 0 },
+  {
+    slug: "technology",
+    name: "技术",
+    description: "",
+    tags: [],
+    order: 1,
+    publicNotes: 2,
+    privateNotes: 1,
+  },
+  {
+    slug: "empty",
+    name: "空领域",
+    description: "",
+    tags: [],
+    order: 2,
+    publicNotes: 0,
+    privateNotes: 0,
+  },
 ]
 
 afterEach(() => cleanup())

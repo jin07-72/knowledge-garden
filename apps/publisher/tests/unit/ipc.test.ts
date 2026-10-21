@@ -1865,6 +1865,11 @@ describe("preload garden API", () => {
     void api.domains.list()
     void api.domains.create({ name: "Artificial Intelligence", slug: "artificial-intelligence" })
     void api.domains.rename({ slug: "artificial-intelligence", name: "AI" })
+    void api.domains.updateMetadata({
+      slug: "artificial-intelligence",
+      description: "Models and systems.",
+      tags: ["ai"],
+    })
     void api.domains.remove({ slug: "artificial-intelligence" })
   })
 
@@ -1984,6 +1989,11 @@ describe("preload garden API", () => {
     await api.domains.list()
     await api.domains.create({ name: "Artificial Intelligence", slug: "artificial-intelligence" })
     await api.domains.rename({ slug: "artificial-intelligence", name: "AI" })
+    await api.domains.updateMetadata({
+      slug: "artificial-intelligence",
+      description: "Models and systems.",
+      tags: ["ai"],
+    })
     await api.domains.remove({ slug: "artificial-intelligence" })
     await api.notes.list()
     await api.notes.read({ path: "content/life/a.md" })
@@ -2061,17 +2071,24 @@ describe("preload garden API", () => {
     const api = createGardenApi(ipc)
     const create = { name: "Artificial Intelligence", slug: "artificial-intelligence" }
     const rename = { slug: "artificial-intelligence", name: "AI" }
+    const updateMetadata = {
+      slug: "artificial-intelligence",
+      description: "Models and systems.",
+      tags: ["ai"],
+    }
     const remove = { slug: "artificial-intelligence" }
 
     await api.domains.list()
     await api.domains.create(create)
     await api.domains.rename(rename)
+    await api.domains.updateMetadata(updateMetadata)
     await api.domains.remove(remove)
 
     expect(ipc.invokes).toEqual([
       [IPC_CHANNELS.requests.domainsList, undefined],
       [IPC_CHANNELS.requests.domainsCreate, create],
       [IPC_CHANNELS.requests.domainsRename, rename],
+      [IPC_CHANNELS.requests.domainsUpdateMetadata, updateMetadata],
       [IPC_CHANNELS.requests.domainsRemove, remove],
     ])
   })
