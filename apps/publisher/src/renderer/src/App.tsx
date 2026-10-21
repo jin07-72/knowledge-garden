@@ -13,6 +13,7 @@ import type {
   DomainRemoveRequest,
   DomainRenameRequest,
   DomainSummary,
+  DomainUpdateMetadataRequest,
   GardenApi,
   IpcResult,
   NoteCreateRequest,
@@ -1076,6 +1077,7 @@ export function PublisherApp({
 
   const applyDomainMutation = async (
     operation: () => Promise<Awaited<ReturnType<GardenApi["domains"]["list"]>>>,
+    reloadNotes = true,
   ): Promise<readonly DomainSummary[]> => {
     domainsRequest.current += 1
     try {
@@ -1085,7 +1087,7 @@ export function PublisherApp({
         setDomains(result.value)
         setDomainsState("ready")
         setDomainError(undefined)
-        void loadNotes()
+        if (reloadNotes) void loadNotes()
       }
       return result.value
     } catch (failure) {
@@ -1544,6 +1546,9 @@ export function PublisherApp({
           onRename={(request: DomainRenameRequest) =>
             applyDomainMutation(() => api.domains.rename(request))
           }
+          onUpdateMetadata={(request: DomainUpdateMetadataRequest) =>
+            applyDomainMutation(() => api.domains.updateMetadata(request), false)
+          }
           onRemove={(request: DomainRemoveRequest) =>
             applyDomainMutation(() => api.domains.remove(request))
           }
@@ -1612,33 +1617,36 @@ function PublisherStartup({
     }
   }, [])
 
-  const inspectDiagnostics = useCallback(async (afterRetry = false): Promise<void> => {
-    setBusy(true)
-    setError(undefined)
-    setRetryNotice(undefined)
-    try {
-      const result = await api.workspace.inspect()
-      if (!mounted.current) return
-      if (!result.ok) {
-        setError(messageFor(result.error, "无法完成启动检查。"))
-        setInspection(undefined)
-      } else {
-        setInspection(result.value)
-        if (afterRetry) {
-          setRetryNotice(
-            result.value.issues.some((issue) => issue.code === "PREVIEW_PORT_UNAVAILABLE")
-              ? "重新检查完成：预览端口仍被占用。"
-              : undefined,
-          )
+  const inspectDiagnostics = useCallback(
+    async (afterRetry = false): Promise<void> => {
+      setBusy(true)
+      setError(undefined)
+      setRetryNotice(undefined)
+      try {
+        const result = await api.workspace.inspect()
+        if (!mounted.current) return
+        if (!result.ok) {
+          setError(messageFor(result.error, "无法完成启动检查。"))
+          setInspection(undefined)
+        } else {
+          setInspection(result.value)
+          if (afterRetry) {
+            setRetryNotice(
+              result.value.issues.some((issue) => issue.code === "PREVIEW_PORT_UNAVAILABLE")
+                ? "重新检查完成：预览端口仍被占用。"
+                : undefined,
+            )
+          }
         }
+      } catch (failure) {
+        if (mounted.current)
+          setError(failure instanceof Error ? failure.message : "无法完成启动检查。")
+      } finally {
+        if (mounted.current) setBusy(false)
       }
-    } catch (failure) {
-      if (mounted.current)
-        setError(failure instanceof Error ? failure.message : "无法完成启动检查。")
-    } finally {
-      if (mounted.current) setBusy(false)
-    }
-  }, [api])
+    },
+    [api],
+  )
 
   const inspectSafety = useCallback(async (): Promise<void> => {
     setBusy(true)

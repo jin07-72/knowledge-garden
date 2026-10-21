@@ -584,9 +584,7 @@ describe("publisher main layout", () => {
     render(<StartupApp />)
 
     await screen.findByRole("button", { name: "重新检查" })
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: "重新检查" })).toBeEnabled(),
-    )
+    await waitFor(() => expect(screen.getByRole("button", { name: "重新检查" })).toBeEnabled())
     fireEvent.click(screen.getByRole("button", { name: "重新检查" }))
     await waitFor(() => expect(garden.workspace.inspect).toHaveBeenCalledTimes(2))
     expect(await screen.findByText("重新检查完成：预览端口仍被占用。")).toBeVisible()
@@ -610,9 +608,7 @@ describe("publisher main layout", () => {
 
     render(<StartupApp />)
 
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: "重新检查" })).toBeEnabled(),
-    )
+    await waitFor(() => expect(screen.getByRole("button", { name: "重新检查" })).toBeEnabled())
     await waitFor(() => expect(garden.workspace.inspect).toHaveBeenCalledOnce())
     fireEvent.click(screen.getByRole("button", { name: "重新检查" }))
     await waitFor(() => expect(garden.workspace.inspect).toHaveBeenCalledTimes(2))
@@ -1003,6 +999,44 @@ describe("publisher main layout", () => {
     oldLoad.resolve(ok(domainSummaries))
     await Promise.resolve()
     expect(screen.getByRole("article", { name: "创作" })).toBeVisible()
+  })
+
+  it("updates domain metadata from the manager without note or publish side effects", async () => {
+    const user = userEvent.setup()
+    const updatedDomains = domainSummaries.map((domain) =>
+      domain.slug === "technology"
+        ? { ...domain, description: "工程与工具", tags: ["工程", "实践"] }
+        : domain,
+    )
+    vi.mocked(garden.domains.updateMetadata).mockResolvedValueOnce(ok(updatedDomains))
+    render(<App />)
+
+    await user.click(await screen.findByRole("button", { name: "管理领域" }))
+    const manager = screen.getByRole("dialog", { name: "管理领域" })
+    await user.click(within(manager).getByRole("button", { name: "编辑 技术 的信息" }))
+    await user.type(screen.getByLabelText("描述（选填）"), " 工程与工具 ")
+    await user.type(screen.getByLabelText("标签（选填）"), "工程，实践, 工程")
+
+    vi.clearAllMocks()
+    await user.click(screen.getByRole("button", { name: "保存信息" }))
+
+    await waitFor(() =>
+      expect(garden.domains.updateMetadata).toHaveBeenCalledWith({
+        slug: "technology",
+        description: "工程与工具",
+        tags: ["工程", "实践"],
+      }),
+    )
+    const updatedCard = screen.getByRole("article", { name: "技术" })
+    expect(within(updatedCard).getByText("工程与工具")).toBeVisible()
+    expect(within(updatedCard).getByText("工程")).toBeVisible()
+    expect(within(updatedCard).getByText("实践")).toBeVisible()
+    expect(garden.notes.save).not.toHaveBeenCalled()
+    expect(garden.notes.list).not.toHaveBeenCalled()
+    expect(garden.notes.read).not.toHaveBeenCalled()
+    expect(garden.notes.rename).not.toHaveBeenCalled()
+    expect(garden.notes.changeVisibility).not.toHaveBeenCalled()
+    expect(garden.publish.start).not.toHaveBeenCalled()
   })
 
   it("restarts domain loading after a failed mutation invalidates startup loading", async () => {
