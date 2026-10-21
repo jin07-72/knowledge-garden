@@ -163,7 +163,7 @@ Knowledge Garden 是一个公开的个人知识花园：
 - Prettier、`git diff --check`：通过
 - 通用线上地址 UI 回归：`90 passed`
 - 可见性事务与隔离发布回归：`161 passed, 1 skipped`
-- 完整发布器测试套件（单工作线程）：`1649 passed, 16 skipped`
+- 完整发布器测试套件（单工作线程）：`1650 passed, 16 skipped`
 - Windows `0.1.4` 安装包：生成成功
 - 正式安装目录已更新为 `0.1.4`，可执行文件 SHA256：`A057E25944607119C4E571F74DE5A136C6098224289FFB2E065E9C0D4AC8C6A3`
 
