@@ -752,6 +752,8 @@ function parseDomainPage(
       readonly name: string
       readonly description: string
       readonly tags: readonly string[]
+      readonly hasDescription: boolean
+      readonly hasTags: boolean
       readonly order: number
       readonly hasExplicitOrder: boolean
     }
@@ -799,6 +801,8 @@ function parseDomainPage(
     name: parsedName.data,
     description: parsedDescription.data,
     tags: parsedTags.data,
+    hasDescription: Object.hasOwn(data, "description"),
+    hasTags: Object.hasOwn(data, "tags"),
     order: parsedOrder.data,
     hasExplicitOrder,
   }
@@ -2979,7 +2983,9 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
     if (
       metadata.description === input.description &&
       metadata.tags.length === input.tags.length &&
-      metadata.tags.every((tag, index) => tag === input.tags[index])
+      metadata.tags.every((tag, index) => tag === input.tags[index]) &&
+      (input.description !== "" || !metadata.hasDescription) &&
+      (input.tags.length !== 0 || !metadata.hasTags)
     ) {
       return discoverDomains(canonical.directory)
     }

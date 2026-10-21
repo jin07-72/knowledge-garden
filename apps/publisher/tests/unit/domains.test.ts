@@ -2294,6 +2294,56 @@ describe("DomainCatalog.updateMetadata", () => {
     await expect(lstat(join(root, ".garden-publisher"))).rejects.toMatchObject({ code: "ENOENT" })
   })
 
+  it("does not rewrite an absent canonical empty metadata representation", async () => {
+    const root = await createGarden()
+    const source = domainPage("AI", "Old description.", 1).replace(
+      "description: Old description.\n",
+      "",
+    )
+    const index = join(root, "content", "ai", "index.md")
+    await writeFixture(root, "content/ai/index.md", source)
+    const catalog = createDomainCatalog({
+      workspace: root,
+      trash: { trashItem: async () => undefined },
+    })
+    const before = await lstat(index, { bigint: true })
+
+    await catalog.updateMetadata({ slug: "ai", description: "", tags: [] })
+
+    await expect(readFile(index, "utf8")).resolves.toBe(source)
+    const after = await lstat(index, { bigint: true })
+    expect({ ino: after.ino, mtimeNs: after.mtimeNs, ctimeNs: after.ctimeNs }).toEqual({
+      ino: before.ino,
+      mtimeNs: before.mtimeNs,
+      ctimeNs: before.ctimeNs,
+    })
+    await expect(lstat(join(root, ".garden-publisher"))).rejects.toMatchObject({ code: "ENOENT" })
+  })
+
+  it.each([
+    ["empty values", 'description: ""\ntags: []'],
+    ["null values", "description: null\ntags: null"],
+  ])("removes physically present %s when saving empty metadata", async (_label, metadata) => {
+    const root = await createGarden()
+    const source = domainPage("AI", "Old description.", 1).replace(
+      "description: Old description.",
+      metadata,
+    )
+    const index = join(root, "content", "ai", "index.md")
+    await writeFixture(root, "content/ai/index.md", source)
+    const catalog = createDomainCatalog({
+      workspace: root,
+      trash: { trashItem: async () => undefined },
+    })
+
+    await catalog.updateMetadata({ slug: "ai", description: "", tags: [] })
+
+    const updated = matter(await readFile(index, "utf8"))
+    expect(updated.data).not.toHaveProperty("description")
+    expect(updated.data).not.toHaveProperty("tags")
+    expect(updated.content).toBe(matter(source).content)
+  })
+
   it("updates description and tags while preserving unrelated frontmatter and the body", async () => {
     const root = await createGarden()
     const source = [
