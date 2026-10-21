@@ -208,7 +208,13 @@ interface DomainCatalogFileSystem {
 interface DomainCatalogHooks {
   readonly afterRenameRead?: (path: string) => Promise<void> | void
   readonly afterUpdateMetadataRead?: (path: string) => Promise<void> | void
+  readonly afterUpdateMetadataReplace?: (path: string) => Promise<void> | void
   readonly afterRemoveInspection?: (path: string) => Promise<void> | void
+}
+
+interface DurableRenamePageOptions {
+  readonly beforeCommit?: () => Promise<void>
+  readonly cleanupCreatedTransactionParents?: boolean
 }
 
 export interface DomainCatalogOptions {
@@ -2291,6 +2297,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
     },
     bytes: Buffer,
     intendedTitle: string,
+    operationOptions: DurableRenamePageOptions = {},
   ): Promise<void> {
     const target = resolve(workspace, ...page.path.split("/"))
     const parent = resolve(target, "..")
@@ -2318,6 +2325,10 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
     let journalBytes: Buffer | undefined
     let transactionIdentity: string | undefined
     let transactionsIdentity: string | undefined
+    let stateIdentity: string | undefined
+    let stateCreated = false
+    let transactionsCreated = false
+    let transactionRemoved = false
     let stagedJournalPath: string | undefined
     let stagedJournalIdentity: FileIdentity | undefined
     let stagedJournalBytes: Buffer | undefined
@@ -2491,13 +2502,24 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
     }
 
     const retireJournal = async (): Promise<void> => {
-      if (journal === undefined || transactionIdentity === undefined) {
+      if (transactionIdentity === undefined) return
+      if (journal === undefined) {
+        await removeOwnedEmptyDirectory(transaction, transactionIdentity)
+        transactionRemoved = true
+        await syncDirectory(transactions, openFile)
+        await syncDirectory(state, openFile)
         return
       }
       const ownedPath = journalIdentity === undefined ? stagedJournalPath : journalPath
       const ownedIdentity = journalIdentity === undefined ? stagedJournalIdentity : journalIdentity
       const ownedBytes = journalIdentity === undefined ? stagedJournalBytes : journalBytes
-      if (ownedPath === undefined || ownedIdentity === undefined || ownedBytes === undefined) return
+      if (ownedPath === undefined || ownedIdentity === undefined || ownedBytes === undefined) {
+        await removeOwnedEmptyDirectory(transaction, transactionIdentity)
+        transactionRemoved = true
+        await syncDirectory(transactions, openFile)
+        await syncDirectory(state, openFile)
+        return
+      }
       const current = await readOwnedBytes(ownedPath, transaction, inodeIdentity(ownedIdentity))
       if (
         current === undefined ||
@@ -2519,8 +2541,21 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
         throw new Error("Domain rename rollback transaction cleanup is unsafe")
       }
       await rmdir(transaction)
+      transactionRemoved = true
       await syncDirectory(transactions, openFile)
       await syncDirectory(state, openFile)
+    }
+
+    const cleanupCreatedTransactionParents = async (): Promise<void> => {
+      if (!operationOptions.cleanupCreatedTransactionParents || !transactionRemoved) return
+      if (transactionsCreated && transactionsIdentity !== undefined) {
+        await removeOwnedEmptyDirectory(transactions, transactionsIdentity)
+        await syncDirectory(state, openFile)
+      }
+      if (stateCreated && stateIdentity !== undefined) {
+        await removeOwnedEmptyDirectory(state, stateIdentity)
+        await syncDirectory(workspace, openFile)
+      }
     }
 
     try {
@@ -2536,8 +2571,16 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
         throw unsafePath(displayPath(workspace, temporary))
       }
       await verifyBoundaries()
-      await ensureTransactionParent(workspace, workspace, state)
-      transactionsIdentity = await ensureTransactionParent(workspace, state, transactions)
+      const ensuredState = await ensureTransactionParentTracked(workspace, workspace, state)
+      stateIdentity = ensuredState.identity
+      stateCreated = ensuredState.created
+      const ensuredTransactions = await ensureTransactionParentTracked(
+        workspace,
+        state,
+        transactions,
+      )
+      transactionsIdentity = ensuredTransactions.identity
+      transactionsCreated = ensuredTransactions.created
       transactionIdentity = await ensureTransactionParent(workspace, transactions, transaction)
       await syncDirectory(transactions, openFile)
       journal = {
@@ -2592,6 +2635,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
       ) {
         throw new Error("Renamed landing page changed during directory sync")
       }
+      await operationOptions.beforeCommit?.()
       await guardedMutation(() =>
         removeOwnedFile(backup, parent, publishedBackup.identity, original),
       )
@@ -2618,13 +2662,8 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
       if (journalIdentity === undefined || journalBytes === undefined) {
         throw new Error("Domain rename journal identity is unavailable")
       }
-      await removeOwnedFile(journalPath, transaction, journalIdentity, journalBytes)
-      await syncDirectory(transaction, openFile)
-      if (transactionIdentity === undefined || transactionsIdentity === undefined) {
-        throw new Error("Domain rename transaction identity is unavailable")
-      }
-      await removeOwnedEmptyDirectory(transaction, transactionIdentity)
-      await syncDirectory(transactions, openFile)
+      await retireJournal()
+      await cleanupCreatedTransactionParents()
     } catch (error) {
       await handle?.close().catch(() => undefined)
       const failures: unknown[] = []
@@ -2701,6 +2740,11 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
         }
         if (failures.length === 0) {
           await retireJournal().catch((cleanupError: unknown) => failures.push(cleanupError))
+        }
+        if (failures.length === 0) {
+          await cleanupCreatedTransactionParents().catch((cleanupError: unknown) =>
+            failures.push(cleanupError),
+          )
         }
         if (failures.length > 0) throw uncertain(error, failures)
         throw error
@@ -2801,6 +2845,11 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
       }
       if (failures.length === 0) {
         await retireJournal().catch((cleanupError: unknown) => failures.push(cleanupError))
+      }
+      if (failures.length === 0) {
+        await cleanupCreatedTransactionParents().catch((cleanupError: unknown) =>
+          failures.push(cleanupError),
+        )
       }
       if (failures.length > 0) {
         throw uncertain(error, failures)
@@ -2905,23 +2954,36 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
     }
     const updated = replaceDomainMetadata(page.source, input.description, input.tags, page.path)
     await options.hooks?.afterUpdateMetadataRead?.(page.path)
+    let updatedDomains: readonly DomainSummary[] | undefined
     await durableRenamePage(
       canonical.directory,
       [canonical, content, privateRoot],
       page,
       Buffer.from(updated, "utf8"),
       metadata.name,
+      {
+        beforeCommit: async () => {
+          await options.hooks?.afterUpdateMetadataReplace?.(page.path)
+          updatedDomains = await discoverDomains(canonical.directory)
+        },
+        cleanupCreatedTransactionParents: true,
+      },
     )
-    return discoverDomains(canonical.directory)
+    if (updatedDomains === undefined) {
+      throw new Error("Domain metadata update completed without final discovery")
+    }
+    return updatedDomains
   }
 
-  async function ensureTransactionParent(
+  async function ensureTransactionParentTracked(
     workspace: string,
     parent: string,
     candidate: string,
-  ): Promise<string> {
+  ): Promise<{ readonly identity: string; readonly created: boolean }> {
+    let created = false
     try {
       await createDirectory(candidate, { mode: 0o700 })
+      created = true
     } catch (error) {
       if (!isFileSystemError(error, "EEXIST")) throw error
     }
@@ -2936,11 +2998,19 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
       ) {
         throw unsafePath(displayPath(workspace, candidate))
       }
-      return inodeIdentity(details)
+      return { identity: inodeIdentity(details), created }
     } catch (error) {
       if (isDomainDiscoveryError(error)) throw error
       throw unsafePath(displayPath(workspace, candidate))
     }
+  }
+
+  async function ensureTransactionParent(
+    workspace: string,
+    parent: string,
+    candidate: string,
+  ): Promise<string> {
+    return (await ensureTransactionParentTracked(workspace, parent, candidate)).identity
   }
 
   async function assertTransactionDirectory(

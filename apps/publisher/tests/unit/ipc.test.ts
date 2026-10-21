@@ -403,6 +403,24 @@ describe("secure publisher IPC", () => {
       "DOMAIN_ROLLBACK_UNCERTAIN",
       "The domain operation could not be safely recovered. Review the workspace before retrying.",
     ],
+    [
+      "domainsUpdateMetadata",
+      { slug: "existing", description: "Updated.", tags: ["updated"] },
+      "DOMAIN_METADATA_INVALID",
+      "A domain page has invalid metadata. Correct it before retrying.",
+    ],
+    [
+      "domainsUpdateMetadata",
+      { slug: "existing", description: "Updated.", tags: ["updated"] },
+      "DOMAIN_UNSAFE_PATH",
+      "An unsafe or changed domain path was rejected.",
+    ],
+    [
+      "domainsUpdateMetadata",
+      { slug: "existing", description: "Updated.", tags: ["updated"] },
+      "DOMAIN_ROLLBACK_UNCERTAIN",
+      "The domain operation could not be safely recovered. Review the workspace before retrying.",
+    ],
   ] as const)(
     "preserves expected %s rejection %s safely",
     async (operation, request, code, message) => {

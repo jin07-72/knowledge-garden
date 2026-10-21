@@ -1,4 +1,5 @@
 import {
+  chmod,
   link as linkFile,
   mkdir,
   mkdtemp,
@@ -2385,7 +2386,150 @@ describe("DomainCatalog.updateMetadata", () => {
       catalog.updateMetadata({ slug: "ai", description: "New.", tags: ["new"] }),
     ).rejects.toThrow("simulated replacement failure")
     await expect(readFile(index, "utf8")).resolves.toBe(source)
+    expect(
+      (await readdir(dirname(index))).filter((name) => /\.(?:tmp|backup)-/.test(name)),
+    ).toEqual([])
+    await expect(lstat(join(root, ".garden-publisher"))).rejects.toMatchObject({ code: "ENOENT" })
     await expect(catalog.assertIdle()).resolves.toBeUndefined()
+  })
+
+  it("restores the original landing page when final rediscovery fails", async () => {
+    const root = await createGarden()
+    const source = domainPage("AI", "Old description.", 1)
+    const index = join(root, "content", "ai", "index.md")
+    const broken = join(root, "content", "broken", "index.md")
+    await Promise.all([
+      writeFixture(root, "content/ai/index.md", source),
+      writeFixture(root, "content/broken/index.md", domainPage("Broken", "Valid.", 2)),
+    ])
+    await chmod(index, 0o640)
+    const originalMode = (await lstat(index)).mode & 0o777
+    const catalog = createDomainCatalog({
+      workspace: root,
+      trash: { trashItem: async () => undefined },
+      hooks: {
+        afterUpdateMetadataReplace: () =>
+          writeFile(broken, "---\ngardenDomain: true\ntitle: Broken\ntags: nope\n---\n"),
+      },
+    })
+
+    await expect(
+      catalog.updateMetadata({ slug: "ai", description: "New.", tags: ["new"] }),
+    ).rejects.toMatchObject({ code: "DOMAIN_METADATA_INVALID" })
+    await expect(readFile(index, "utf8")).resolves.toBe(source)
+    expect((await lstat(index)).mode & 0o777).toBe(originalMode)
+    await expect(lstat(join(root, ".garden-publisher"))).rejects.toMatchObject({ code: "ENOENT" })
+  })
+
+  it("preserves the landing-page file mode", async () => {
+    const root = await createGarden()
+    const index = join(root, "content", "ai", "index.md")
+    await writeFixture(root, "content/ai/index.md", domainPage("AI", "Old description.", 1))
+    await chmod(index, 0o640)
+    const before = await lstat(index)
+    const catalog = createDomainCatalog({
+      workspace: root,
+      trash: { trashItem: async () => undefined },
+    })
+
+    await catalog.updateMetadata({ slug: "ai", description: "New.", tags: ["new"] })
+
+    expect((await lstat(index)).mode & 0o777).toBe(before.mode & 0o777)
+  })
+
+  it("rejects a symlink replacement at the post-read hook", async () => {
+    const root = await createGarden()
+    const source = domainPage("AI", "Old description.", 1)
+    const index = join(root, "content", "ai", "index.md")
+    const displaced = join(root, "content", "ai", "displaced.md")
+    const outside = join(root, "outside")
+    await Promise.all([
+      writeFixture(root, "content/ai/index.md", source),
+      mkdir(outside, { recursive: true }),
+    ])
+    const catalog = createDomainCatalog({
+      workspace: root,
+      trash: { trashItem: async () => undefined },
+      hooks: {
+        afterUpdateMetadataRead: async () => {
+          await rename(index, displaced)
+          await symlink(outside, index, "junction")
+        },
+      },
+    })
+
+    await expect(
+      catalog.updateMetadata({ slug: "ai", description: "New.", tags: ["new"] }),
+    ).rejects.toMatchObject({ code: "DOMAIN_UNSAFE_PATH" })
+    expect((await lstat(index)).isSymbolicLink()).toBe(true)
+    await expect(readFile(displaced, "utf8")).resolves.toBe(source)
+    await expect(lstat(join(root, ".garden-publisher"))).rejects.toMatchObject({ code: "ENOENT" })
+  })
+
+  it("cleans replacement and newly-created transaction artifacts after success", async () => {
+    const root = await createGarden()
+    const index = join(root, "content", "ai", "index.md")
+    await writeFixture(root, "content/ai/index.md", domainPage("AI", "Old description.", 1))
+    const catalog = createDomainCatalog({
+      workspace: root,
+      trash: { trashItem: async () => undefined },
+    })
+
+    await catalog.updateMetadata({ slug: "ai", description: "New.", tags: ["new"] })
+
+    expect(
+      (await readdir(dirname(index))).filter((name) => /\.(?:tmp|backup)-/.test(name)),
+    ).toEqual([])
+    await expect(lstat(join(root, ".garden-publisher"))).rejects.toMatchObject({ code: "ENOENT" })
+  })
+
+  it("preserves pre-existing empty transaction parent directories", async () => {
+    const root = await createGarden()
+    const transactions = join(root, ".garden-publisher", "domain-rename-transactions")
+    await Promise.all([
+      writeFixture(root, "content/ai/index.md", domainPage("AI", "Old description.", 1)),
+      mkdir(transactions, { recursive: true }),
+    ])
+    const catalog = createDomainCatalog({
+      workspace: root,
+      trash: { trashItem: async () => undefined },
+    })
+
+    await catalog.updateMetadata({ slug: "ai", description: "New.", tags: ["new"] })
+
+    expect((await lstat(join(root, ".garden-publisher"))).isDirectory()).toBe(true)
+    expect((await lstat(transactions)).isDirectory()).toBe(true)
+    await expect(readdir(transactions)).resolves.toEqual([])
+  })
+
+  it("does not change note, private, or attachment directories", async () => {
+    const root = await createGarden()
+    await Promise.all([
+      writeFixture(root, "content/ai/index.md", domainPage("AI", "Old description.", 1)),
+      writeFixture(root, "content/ai/note.md", "public note"),
+      writeFixture(root, "content/ai/assets/diagram.svg", "public attachment"),
+      writeFixture(root, "private/ai/secret.md", "private note"),
+      writeFixture(root, "private/ai/assets/source.txt", "private attachment"),
+    ])
+    const catalog = createDomainCatalog({
+      workspace: root,
+      trash: { trashItem: async () => undefined },
+    })
+
+    await catalog.updateMetadata({ slug: "ai", description: "New.", tags: ["new"] })
+
+    await expect(readFile(join(root, "content", "ai", "note.md"), "utf8")).resolves.toBe(
+      "public note",
+    )
+    await expect(
+      readFile(join(root, "content", "ai", "assets", "diagram.svg"), "utf8"),
+    ).resolves.toBe("public attachment")
+    await expect(readFile(join(root, "private", "ai", "secret.md"), "utf8")).resolves.toBe(
+      "private note",
+    )
+    await expect(
+      readFile(join(root, "private", "ai", "assets", "source.txt"), "utf8"),
+    ).resolves.toBe("private attachment")
   })
 
   it("serializes metadata updates against rename mutations", async () => {
@@ -2431,6 +2575,57 @@ describe("DomainCatalog.updateMetadata", () => {
       },
     ])
   })
+
+  it.each(["create", "remove"] as const)(
+    "serializes metadata updates against %s mutations",
+    async (operation) => {
+      const root = await createGarden()
+      await Promise.all([
+        writeFixture(root, "content/ai/index.md", domainPage("AI", "Old description.", 1)),
+        ...(operation === "remove"
+          ? [
+              writeFixture(root, "content/reading/index.md", domainPage("Reading", "Books.", 2)),
+              mkdir(join(root, "private", "reading"), { recursive: true }),
+            ]
+          : []),
+      ])
+      let release!: () => void
+      const paused = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      let updateRead = false
+      const catalog = createDomainCatalog({
+        workspace: root,
+        trash: { trashItem: async () => undefined },
+        hooks: {
+          afterUpdateMetadataRead: async () => {
+            updateRead = true
+            await paused
+          },
+        },
+      })
+
+      const update = catalog.updateMetadata({
+        slug: "ai",
+        description: "New description.",
+        tags: ["new"],
+      })
+      while (!updateRead) await new Promise((resolve) => setTimeout(resolve, 0))
+      let mutationSettled = false
+      const mutation = (
+        operation === "create"
+          ? catalog.create({ slug: "writing", name: "Writing" })
+          : catalog.remove({ slug: "reading" })
+      ).finally(() => {
+        mutationSettled = true
+      })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(mutationSettled).toBe(false)
+
+      release()
+      await expect(Promise.all([update, mutation])).resolves.toBeDefined()
+    },
+  )
 })
 
 describe("DomainCatalog.remove", () => {
