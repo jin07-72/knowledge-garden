@@ -25,6 +25,7 @@ import {
   type DomainRemoveRequest,
   type DomainRenameRequest,
   type DomainSummary,
+  type DomainUpdateMetadataRequest,
   type GitCommit,
   type HistoryCancelRequest,
   type HistoryRequest,
@@ -78,6 +79,7 @@ import {
   domainRemoveSchema,
   domainRenameSchema,
   domainSlugSchema,
+  domainUpdateMetadataSchema,
   imageLibraryCommitRequestSchema,
   imageLibraryDeleteRequestSchema,
   imageLibraryItemRequestSchema,
@@ -113,6 +115,7 @@ export interface PublisherIpcServices {
     list(): Promise<readonly DomainSummary[]>
     create(request: DomainCreateRequest): Promise<readonly DomainSummary[]>
     rename(request: DomainRenameRequest): Promise<readonly DomainSummary[]>
+    updateMetadata(request: DomainUpdateMetadataRequest): Promise<readonly DomainSummary[]>
     remove(request: DomainRemoveRequest): Promise<readonly DomainSummary[]>
   }
   readonly notes: {
@@ -824,6 +827,15 @@ export function registerPublisherIpc(options: RegisterPublisherIpcOptions): () =
         domainRenameSchema,
         isTrustedSender,
         (request) => services.domains.rename(request),
+      ),
+    ],
+    [
+      IPC_CHANNELS.requests.domainsUpdateMetadata,
+      secureHandler(
+        IPC_CHANNELS.requests.domainsUpdateMetadata,
+        domainUpdateMetadataSchema,
+        isTrustedSender,
+        (request) => services.domains.updateMetadata(request),
       ),
     ],
     [

@@ -63,6 +63,7 @@ function domainCatalog(overrides: Partial<DomainCatalog> = {}): DomainCatalog {
     }),
     create: vi.fn(async () => []),
     rename: vi.fn(async () => []),
+    updateMetadata: vi.fn(async () => []),
     remove: vi.fn(async () => []),
     assertIdle: vi.fn(async () => undefined),
     dispose: vi.fn(async () => undefined),
@@ -382,6 +383,11 @@ describe("publisher service wiring", () => {
       slug: "artificial-intelligence",
     })
     await services.domains.rename({ slug: "artificial-intelligence", name: "AI" })
+    await services.domains.updateMetadata({
+      slug: "artificial-intelligence",
+      description: "Models and systems.",
+      tags: ["ai"],
+    })
     await services.domains.remove({ slug: "artificial-intelligence" })
     expect(catalog.list).toHaveBeenCalledOnce()
     expect(catalog.create).toHaveBeenCalledWith({
@@ -391,6 +397,11 @@ describe("publisher service wiring", () => {
     expect(catalog.rename).toHaveBeenCalledWith({
       slug: "artificial-intelligence",
       name: "AI",
+    })
+    expect(catalog.updateMetadata).toHaveBeenCalledWith({
+      slug: "artificial-intelligence",
+      description: "Models and systems.",
+      tags: ["ai"],
     })
     expect(catalog.remove).toHaveBeenCalledWith({ slug: "artificial-intelligence" })
   })

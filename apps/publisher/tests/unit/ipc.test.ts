@@ -76,6 +76,7 @@ function services(): PublisherIpcServices & {
       list: call("domainsList"),
       create: call("domainsCreate"),
       rename: call("domainsRename"),
+      updateMetadata: call("domainsUpdateMetadata"),
       remove: call("domainsRemove"),
     },
     notes: {
@@ -916,6 +917,7 @@ describe("secure publisher IPC", () => {
         slug: "artificial-intelligence",
         name: "Artificial Intelligence",
         description: "Notes about artificial intelligence.",
+        tags: ["ai"],
         order: 4,
         publicNotes: 2,
         privateNotes: 1,
@@ -932,6 +934,15 @@ describe("secure publisher IPC", () => {
         IPC_CHANNELS.requests.domainsRename,
         { slug: "artificial-intelligence", name: "AI" },
         "domainsRename",
+      ],
+      [
+        IPC_CHANNELS.requests.domainsUpdateMetadata,
+        {
+          slug: "artificial-intelligence",
+          description: "Models and systems.",
+          tags: ["ai"],
+        },
+        "domainsUpdateMetadata",
       ],
       [IPC_CHANNELS.requests.domainsRemove, { slug: "artificial-intelligence" }, "domainsRemove"],
     ] as const
@@ -964,6 +975,21 @@ describe("secure publisher IPC", () => {
         "domainsCreate",
       ],
       [IPC_CHANNELS.requests.domainsRename, { slug: "life", name: "   " }, "domainsRename"],
+      [
+        IPC_CHANNELS.requests.domainsUpdateMetadata,
+        { slug: "life", description: " padded", tags: ["life"] },
+        "domainsUpdateMetadata",
+      ],
+      [
+        IPC_CHANNELS.requests.domainsUpdateMetadata,
+        { slug: "life", description: "Life notes.", tags: ["life", "life"] },
+        "domainsUpdateMetadata",
+      ],
+      [
+        IPC_CHANNELS.requests.domainsUpdateMetadata,
+        { slug: "life", description: "Life notes.", tags: [], extra: true },
+        "domainsUpdateMetadata",
+      ],
       [IPC_CHANNELS.requests.domainsRemove, { slug: "../life" }, "domainsRemove"],
     ] as const
 
@@ -1037,6 +1063,11 @@ describe("secure publisher IPC", () => {
         IPC_CHANNELS.requests.domainsRename,
         { slug: "life", name: "Life", extra: true },
         "domainsRename",
+      ],
+      [
+        IPC_CHANNELS.requests.domainsUpdateMetadata,
+        { slug: "life", description: "Life notes. ", tags: ["life"] },
+        "domainsUpdateMetadata",
       ],
       [IPC_CHANNELS.requests.domainsRemove, { slug: "private" }, "domainsRemove"],
       [IPC_CHANNELS.requests.notesList, {}, "notesList"],

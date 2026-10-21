@@ -24,6 +24,7 @@ import type {
   DomainRenameRequest,
   DomainSlug,
   DomainSummary,
+  DomainUpdateMetadataRequest,
   SerializableValue,
   TrashAdapter,
 } from "../../shared/contracts"
@@ -34,6 +35,7 @@ import {
   domainRenameSchema,
   domainSlugSchema,
   domainSummarySchema,
+  domainUpdateMetadataSchema,
 } from "../../shared/ipcSchemas"
 
 const LEGACY_DOMAIN_ORDER = Number.MAX_SAFE_INTEGER
@@ -180,6 +182,7 @@ export interface DomainCatalog {
   require(slug: DomainSlug): Promise<DomainSummary>
   create(request: DomainCreateRequest): Promise<readonly DomainSummary[]>
   rename(request: DomainRenameRequest): Promise<readonly DomainSummary[]>
+  updateMetadata(request: DomainUpdateMetadataRequest): Promise<readonly DomainSummary[]>
   remove(request: DomainRemoveRequest): Promise<readonly DomainSummary[]>
   assertIdle(): Promise<void>
   dispose(): Promise<void>
@@ -204,6 +207,7 @@ interface DomainCatalogFileSystem {
 
 interface DomainCatalogHooks {
   readonly afterRenameRead?: (path: string) => Promise<void> | void
+  readonly afterUpdateMetadataRead?: (path: string) => Promise<void> | void
   readonly afterRemoveInspection?: (path: string) => Promise<void> | void
 }
 
@@ -671,6 +675,33 @@ function replaceTitleScalar(source: string, title: string, path: string): string
   return `${source.slice(0, yamlStart + start)}${replacement}${source.slice(yamlStart + end)}`
 }
 
+function replaceDomainMetadata(
+  source: string,
+  description: string,
+  tags: readonly string[],
+  path: string,
+): string {
+  const opening = /^(?:\uFEFF)?---[ \t]*(?:(?:yaml|yml)[ \t]*)?\r?\n/i.exec(source)
+  if (opening === null) throw invalidMetadata(path)
+  const yamlStart = opening[0].length
+  const closing = /(?:^|\r?\n)---[ \t]*(?:\r?\n|$)/.exec(source.slice(yamlStart))
+  if (closing === null) throw invalidMetadata(path)
+  const delimiterPrefix = /^(?:\r\n|\n)/.exec(closing[0])?.[0] ?? ""
+  const yamlEnd = yamlStart + closing.index + delimiterPrefix.length
+  const yaml = source.slice(yamlStart, yamlEnd)
+  const document = parseDocument(yaml, { keepSourceTokens: true })
+  if (document.errors.length > 0 || !isMap(document.contents)) throw invalidMetadata(path)
+
+  if (description === "") document.delete("description")
+  else document.set("description", description)
+  if (tags.length === 0) document.delete("tags")
+  else document.set("tags", [...tags])
+
+  const lineEnding = opening[0].includes("\r\n") ? "\r\n" : "\n"
+  const updatedYaml = document.toString({ lineWidth: 0 }).replaceAll("\n", lineEnding)
+  return `${source.slice(0, yamlStart)}${updatedYaml}${source.slice(yamlEnd)}`
+}
+
 function preclassifyGardenDomain(source: string): GardenDomainMarker {
   const frontmatter = grayMatterYamlBlock(source)
   if (frontmatter === undefined) return "absent"
@@ -709,6 +740,7 @@ function parseDomainPage(
       readonly slug: DomainSlug
       readonly name: string
       readonly description: string
+      readonly tags: readonly string[]
       readonly order: number
       readonly hasExplicitOrder: boolean
     }
@@ -733,7 +765,10 @@ function parseDomainPage(
 
   const parsedSlug = domainSlugSchema.safeParse(slug)
   const parsedName = domainNameSchema.safeParse(data.title)
-  const parsedDescription = domainSummarySchema.shape.description.safeParse(data.description)
+  const parsedDescription = domainSummarySchema.shape.description.safeParse(
+    data.description == null ? "" : data.description,
+  )
+  const parsedTags = domainSummarySchema.shape.tags.safeParse(data.tags == null ? [] : data.tags)
   const hasExplicitOrder = data.domainOrder !== undefined
   const parsedOrder = domainSummarySchema.shape.order.safeParse(
     hasExplicitOrder ? data.domainOrder : LEGACY_DOMAIN_ORDER,
@@ -742,6 +777,7 @@ function parseDomainPage(
     !parsedSlug.success ||
     !parsedName.success ||
     !parsedDescription.success ||
+    !parsedTags.success ||
     !parsedOrder.success
   ) {
     throw invalidMetadata(page.path)
@@ -751,6 +787,7 @@ function parseDomainPage(
     slug: parsedSlug.data,
     name: parsedName.data,
     description: parsedDescription.data,
+    tags: parsedTags.data,
     order: parsedOrder.data,
     hasExplicitOrder,
   }
@@ -954,7 +991,7 @@ async function discoverDomainScan(
       slug: metadata.slug,
       name: metadata.name,
       description: metadata.description,
-      tags: [],
+      tags: metadata.tags,
       order: metadata.order,
       publicNotes,
       privateNotes,
@@ -2834,6 +2871,50 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
     return discoverDomains(canonical.directory)
   }
 
+  async function updateDomainMetadata(
+    request: DomainUpdateMetadataRequest,
+  ): Promise<readonly DomainSummary[]> {
+    const input = domainUpdateMetadataSchema.parse(request)
+    const canonical = await canonicalWorkspace(options.workspace)
+    const content = await canonicalManagedRoot(canonical.directory, "content")
+    const privateRoot = await canonicalManagedRoot(canonical.directory, "private")
+    const domains = await discoverDomains(canonical.directory)
+    const domain = domains.find((candidate) => candidate.slug === input.slug)
+    if (!domain) {
+      throw catalogError("DOMAIN_NOT_FOUND", "The requested domain does not exist.", {
+        slug: input.slug,
+      })
+    }
+    const directory = await canonicalDirectory(
+      canonical.directory,
+      content,
+      resolve(content.directory, input.slug),
+      false,
+    )
+    if (directory === undefined) {
+      throw catalogError("DOMAIN_NOT_FOUND", "The requested domain does not exist.", {
+        slug: input.slug,
+      })
+    }
+    const page = await readDomainPage(canonical.directory, content, directory, {})
+    const metadata = page === undefined ? undefined : parseDomainPage(page, input.slug)
+    if (page === undefined || metadata === undefined) {
+      throw catalogError("DOMAIN_NOT_FOUND", "The requested domain does not exist.", {
+        slug: input.slug,
+      })
+    }
+    const updated = replaceDomainMetadata(page.source, input.description, input.tags, page.path)
+    await options.hooks?.afterUpdateMetadataRead?.(page.path)
+    await durableRenamePage(
+      canonical.directory,
+      [canonical, content, privateRoot],
+      page,
+      Buffer.from(updated, "utf8"),
+      metadata.name,
+    )
+    return discoverDomains(canonical.directory)
+  }
+
   async function ensureTransactionParent(
     workspace: string,
     parent: string,
@@ -3430,6 +3511,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
       }),
     create: (request) => mutation(() => create(request)),
     rename: (request) => mutation(() => renameDomain(request)),
+    updateMetadata: (request) => mutation(() => updateDomainMetadata(request)),
     remove: (request) => mutation(() => removeDomain(request)),
     assertIdle: async () => {
       if (disposed || blocked !== undefined) throw unavailable()

@@ -313,6 +313,63 @@ describe("discoverDomains", () => {
     for (const domain of domains) expect(domainSummarySchema.safeParse(domain).success).toBe(true)
   })
 
+  it("defaults missing, null, and blank domain metadata while preserving valid values", async () => {
+    const root = await createGarden()
+    await Promise.all([
+      writeFixture(
+        root,
+        "content/missing/index.md",
+        "---\ngardenDomain: true\ntitle: Missing\ndomainOrder: 1\n---\n",
+      ),
+      writeFixture(
+        root,
+        "content/null/index.md",
+        "---\ngardenDomain: true\ntitle: Null metadata\ndescription: null\ntags: null\ndomainOrder: 2\n---\n",
+      ),
+      writeFixture(
+        root,
+        "content/blank/index.md",
+        "---\ngardenDomain: true\ntitle: Blank\ndescription:\ntags:\ndomainOrder: 3\n---\n",
+      ),
+      writeFixture(
+        root,
+        "content/valid/index.md",
+        "---\ngardenDomain: true\ntitle: Valid\ndescription: Models and systems.\ntags: [ai, machine-learning]\ndomainOrder: 4\n---\n",
+      ),
+    ])
+
+    await expect(discoverDomains(root)).resolves.toMatchObject([
+      { slug: "missing", description: "", tags: [] },
+      { slug: "null", description: "", tags: [] },
+      { slug: "blank", description: "", tags: [] },
+      {
+        slug: "valid",
+        description: "Models and systems.",
+        tags: ["ai", "machine-learning"],
+      },
+    ])
+  })
+
+  it.each([
+    ["numeric description", "description: 42"],
+    ["padded description", "description: ' padded'"],
+    ["scalar tags", "tags: ai"],
+    ["padded tag", "tags: [' ai']"],
+    ["duplicate tags", "tags: [ai, ai]"],
+  ])("rejects %s in marked domain metadata", async (_label, metadata) => {
+    const root = await createGarden()
+    await writeFixture(
+      root,
+      "content/broken/index.md",
+      ["---", "gardenDomain: true", "title: Broken", metadata, "domainOrder: 1", "---"].join("\n"),
+    )
+
+    await expect(discoverDomains(root)).rejects.toMatchObject({
+      code: "DOMAIN_METADATA_INVALID",
+      details: { path: "content/broken/index.md" },
+    })
+  })
+
   it.each([
     ["blank title", "title: '" + "'\ndescription: Description.\ndomainOrder: 0"],
     ["non-string description", "title: Domain\ndescription: 42\ndomainOrder: 0"],
@@ -719,7 +776,7 @@ describe("DomainCatalog.create", () => {
       slug: "artificial-intelligence",
       name: "人工智能",
       description: "人工智能领域的学习记录。",
-      tags: [],
+      tags: ["artificial-intelligence"],
       order: 5,
       publicNotes: 0,
       privateNotes: 0,
@@ -2190,6 +2247,189 @@ describe("DomainCatalog.rename", () => {
     await expect(catalog.dispose()).rejects.toMatchObject({
       code: "DOMAIN_ROLLBACK_UNCERTAIN",
     })
+  })
+})
+
+describe("DomainCatalog.updateMetadata", () => {
+  it("updates description and tags while preserving unrelated frontmatter and the body", async () => {
+    const root = await createGarden()
+    const source = [
+      "---",
+      "# keep this comment",
+      "title: 'Artificial Intelligence'",
+      "description: Old description.",
+      "tags: [old]",
+      "gardenDomain: true",
+      "domainOrder: 3",
+      "custom:",
+      "  pinned: true",
+      "---",
+      "",
+      "## Keep this body",
+      "",
+      "Body text.",
+      "",
+    ].join("\r\n")
+    const index = join(root, "content", "ai", "index.md")
+    await writeFixture(root, "content/ai/index.md", source)
+    const catalog = createDomainCatalog({
+      workspace: root,
+      trash: { trashItem: async () => undefined },
+    })
+
+    const domains = await catalog.updateMetadata({
+      slug: "ai",
+      description: "Models and systems.",
+      tags: ["ai", "machine-learning"],
+    })
+
+    expect(domains).toMatchObject([
+      { slug: "ai", description: "Models and systems.", tags: ["ai", "machine-learning"] },
+    ])
+    const updatedSource = await readFile(index, "utf8")
+    const before = matter(source)
+    const after = matter(updatedSource)
+    expect(after.data).toEqual({
+      ...before.data,
+      description: "Models and systems.",
+      tags: ["ai", "machine-learning"],
+    })
+    expect(after.content).toBe(before.content)
+    expect(updatedSource).toContain("# keep this comment\r\n")
+    expect(updatedSource).not.toMatch(/(?<!\r)\n/)
+  })
+
+  it("removes empty description and tags keys without changing the body", async () => {
+    const root = await createGarden()
+    const source = `${domainPage("AI", "Old description.", 1).replace(
+      "description: Old description.",
+      "description: Old description.\ntags: [old]",
+    )}\nBody without a final newline`
+    const index = join(root, "content", "ai", "index.md")
+    await writeFixture(root, "content/ai/index.md", source)
+    const catalog = createDomainCatalog({
+      workspace: root,
+      trash: { trashItem: async () => undefined },
+    })
+
+    await expect(
+      catalog.updateMetadata({ slug: "ai", description: "", tags: [] }),
+    ).resolves.toMatchObject([{ slug: "ai", description: "", tags: [] }])
+
+    const updatedSource = await readFile(index, "utf8")
+    expect(matter(updatedSource).data).not.toHaveProperty("description")
+    expect(matter(updatedSource).data).not.toHaveProperty("tags")
+    expect(rawFrontmatterBody(updatedSource)).toBe(rawFrontmatterBody(source))
+  })
+
+  it("rejects an external landing-page edit after its safe read", async () => {
+    const root = await createGarden()
+    const source = domainPage("AI", "Old description.", 1)
+    const external = `${domainPage("External", "External edit.", 1)}\nKeep this edit`
+    const index = join(root, "content", "ai", "index.md")
+    await writeFixture(root, "content/ai/index.md", source)
+    const catalog = createDomainCatalog({
+      workspace: root,
+      trash: { trashItem: async () => undefined },
+      hooks: { afterUpdateMetadataRead: () => writeFile(index, external) },
+    })
+
+    await expect(
+      catalog.updateMetadata({ slug: "ai", description: "New.", tags: ["new"] }),
+    ).rejects.toMatchObject({ code: "DOMAIN_UNSAFE_PATH" })
+    await expect(readFile(index, "utf8")).resolves.toBe(external)
+  })
+
+  it("rejects a landing-page path swap and preserves the replacement", async () => {
+    const root = await createGarden()
+    const source = domainPage("AI", "Old description.", 1)
+    const replacement = `${domainPage("Replacement", "Replacement edit.", 1)}\nKeep replacement`
+    const index = join(root, "content", "ai", "index.md")
+    const displaced = join(root, "content", "ai", "displaced.md")
+    await writeFixture(root, "content/ai/index.md", source)
+    const catalog = createDomainCatalog({
+      workspace: root,
+      trash: { trashItem: async () => undefined },
+      hooks: {
+        afterUpdateMetadataRead: async () => {
+          await rename(index, displaced)
+          await writeFile(index, replacement)
+        },
+      },
+    })
+
+    await expect(
+      catalog.updateMetadata({ slug: "ai", description: "New.", tags: ["new"] }),
+    ).rejects.toMatchObject({ code: "DOMAIN_UNSAFE_PATH" })
+    await expect(readFile(index, "utf8")).resolves.toBe(replacement)
+    await expect(readFile(displaced, "utf8")).resolves.toBe(source)
+  })
+
+  it("rolls back when atomic replacement reports a failure after publication", async () => {
+    const root = await createGarden()
+    const source = domainPage("AI", "Old description.", 1)
+    const index = join(root, "content", "ai", "index.md")
+    await writeFixture(root, "content/ai/index.md", source)
+    const catalog = createDomainCatalog({
+      workspace: root,
+      trash: { trashItem: async () => undefined },
+      fileSystem: {
+        replaceFile: async (replacement, replaced, backup) => {
+          await fakeAtomicReplaceWithBackup(replacement, replaced, backup)
+          throw new Error("simulated replacement failure")
+        },
+      },
+    })
+
+    await expect(
+      catalog.updateMetadata({ slug: "ai", description: "New.", tags: ["new"] }),
+    ).rejects.toThrow("simulated replacement failure")
+    await expect(readFile(index, "utf8")).resolves.toBe(source)
+    await expect(catalog.assertIdle()).resolves.toBeUndefined()
+  })
+
+  it("serializes metadata updates against rename mutations", async () => {
+    const root = await createGarden()
+    await writeFixture(root, "content/ai/index.md", domainPage("AI", "Old description.", 1))
+    let release!: () => void
+    const paused = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let updateRead = false
+    const catalog = createDomainCatalog({
+      workspace: root,
+      trash: { trashItem: async () => undefined },
+      hooks: {
+        afterUpdateMetadataRead: async () => {
+          updateRead = true
+          await paused
+        },
+      },
+    })
+
+    const update = catalog.updateMetadata({
+      slug: "ai",
+      description: "New description.",
+      tags: ["new"],
+    })
+    while (!updateRead) await new Promise((resolve) => setTimeout(resolve, 0))
+    let renameSettled = false
+    const renameResult = catalog.rename({ slug: "ai", name: "Intelligence" }).finally(() => {
+      renameSettled = true
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(renameSettled).toBe(false)
+
+    release()
+    await expect(Promise.all([update, renameResult])).resolves.toBeDefined()
+    await expect(catalog.list()).resolves.toMatchObject([
+      {
+        slug: "ai",
+        name: "Intelligence",
+        description: "New description.",
+        tags: ["new"],
+      },
+    ])
   })
 })
 
