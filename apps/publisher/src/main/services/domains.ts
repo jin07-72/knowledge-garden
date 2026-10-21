@@ -2547,13 +2547,16 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
     }
 
     const cleanupCreatedTransactionParents = async (): Promise<void> => {
-      if (!operationOptions.cleanupCreatedTransactionParents || !transactionRemoved) return
+      if (!operationOptions.cleanupCreatedTransactionParents) return
+      if (transactionIdentity !== undefined && !transactionRemoved) return
       if (transactionsCreated && transactionsIdentity !== undefined) {
         await removeOwnedEmptyDirectory(transactions, transactionsIdentity)
+        transactionsCreated = false
         await syncDirectory(state, openFile)
       }
       if (stateCreated && stateIdentity !== undefined) {
         await removeOwnedEmptyDirectory(state, stateIdentity)
+        stateCreated = false
         await syncDirectory(workspace, openFile)
       }
     }

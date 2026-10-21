@@ -2502,6 +2502,80 @@ describe("DomainCatalog.updateMetadata", () => {
     await expect(readdir(transactions)).resolves.toEqual([])
   })
 
+  it("removes a newly-created state directory when transaction-parent creation fails", async () => {
+    const root = await createGarden()
+    const state = join(root, ".garden-publisher")
+    const transactions = join(state, "domain-rename-transactions")
+    await writeFixture(root, "content/ai/index.md", domainPage("AI", "Old description.", 1))
+    const catalog = createDomainCatalog({
+      workspace: root,
+      trash: { trashItem: async () => undefined },
+      fileSystem: {
+        mkdir: (async (path: string, options?: { readonly mode?: number }) => {
+          if (path === transactions) throw new Error("simulated transaction-parent failure")
+          return mkdir(path, options)
+        }) as typeof mkdir,
+      },
+    })
+
+    await expect(
+      catalog.updateMetadata({ slug: "ai", description: "New.", tags: ["new"] }),
+    ).rejects.toThrow("simulated transaction-parent failure")
+    await expect(lstat(state)).rejects.toMatchObject({ code: "ENOENT" })
+  })
+
+  it("removes newly-created parents when operation-directory creation fails", async () => {
+    const root = await createGarden()
+    const state = join(root, ".garden-publisher")
+    const transactions = join(state, "domain-rename-transactions")
+    await writeFixture(root, "content/ai/index.md", domainPage("AI", "Old description.", 1))
+    const catalog = createDomainCatalog({
+      workspace: root,
+      trash: { trashItem: async () => undefined },
+      fileSystem: {
+        mkdir: (async (path: string, options?: { readonly mode?: number }) => {
+          if (dirname(path) === transactions)
+            throw new Error("simulated operation-directory failure")
+          return mkdir(path, options)
+        }) as typeof mkdir,
+      },
+    })
+
+    await expect(
+      catalog.updateMetadata({ slug: "ai", description: "New.", tags: ["new"] }),
+    ).rejects.toThrow("simulated operation-directory failure")
+    await expect(lstat(state)).rejects.toMatchObject({ code: "ENOENT" })
+  })
+
+  it("preserves a pre-existing state directory while removing its newly-created transaction parent", async () => {
+    const root = await createGarden()
+    const state = join(root, ".garden-publisher")
+    const transactions = join(state, "domain-rename-transactions")
+    const marker = join(state, "keep.txt")
+    await Promise.all([
+      writeFixture(root, "content/ai/index.md", domainPage("AI", "Old description.", 1)),
+      writeFixture(root, ".garden-publisher/keep.txt", "keep"),
+    ])
+    const catalog = createDomainCatalog({
+      workspace: root,
+      trash: { trashItem: async () => undefined },
+      fileSystem: {
+        mkdir: (async (path: string, options?: { readonly mode?: number }) => {
+          if (dirname(path) === transactions)
+            throw new Error("simulated operation-directory failure")
+          return mkdir(path, options)
+        }) as typeof mkdir,
+      },
+    })
+
+    await expect(
+      catalog.updateMetadata({ slug: "ai", description: "New.", tags: ["new"] }),
+    ).rejects.toThrow("simulated operation-directory failure")
+    expect((await lstat(state)).isDirectory()).toBe(true)
+    await expect(lstat(transactions)).rejects.toMatchObject({ code: "ENOENT" })
+    await expect(readFile(marker, "utf8")).resolves.toBe("keep")
+  })
+
   it("does not change note, private, or attachment directories", async () => {
     const root = await createGarden()
     await Promise.all([
