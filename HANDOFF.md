@@ -1,6 +1,6 @@
 # Knowledge Garden Handoff
 
-更新时间：2026-10-21 01:18（Asia/Shanghai）
+更新时间：2026-10-21 21:53（Asia/Shanghai）
 
 本文档用于在 DeepSeek Harness 临时接管结束后，让 Codex 不依赖完整聊天记录也能理解当前状态。
 
@@ -10,7 +10,6 @@
 - 当前发布器源码版本：`0.1.5`
 - 当前发布器版本提交：见 `codex/editable-domain-metadata` 当前 HEAD（不在文档内嵌 SHA，避免 amend 后失效）
 - `0.1.5` 仍处于发布准备状态：尚未打包、安装、合并或推送；正式安装目录仍是 `0.1.4`。
-- 此前 `0.1.4` 的代码修改已合并到本地 `main`，并推送到 `origin/main` 和 `publisher/main`。
 - 工作区仍保留用户原有的 `highlight.js` 依赖修改和 `.tmp-render-check.png`，未纳入本次提交。
 
 ## 1. 项目目标
@@ -159,6 +158,8 @@ Knowledge Garden 是一个公开的个人知识花园：
 | `apps/publisher/src/main/services/domains.ts`                      | 原子更新领域入口页描述和标签，保留其余 frontmatter 与正文                                  |
 | `apps/publisher/src/renderer/src/components/DomainManager.tsx`     | 编辑、清空并展示领域描述和标签                                                             |
 | `apps/publisher/tests/e2e/app.spec.ts`                             | 覆盖填写、清空、重启持久化及笔记/private 隔离                                              |
+| `apps/publisher/tests/e2e/globalSetup.ts`                          | 为每次 E2E 运行创建并清理工作树内隔离临时目录                                              |
+| `apps/publisher/playwright.config.ts`                              | 自动启用 E2E 全局临时目录生命周期                                                          |
 | `apps/publisher/package.json`、`package-lock.json`                 | 发布器 patch 版本更新为 `0.1.5`                                                            |
 
 ## 5. 验证结果
@@ -170,8 +171,8 @@ Knowledge Garden 是一个公开的个人知识花园：
 - 本次对变更文件执行 Prettier：通过。
 - 本次 `git diff --check`：通过。
 - 本次 `npm run build`：通过（仅生成已忽略的 `apps/publisher/out/`，未打包或安装）。
-- 本次定向 Electron E2E：将 `TEMP` / `TMP` 指向工作树内已忽略的 `apps/publisher/.garden-publisher/e2e-temp` 后，`npm run test:e2e -- --grep "manages custom domains"` 为 `1 passed`；对照测试 `--grep "recovers a corrupt registry"` 也为 `1 passed`。
-- E2E 启动诊断：本机原始 Electron 44.4.2 在 Chromium Windows sandbox 初始化时以 `0x80000003` 退出，且 Codex 运行边界外的系统临时目录对 Electron 写入返回 `EPERM`。测试启动器仅在 Windows E2E 进程加入 `--no-sandbox`，并使用工作树内临时目录；正式打包应用的 sandbox 配置未修改。
+- 本次定向 Electron E2E 使用普通命令运行：`npm run test:e2e -- --grep "manages custom domains"` 为 `1 passed`；对照测试 `npm run test:e2e -- --grep "recovers a corrupt registry"` 也为 `1 passed`。Playwright 全局设置会自动为每次运行创建唯一的工作树内 `TEMP` / `TMP`，并在全局 teardown 中校验路径后清理，无需 shell 预设。
+- E2E 启动诊断：本机原始 Electron 44.4.2 在 Chromium Windows sandbox 初始化时以 `0x80000003` 退出，且 Codex 运行边界外的系统临时目录对 Electron 写入返回 `EPERM`。测试启动器仅在 Windows E2E 进程加入 `--no-sandbox`；正式打包应用的 sandbox 配置未修改。
 
 - 完整 `noteTransactions.test.ts`：`102 passed`
 - 完整 `publish.test.ts`：`58 passed, 1 skipped`
@@ -190,7 +191,7 @@ Knowledge Garden 是一个公开的个人知识花园：
 
 尚未完成：
 
-- `0.1.5` 尚未打包或安装，也尚未合并、推送；这些步骤由后续发布操作完成。
+- `0.1.5` 尚未打包或安装，也尚未合并、推送；发布前必须完成这些步骤并核验正式安装版本。
 
 ## 6. 本机运行方式
 
@@ -202,22 +203,22 @@ Knowledge Garden 是一个公开的个人知识花园：
 
 ## 7. 尚未解决的问题
 
-1. Electron E2E 仍需复测。
-2. 非限定 WikiLink 在跨领域 slug 冲突时会保留而不是猜测目标；极端情况下仍可能被严格链接检查阻挡。
-3. 外部浏览器自身缓存无法由应用清除；应用只能清理 Electron 会话缓存，外部浏览器仍需强制刷新。
+1. 非限定 WikiLink 在跨领域 slug 冲突时会保留而不是猜测目标；极端情况下仍可能被严格链接检查阻挡。
+2. 外部浏览器自身缓存无法由应用清除；应用只能清理 Electron 会话缓存，外部浏览器仍需强制刷新。
 
 ## 8. 建议下一步
 
-1. 在正常桌面环境运行完整测试和 Electron E2E。
-2. 用真实博客再验证一次：
+1. 完成 `0.1.5` 打包、正式安装、合并与推送，并核对安装目录中的版本和可执行文件哈希。
+2. 如需扩大覆盖，可在正常桌面环境运行完整 Electron E2E；本次两个定向场景已经通过。
+3. 用真实博客再验证一次：
    - 私密→公开并发布，确认线上新增。
    - 公开→私密并发布，确认线上 404 和入站链接自动清理。
    - 软件“线上公开站”刷新后显示最新内容。
-3. 保留并最终由用户决定如何处理 `highlight.js` 和 `.tmp-render-check.png`。
+4. 保留并最终由用户决定如何处理 `highlight.js` 和 `.tmp-render-check.png`。
 
 ## 9. 给 Codex 的注意事项
 
-- 本次代码修改已合并并推送，不要重复合并或回退。
+- `0.1.5` 发布准备修改仍在 `codex/editable-domain-metadata`，尚未合并或推送；后续必须完成合并、打包安装和推送。
 - 不要丢弃工作区中的 `apps/publisher/package*.json` 修改和 `.tmp-render-check.png`。
 - 用户要求本次发布保留现有自动清理入站 WikiLink 行为，不在通用线上地址修复中改动它。
 - 自动清理只处理公开 Markdown 中指向本次转私密笔记的 WikiLink；不要扩大到私有 Markdown、代码块或无关链接。
