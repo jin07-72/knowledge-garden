@@ -2252,6 +2252,48 @@ describe("DomainCatalog.rename", () => {
 })
 
 describe("DomainCatalog.updateMetadata", () => {
+  it("does not rewrite a page whose normalized metadata already matches", async () => {
+    const root = await createGarden()
+    const source = domainPage("AI", "Models and systems.", 1).replace(
+      "description: Models and systems.",
+      "description: Models and systems.\ntags: [ai, machine-learning]",
+    )
+    const index = join(root, "content", "ai", "index.md")
+    await writeFixture(root, "content/ai/index.md", source)
+    const catalog = createDomainCatalog({
+      workspace: root,
+      trash: { trashItem: async () => undefined },
+    })
+    const before = await lstat(index, { bigint: true })
+
+    await expect(
+      catalog.updateMetadata({
+        slug: "ai",
+        description: "Models and systems.",
+        tags: ["ai", "machine-learning"],
+      }),
+    ).resolves.toMatchObject([
+      { slug: "ai", description: "Models and systems.", tags: ["ai", "machine-learning"] },
+    ])
+
+    await expect(readFile(index, "utf8")).resolves.toBe(source)
+    const after = await lstat(index, { bigint: true })
+    expect({
+      dev: after.dev,
+      ino: after.ino,
+      size: after.size,
+      mtimeNs: after.mtimeNs,
+      ctimeNs: after.ctimeNs,
+    }).toEqual({
+      dev: before.dev,
+      ino: before.ino,
+      size: before.size,
+      mtimeNs: before.mtimeNs,
+      ctimeNs: before.ctimeNs,
+    })
+    await expect(lstat(join(root, ".garden-publisher"))).rejects.toMatchObject({ code: "ENOENT" })
+  })
+
   it("updates description and tags while preserving unrelated frontmatter and the body", async () => {
     const root = await createGarden()
     const source = [
@@ -2298,6 +2340,31 @@ describe("DomainCatalog.updateMetadata", () => {
     expect(after.content).toBe(before.content)
     expect(updatedSource).toContain("# keep this comment\r\n")
     expect(updatedSource).not.toMatch(/(?<!\r)\n/)
+  })
+
+  it("records metadata operation intent in the backward-compatible replacement journal", async () => {
+    const root = await createGarden()
+    await writeFixture(root, "content/ai/index.md", domainPage("AI", "Old description.", 1))
+    let journalOperation: unknown
+    const catalog = createDomainCatalog({
+      workspace: root,
+      trash: { trashItem: async () => undefined },
+      fileSystem: {
+        replaceFile: async (replacement, replaced, backup) => {
+          const transactions = join(root, ".garden-publisher", "domain-rename-transactions")
+          const [transactionId] = await readdir(transactions)
+          const journal = JSON.parse(
+            await readFile(join(transactions, transactionId, "journal.json"), "utf8"),
+          ) as { readonly operation?: unknown }
+          journalOperation = journal.operation
+          await fakeAtomicReplaceWithBackup(replacement, replaced, backup)
+        },
+      },
+    })
+
+    await catalog.updateMetadata({ slug: "ai", description: "New.", tags: ["new"] })
+
+    expect(journalOperation).toBe("metadata")
   })
 
   it("removes empty description and tags keys without changing the body", async () => {

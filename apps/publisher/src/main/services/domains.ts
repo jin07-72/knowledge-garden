@@ -39,7 +39,8 @@ import {
 } from "../../shared/ipcSchemas"
 
 const LEGACY_DOMAIN_ORDER = Number.MAX_SAFE_INTEGER
-const DOMAIN_RENAME_TRANSACTION_DIRECTORY = "domain-rename-transactions"
+// This directory name and the v1 journal shape below are persisted compatibility contracts.
+const LEGACY_DOMAIN_PAGE_REPLACEMENT_TRANSACTION_DIRECTORY = "domain-rename-transactions"
 const TRANSACTION_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
@@ -97,28 +98,29 @@ interface SerializedFileIdentity {
   readonly ctimeNs: string
 }
 
-interface DomainRenameEvidence {
+interface DomainPageReplacementEvidence {
   readonly identity: SerializedFileIdentity
   readonly contentHash: string
 }
 
-type DomainRenamePhase = "prepared" | "quarantined" | "published"
+type DomainPageReplacementPhase = "prepared" | "quarantined" | "published"
 
-interface DomainRenameJournal {
+interface DomainPageReplacementJournal {
   readonly version: 1
   readonly id: string
-  readonly phase: DomainRenamePhase
+  readonly operation?: DomainPageReplacementOperation
+  readonly phase: DomainPageReplacementPhase
   readonly target: string
   readonly temporary: string
   readonly backup: string
   readonly quarantine: string
   readonly intendedTitle: string
-  readonly original: DomainRenameEvidence
-  readonly published: DomainRenameEvidence
+  readonly original: DomainPageReplacementEvidence
+  readonly published: DomainPageReplacementEvidence
 }
 
-interface DomainRenameJournalRecord {
-  readonly journal: DomainRenameJournal
+interface DomainPageReplacementJournalRecord {
+  readonly journal: DomainPageReplacementJournal
   readonly directory: string
   readonly directoryIdentity: string
   readonly transactions: string
@@ -212,7 +214,10 @@ interface DomainCatalogHooks {
   readonly afterRemoveInspection?: (path: string) => Promise<void> | void
 }
 
-interface DurableRenamePageOptions {
+type DomainPageReplacementOperation = "rename" | "metadata"
+
+interface DurableDomainPageReplacementOptions {
+  readonly operation: DomainPageReplacementOperation
   readonly beforeCommit?: () => Promise<void>
   readonly cleanupCreatedTransactionParents?: boolean
 }
@@ -327,13 +332,13 @@ function contentHash(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex")
 }
 
-function renameEvidence(identity: FileIdentity, bytes: Buffer): DomainRenameEvidence {
+function replacementEvidence(identity: FileIdentity, bytes: Buffer): DomainPageReplacementEvidence {
   return { identity: serializeFileIdentity(identity), contentHash: contentHash(bytes) }
 }
 
-function matchesRenameEvidence(
+function matchesReplacementEvidence(
   file: { readonly bytes: Buffer; readonly identity: FileIdentity },
-  evidence: DomainRenameEvidence,
+  evidence: DomainPageReplacementEvidence,
 ): boolean {
   return (
     file.identity.dev.toString() === evidence.identity.dev &&
@@ -352,7 +357,7 @@ function isSerializedFileIdentity(value: unknown): value is SerializedFileIdenti
   )
 }
 
-function isRenameEvidence(value: unknown): value is DomainRenameEvidence {
+function isReplacementEvidence(value: unknown): value is DomainPageReplacementEvidence {
   if (typeof value !== "object" || value === null) return false
   const evidence = value as Record<string, unknown>
   return (
@@ -1615,15 +1620,17 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
 
   pendingMutations += 1
   queue = trackAccepted(
-    recoverDomainRenameTransactions()
+    recoverDomainPageReplacementTransactions()
       .catch((error: unknown) => {
         blocked =
           error instanceof DomainCatalogError && error.code === "DOMAIN_ROLLBACK_UNCERTAIN"
             ? error
             : catalogError(
                 "DOMAIN_ROLLBACK_UNCERTAIN",
-                "An incomplete domain rename could not be recovered safely.",
-                { path: `.garden-publisher/${DOMAIN_RENAME_TRANSACTION_DIRECTORY}` },
+                "An incomplete domain page replacement could not be recovered safely.",
+                {
+                  path: `.garden-publisher/${LEGACY_DOMAIN_PAGE_REPLACEMENT_TRANSACTION_DIRECTORY}`,
+                },
                 error,
               )
       })
@@ -1878,11 +1885,11 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
     await unlink(path)
   }
 
-  function parseRenameJournal(
+  function parseReplacementJournal(
     workspace: string,
     transactionId: string,
     bytes: Buffer,
-  ): DomainRenameJournal | undefined {
+  ): DomainPageReplacementJournal | undefined {
     if (bytes.length > 64 * 1024) return undefined
     let value: unknown
     try {
@@ -1895,14 +1902,16 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
     if (
       journal.version !== 1 ||
       journal.id !== transactionId ||
+      (journal.operation !== undefined &&
+        !["rename", "metadata"].includes(String(journal.operation))) ||
       !["prepared", "quarantined", "published"].includes(String(journal.phase)) ||
       typeof journal.target !== "string" ||
       typeof journal.temporary !== "string" ||
       typeof journal.backup !== "string" ||
       typeof journal.quarantine !== "string" ||
       typeof journal.intendedTitle !== "string" ||
-      !isRenameEvidence(journal.original) ||
-      !isRenameEvidence(journal.published)
+      !isReplacementEvidence(journal.original) ||
+      !isReplacementEvidence(journal.published)
     ) {
       return undefined
     }
@@ -1929,17 +1938,17 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
     ) {
       return undefined
     }
-    return journal as unknown as DomainRenameJournal
+    return journal as unknown as DomainPageReplacementJournal
   }
 
-  async function readRenameJournalRecord(
+  async function readReplacementJournalRecord(
     workspace: string,
     transactions: string,
     transactionsIdentity: string,
     transaction: string,
     transactionIdentity: string,
     transactionId: string,
-  ): Promise<DomainRenameJournalRecord> {
+  ): Promise<DomainPageReplacementJournalRecord> {
     const entries = await readdir(transaction)
     const stagedEntries = entries.filter((entry) =>
       /^journal\.json\.tmp-[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
@@ -1951,7 +1960,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
       stagedEntries.length > 1 ||
       entries.length === 0
     ) {
-      throw new Error("Domain rename transaction contains unexpected entries")
+      throw new Error("Domain page replacement transaction contains unexpected entries")
     }
     const finalPath = resolve(transaction, "journal.json")
     const stagedPath =
@@ -1960,20 +1969,23 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
     const staged =
       stagedPath === undefined ? undefined : await readOwnedBytes(stagedPath, transaction)
     if (stagedPath !== undefined && staged === undefined) {
-      throw new Error("Domain rename staged journal is unsafe")
+      throw new Error("Domain page replacement staged journal is unsafe")
     }
     let current = final ?? staged
-    if (current === undefined) throw new Error("Domain rename journal is unsafe")
-    let journal = parseRenameJournal(workspace, transactionId, current.bytes)
-    if (journal === undefined) throw new Error("Domain rename journal is invalid")
+    if (current === undefined) throw new Error("Domain page replacement journal is unsafe")
+    let journal = parseReplacementJournal(workspace, transactionId, current.bytes)
+    if (journal === undefined) throw new Error("Domain page replacement journal is invalid")
     let selectedJournalPath = final === undefined ? stagedPath! : finalPath
     if (final !== undefined && staged !== undefined) {
-      const finalJournal = parseRenameJournal(workspace, transactionId, final.bytes)
-      const stagedJournal = parseRenameJournal(workspace, transactionId, staged.bytes)
+      const finalJournal = parseReplacementJournal(workspace, transactionId, final.bytes)
+      const stagedJournal = parseReplacementJournal(workspace, transactionId, staged.bytes)
       if (finalJournal === undefined || stagedJournal === undefined) {
-        throw new Error("Domain rename journal is invalid")
+        throw new Error("Domain page replacement journal is invalid")
       }
-      const sameEvidence = (left: DomainRenameEvidence, right: DomainRenameEvidence): boolean =>
+      const sameEvidence = (
+        left: DomainPageReplacementEvidence,
+        right: DomainPageReplacementEvidence,
+      ): boolean =>
         left.contentHash === right.contentHash &&
         left.identity.dev === right.identity.dev &&
         left.identity.ino === right.identity.ino &&
@@ -1982,6 +1994,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
         left.identity.ctimeNs === right.identity.ctimeNs
       const sameImmutableFields =
         finalJournal.id === stagedJournal.id &&
+        finalJournal.operation === stagedJournal.operation &&
         finalJournal.target === stagedJournal.target &&
         finalJournal.temporary === stagedJournal.temporary &&
         finalJournal.backup === stagedJournal.backup &&
@@ -1990,7 +2003,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
         sameEvidence(finalJournal.original, stagedJournal.original) &&
         sameEvidence(finalJournal.published, stagedJournal.published)
       if (!sameImmutableFields) {
-        throw new Error("Domain rename journal transition fields changed")
+        throw new Error("Domain page replacement journal transition fields changed")
       }
       const monotonic =
         (finalJournal.phase === "prepared" && stagedJournal.phase === "quarantined") ||
@@ -1998,7 +2011,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
         (finalJournal.phase === "quarantined" && stagedJournal.phase === "published")
       if (finalJournal.phase === stagedJournal.phase) {
         if (!final.bytes.equals(staged.bytes)) {
-          throw new Error("Domain rename journal publication is ambiguous")
+          throw new Error("Domain page replacement journal publication is ambiguous")
         }
         await removeOwnedFile(stagedPath!, transaction, staged.identity, staged.bytes)
       } else if (monotonic) {
@@ -2007,7 +2020,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
         journal = stagedJournal
         selectedJournalPath = stagedPath!
       } else {
-        throw new Error("Domain rename journal phase transition is invalid")
+        throw new Error("Domain page replacement journal phase transition is invalid")
       }
       await syncDirectory(transaction, openFile)
     }
@@ -2041,7 +2054,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
     return inodeIdentity(details)
   }
 
-  async function inspectRenameArtifact(
+  async function inspectReplacementArtifact(
     path: string,
     parent: string,
   ): Promise<
@@ -2049,18 +2062,20 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
   > {
     const file = await readOwnedBytes(path, parent)
     if (file === undefined && (await pathEntry(path)) !== undefined) {
-      throw new Error(`Domain rename artifact is unsafe: ${path}`)
+      throw new Error(`Domain page replacement artifact is unsafe: ${path}`)
     }
     return file
   }
 
-  async function recoverRenameJournal(
+  async function recoverReplacementJournal(
     canonical: CanonicalWorkspace,
     content: ManagedRoot,
     privateRoot: ManagedRoot,
-    record: DomainRenameJournalRecord,
+    record: DomainPageReplacementJournalRecord,
   ): Promise<"old" | "new"> {
     const workspace = canonical.directory
+    const operationLabel =
+      record.journal.operation === "metadata" ? "domain metadata update" : "domain rename"
     const boundaries = [canonical, content, privateRoot]
     const target = resolve(workspace, ...record.journal.target.split("/"))
     const parent = resolve(target, "..")
@@ -2092,27 +2107,27 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
         try {
           await verifyChain()
         } catch (chainError) {
-          throw new AggregateError([error, chainError], "Domain rename recovery chain changed")
+          throw new AggregateError([error, chainError], `${operationLabel} recovery chain changed`)
         }
         throw error
       }
     }
     const inspectAll = async () =>
       Promise.all([
-        inspectRenameArtifact(target, parent),
-        inspectRenameArtifact(temporary, parent),
-        inspectRenameArtifact(backup, parent),
-        inspectRenameArtifact(quarantine, parent),
+        inspectReplacementArtifact(target, parent),
+        inspectReplacementArtifact(temporary, parent),
+        inspectReplacementArtifact(backup, parent),
+        inspectReplacementArtifact(quarantine, parent),
       ])
 
     await verifyChain()
     let [targetFile, temporaryFile, backupFile, quarantineFile] = await inspectAll()
     const targetIsOld =
-      targetFile !== undefined && matchesRenameEvidence(targetFile, record.journal.original)
+      targetFile !== undefined && matchesReplacementEvidence(targetFile, record.journal.original)
     const targetIsNew =
-      targetFile !== undefined && matchesRenameEvidence(targetFile, record.journal.published)
+      targetFile !== undefined && matchesReplacementEvidence(targetFile, record.journal.published)
     if (targetFile !== undefined && !targetIsOld && !targetIsNew) {
-      throw new Error("Domain rename target contains unrecognized bytes")
+      throw new Error(`${operationLabel} target contains unrecognized bytes`)
     }
 
     let outcome: "old" | "new"
@@ -2126,7 +2141,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
       ].find(({ file, outcome: candidate }) =>
         file === undefined
           ? false
-          : matchesRenameEvidence(
+          : matchesReplacementEvidence(
               file,
               candidate === "old" ? record.journal.original : record.journal.published,
             ),
@@ -2134,7 +2149,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
       if (restorable === undefined) {
         if (quarantineFile !== undefined) {
           await guarded(() => linkEntry(quarantine, target))
-          const restored = await inspectRenameArtifact(target, parent)
+          const restored = await inspectReplacementArtifact(target, parent)
           if (
             restored === undefined ||
             restored.inode !== quarantineFile.inode ||
@@ -2144,27 +2159,27 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
           }
           await guarded(() => syncDirectory(parent, openFile))
         }
-        throw new Error("Domain rename recovery has no recognized target state")
+        throw new Error(`${operationLabel} recovery has no recognized target state`)
       }
       await guarded(() => linkEntry(restorable.path, target))
       await guarded(() => syncDirectory(parent, openFile))
-      targetFile = await inspectRenameArtifact(target, parent)
+      targetFile = await inspectReplacementArtifact(target, parent)
       if (
         targetFile === undefined ||
-        !matchesRenameEvidence(
+        !matchesReplacementEvidence(
           targetFile,
           restorable.outcome === "old" ? record.journal.original : record.journal.published,
         )
       ) {
-        throw new Error("Domain rename recovery publication could not be verified")
+        throw new Error(`${operationLabel} recovery publication could not be verified`)
       }
       outcome = restorable.outcome
     }
 
     const expectedTarget = outcome === "old" ? record.journal.original : record.journal.published
-    targetFile = await inspectRenameArtifact(target, parent)
-    if (targetFile === undefined || !matchesRenameEvidence(targetFile, expectedTarget)) {
-      throw new Error("Recovered domain rename target changed")
+    targetFile = await inspectReplacementArtifact(target, parent)
+    if (targetFile === undefined || !matchesReplacementEvidence(targetFile, expectedTarget)) {
+      throw new Error(`Recovered ${operationLabel} target changed`)
     }
 
     ;[, temporaryFile, backupFile, quarantineFile] = await inspectAll()
@@ -2175,16 +2190,16 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
     ]
     for (const artifact of artifacts) {
       if (artifact.file === undefined) continue
-      const current = await inspectRenameArtifact(artifact.path, parent)
-      if (current === undefined || !matchesRenameEvidence(current, artifact.evidence)) {
-        throw new Error("Domain rename recovery artifact changed")
+      const current = await inspectReplacementArtifact(artifact.path, parent)
+      if (current === undefined || !matchesReplacementEvidence(current, artifact.evidence)) {
+        throw new Error(`${operationLabel} recovery artifact changed`)
       }
       await guarded(() => removeOwnedFile(artifact.path, parent, current.identity, current.bytes))
     }
     await guarded(() => syncDirectory(parent, openFile))
-    targetFile = await inspectRenameArtifact(target, parent)
-    if (targetFile === undefined || !matchesRenameEvidence(targetFile, expectedTarget)) {
-      throw new Error("Recovered domain rename target changed during cleanup")
+    targetFile = await inspectReplacementArtifact(target, parent)
+    if (targetFile === undefined || !matchesReplacementEvidence(targetFile, expectedTarget)) {
+      throw new Error(`Recovered ${operationLabel} target changed during cleanup`)
     }
     const currentJournal = await readOwnedBytes(
       record.journalPath,
@@ -2196,7 +2211,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
       !sameFileIdentity(currentJournal.identity, record.journalIdentity) ||
       !currentJournal.bytes.equals(record.journalBytes)
     ) {
-      throw new Error("Domain rename journal changed during recovery")
+      throw new Error(`${operationLabel} journal changed during recovery`)
     }
     await guarded(() =>
       removeOwnedFile(
@@ -2215,7 +2230,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
       inodeIdentity(transactionDetails) !== record.directoryIdentity ||
       (await readdir(record.directory)).length !== 0
     ) {
-      throw new Error("Domain rename transaction cleanup is unsafe")
+      throw new Error(`${operationLabel} transaction cleanup is unsafe`)
     }
     await verifyChain()
     await rmdir(record.directory)
@@ -2230,7 +2245,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
     return outcome
   }
 
-  async function recoverDomainRenameTransactions(): Promise<void> {
+  async function recoverDomainPageReplacementTransactions(): Promise<void> {
     const canonical = await canonicalWorkspace(options.workspace)
     const content = await canonicalManagedRoot(canonical.directory, "content")
     const privateRoot = await canonicalManagedRoot(canonical.directory, "private")
@@ -2241,7 +2256,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
       state,
     )
     if (stateIdentity === undefined) return
-    const transactions = resolve(state, DOMAIN_RENAME_TRANSACTION_DIRECTORY)
+    const transactions = resolve(state, LEGACY_DOMAIN_PAGE_REPLACEMENT_TRANSACTION_DIRECTORY)
     const transactionsIdentity = await safeExistingDirectory(
       canonical.directory,
       state,
@@ -2249,14 +2264,14 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
     )
     if (transactionsIdentity === undefined) return
     const entries = await readdir(transactions, { withFileTypes: true })
-    if (entries.length > 64) throw new Error("Too many domain rename transactions")
+    if (entries.length > 64) throw new Error("Too many domain page replacement transactions")
     for (const entry of entries.sort((left, right) => compareText(left.name, right.name))) {
       if (
         !entry.isDirectory() ||
         entry.isSymbolicLink() ||
         !TRANSACTION_ID_PATTERN.test(entry.name)
       ) {
-        throw new Error("Domain rename transaction root contains an unsafe entry")
+        throw new Error("Domain page replacement transaction root contains an unsafe entry")
       }
       const transaction = resolve(transactions, entry.name)
       const transactionIdentity = await safeExistingDirectory(
@@ -2265,7 +2280,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
         transaction,
       )
       if (transactionIdentity === undefined) {
-        throw new Error("Domain rename transaction disappeared during recovery")
+        throw new Error("Domain page replacement transaction disappeared during recovery")
       }
       const transactionEntries = await readdir(transaction)
       if (transactionEntries.length === 0) {
@@ -2273,7 +2288,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
         await syncDirectory(transactions, openFile)
         continue
       }
-      const record = await readRenameJournalRecord(
+      const record = await readReplacementJournalRecord(
         canonical.directory,
         transactions,
         transactionsIdentity,
@@ -2281,12 +2296,12 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
         transactionIdentity,
         entry.name,
       )
-      await recoverRenameJournal(canonical, content, privateRoot, record)
+      await recoverReplacementJournal(canonical, content, privateRoot, record)
     }
     await revalidateMutationBoundaries(canonical.directory, [canonical, content, privateRoot])
   }
 
-  async function durableRenamePage(
+  async function durableReplaceDomainPage(
     workspace: string,
     boundaries: readonly { readonly directory: string; readonly identity: FileIdentity }[],
     page: {
@@ -2297,8 +2312,10 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
     },
     bytes: Buffer,
     intendedTitle: string,
-    operationOptions: DurableRenamePageOptions = {},
+    operationOptions: DurableDomainPageReplacementOptions,
   ): Promise<void> {
+    const operationLabel =
+      operationOptions.operation === "rename" ? "domain rename" : "domain metadata update"
     const target = resolve(workspace, ...page.path.split("/"))
     const parent = resolve(target, "..")
     const transactionId = uuid()
@@ -2306,7 +2323,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
     const backup = `${target}.backup-${transactionId}`
     const quarantine = `${target}.quarantine-${transactionId}`
     const state = resolve(workspace, ".garden-publisher")
-    const transactions = resolve(state, DOMAIN_RENAME_TRANSACTION_DIRECTORY)
+    const transactions = resolve(state, LEGACY_DOMAIN_PAGE_REPLACEMENT_TRANSACTION_DIRECTORY)
     const transaction = resolve(transactions, transactionId)
     const journalPath = resolve(transaction, "journal.json")
     const original = Buffer.from(page.source, "utf8")
@@ -2320,7 +2337,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
     let backupRemoved = false
     let quarantineContainsUnknown = false
     let stagedJournalForeign = false
-    let journal: DomainRenameJournal | undefined
+    let journal: DomainPageReplacementJournal | undefined
     let journalIdentity: FileIdentity | undefined
     let journalBytes: Buffer | undefined
     let transactionIdentity: string | undefined
@@ -2333,11 +2350,11 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
     let stagedJournalIdentity: FileIdentity | undefined
     let stagedJournalBytes: Buffer | undefined
 
-    const persistJournal = async (phase: DomainRenamePhase): Promise<void> => {
+    const persistJournal = async (phase: DomainPageReplacementPhase): Promise<void> => {
       if (journal === undefined || transactionIdentity === undefined) {
-        throw new Error("Domain rename journal is not prepared")
+        throw new Error(`${operationLabel} journal is not prepared`)
       }
-      const next: DomainRenameJournal = { ...journal, phase }
+      const next: DomainPageReplacementJournal = { ...journal, phase }
       const nextBytes = Buffer.from(`${JSON.stringify(next)}\n`, "utf8")
       const stagedJournal = `${journalPath}.tmp-${uuid()}`
       let journalHandle: DomainFileHandle | undefined
@@ -2356,7 +2373,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
         journalHandle = undefined
         if (stagedIdentity === undefined) {
           stagedJournalForeign = true
-          throw new Error("Domain rename staged journal ownership is unavailable")
+          throw new Error(`${operationLabel} staged journal ownership is unavailable`)
         }
         const staged = await readOwnedBytes(
           stagedJournal,
@@ -2369,7 +2386,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
           !staged.bytes.equals(nextBytes)
         ) {
           stagedJournalForeign = true
-          throw new Error("Domain rename staged journal ownership changed")
+          throw new Error(`${operationLabel} staged journal ownership changed`)
         }
         stagedIdentity = staged.identity
         stagedBytes = staged.bytes
@@ -2388,7 +2405,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
           !current.bytes.equals(nextBytes)
         ) {
           stagedJournalForeign = true
-          throw new Error("Domain rename journal publication ownership changed")
+          throw new Error(`${operationLabel} journal publication ownership changed`)
         }
         journalFinalVerified = true
         stagedJournalPath = undefined
@@ -2407,7 +2424,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
           staged = await pathEntry(stagedJournal)
         } catch (error) {
           stagedJournalForeign = true
-          throw new Error("Domain rename staged journal ownership could not be inspected", {
+          throw new Error(`${operationLabel} staged journal ownership could not be inspected`, {
             cause: error,
           })
         }
@@ -2421,7 +2438,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
             !current.bytes.equals(stagedBytes)
           ) {
             stagedJournalForeign = true
-            throw new Error("Domain rename staged journal ownership changed")
+            throw new Error(`${operationLabel} staged journal ownership changed`)
           }
           await unlink(stagedJournal)
         } else if (staged !== undefined && journalPublished && !journalFinalVerified) {
@@ -2438,11 +2455,11 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
             !current.bytes.equals(stagedBytes)
           ) {
             stagedJournalForeign = true
-            throw new Error("Domain rename staged journal ownership changed")
+            throw new Error(`${operationLabel} staged journal ownership changed`)
           }
         } else if (!journalPublished && stagedIdentity === undefined && staged !== undefined) {
           stagedJournalForeign = true
-          throw new Error("Domain rename staged journal ownership could not be authenticated")
+          throw new Error(`${operationLabel} staged journal ownership could not be authenticated`)
         } else if (!journalPublished && stagedIdentity !== undefined) {
           const current = await readOwnedBytes(stagedJournal, transaction)
           if (
@@ -2450,7 +2467,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
             inodeIdentity(current.identity) !== inodeIdentity(stagedIdentity)
           ) {
             stagedJournalForeign = true
-            throw new Error("Domain rename staged journal ownership changed")
+            throw new Error(`${operationLabel} staged journal ownership changed`)
           }
           stagedJournalIdentity = current.identity
           stagedJournalBytes = current.bytes
@@ -2473,7 +2490,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
         } catch (boundaryError) {
           throw new AggregateError(
             [error, boundaryError],
-            "Domain rename mutation crossed an untrusted managed boundary",
+            `${operationLabel} crossed an untrusted managed boundary`,
           )
         }
         throw error
@@ -2483,9 +2500,9 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
     const uncertain = (primary: unknown, failures: readonly unknown[]): DomainCatalogError =>
       catalogError(
         "DOMAIN_ROLLBACK_UNCERTAIN",
-        "Domain rename failed and rollback could not be confirmed.",
+        `${operationLabel} failed and rollback could not be confirmed.`,
         { path: displayPath(workspace, target) },
-        new AggregateError([primary, ...failures], "Domain rename rollback failed"),
+        new AggregateError([primary, ...failures], `${operationLabel} rollback failed`),
       )
 
     const verifyPublishedTarget = async (): Promise<void> => {
@@ -2496,7 +2513,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
         !sameStableFileIdentity(current.identity, publishedFingerprint) ||
         !current.bytes.equals(bytes)
       ) {
-        throw new Error("Committed domain rename identity changed")
+        throw new Error(`Committed ${operationLabel} identity changed`)
       }
       await verifyBoundaries()
     }
@@ -2526,7 +2543,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
         !sameFileIdentity(current.identity, ownedIdentity) ||
         !current.bytes.equals(ownedBytes)
       ) {
-        throw new Error("Domain rename journal ownership changed during rollback")
+        throw new Error(`${operationLabel} journal ownership changed during rollback`)
       }
       await removeOwnedFile(ownedPath, transaction, current.identity, current.bytes)
       await syncDirectory(transaction, openFile)
@@ -2538,7 +2555,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
         inodeIdentity(details) !== transactionIdentity ||
         (await readdir(transaction)).length !== 0
       ) {
-        throw new Error("Domain rename rollback transaction cleanup is unsafe")
+        throw new Error(`${operationLabel} rollback transaction cleanup is unsafe`)
       }
       await rmdir(transaction)
       transactionRemoved = true
@@ -2589,14 +2606,15 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
       journal = {
         version: 1,
         id: transactionId,
+        operation: operationOptions.operation,
         phase: "prepared",
         target: displayPath(workspace, target),
         temporary: displayPath(workspace, temporary),
         backup: displayPath(workspace, backup),
         quarantine: displayPath(workspace, quarantine),
         intendedTitle,
-        original: renameEvidence(page.identity, original),
-        published: renameEvidence(staged.identity, bytes),
+        original: replacementEvidence(page.identity, original),
+        published: replacementEvidence(staged.identity, bytes),
       }
       await persistJournal("prepared")
       await assertExactFileIdentity(workspace, target, page.identity)
@@ -2616,7 +2634,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
         !sameStableFileIdentity(retainedBackup.identity, page.identity) ||
         !retainedBackup.bytes.equals(original)
       ) {
-        throw new Error("Atomic domain rename replacement could not be verified")
+        throw new Error(`Atomic ${operationLabel} replacement could not be verified`)
       }
       backupIdentity = retainedBackup.inode
       backupFingerprint = retainedBackup.identity
@@ -2636,7 +2654,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
         !durable.bytes.equals(bytes) ||
         !publishedBackup.bytes.equals(original)
       ) {
-        throw new Error("Renamed landing page changed during directory sync")
+        throw new Error(`${operationLabel} landing page changed during directory sync`)
       }
       await operationOptions.beforeCommit?.()
       await guardedMutation(() =>
@@ -2663,7 +2681,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
       }
       await verifyPublishedTarget()
       if (journalIdentity === undefined || journalBytes === undefined) {
-        throw new Error("Domain rename journal identity is unavailable")
+        throw new Error(`${operationLabel} journal identity is unavailable`)
       }
       await retireJournal()
       await cleanupCreatedTransactionParents()
@@ -2693,7 +2711,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
       let temporaryCurrent = await readOwnedBytes(temporary, parent, temporaryIdentity)
       const backupEntry = await pathEntry(backup)
       if (backupCurrent === undefined && backupEntry !== undefined) {
-        throw uncertain(error, [new Error("Domain rename backup identity is unavailable")])
+        throw uncertain(error, [new Error(`${operationLabel} backup identity is unavailable`)])
       }
       if (backupCurrent === undefined && publicationAttempted && backupRemoved) {
         const committed = await readOwnedBytes(target, parent, temporaryIdentity)
@@ -2704,7 +2722,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
           !sameFileIdentity(committed.identity, publishedFingerprint) ||
           !committed.bytes.equals(bytes)
         ) {
-          throw uncertain(error, [new Error("Committed domain rename cannot be verified")])
+          throw uncertain(error, [new Error(`Committed ${operationLabel} cannot be verified`)])
         }
         await guardedMutation(() => syncDirectory(parent, openFile)).catch((syncError: unknown) =>
           failures.push(syncError),
@@ -2714,7 +2732,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
         return
       }
       if (backupCurrent === undefined && publicationAttempted) {
-        throw uncertain(error, [new Error("Domain rename publication lost its source backup")])
+        throw uncertain(error, [new Error(`${operationLabel} publication lost its source backup`)])
       }
       if (backupCurrent === undefined) {
         if (
@@ -2725,11 +2743,11 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
             targetCurrent.inode !== inodeIdentity(page.identity) ||
             !targetCurrent.bytes.equals(original))
         ) {
-          throw uncertain(error, [new Error("Domain rename target changed before publication")])
+          throw uncertain(error, [new Error(`${operationLabel} target changed before publication`)])
         }
         if (temporaryCurrent !== undefined) {
           if (!temporaryCurrent.bytes.equals(bytes)) {
-            throw uncertain(error, [new Error("Domain rename staging file changed")])
+            throw uncertain(error, [new Error(`${operationLabel} staging file changed`)])
           }
           await guardedMutation(() =>
             removeOwnedFile(temporary, parent, temporaryCurrent!.identity, bytes),
@@ -2767,13 +2785,15 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
           targetCurrent.inode === temporaryIdentity &&
           !targetCurrent.bytes.equals(bytes)
         if (targetIsEditedPublication) {
-          throw uncertain(error, [new Error("Published domain rename contains a concurrent edit")])
+          throw uncertain(error, [
+            new Error(`Published ${operationLabel} contains a concurrent edit`),
+          ])
         }
         if (targetIsOwnedPublication && backupDrifted) {
           throw uncertain(error, [new Error("Concurrent replacement bytes are preserved")])
         }
         if (!targetIsBackup && targetCurrent !== undefined && !targetIsOwnedPublication) {
-          throw uncertain(error, [new Error("Domain rename target contains an unowned edit")])
+          throw uncertain(error, [new Error(`${operationLabel} target contains an unowned edit`)])
         } else if (!targetIsBackup) {
           if (targetIsOwnedPublication) {
             await guardedMutation(() =>
@@ -2791,7 +2811,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
             targetCurrent.inode !== backupCurrent.inode ||
             !targetCurrent.bytes.equals(backupCurrent.bytes)
           ) {
-            failures.push(new Error("Domain rename backup could not be restored"))
+            failures.push(new Error(`${operationLabel} backup could not be restored`))
           } else {
             const refreshedBackup = await readOwnedBytes(backup, parent, backupCurrent.inode)
             const refreshedTarget = await readOwnedBytes(target, parent, backupCurrent.inode)
@@ -2802,7 +2822,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
               !refreshedBackup.bytes.equals(original) ||
               !refreshedTarget.bytes.equals(original)
             ) {
-              failures.push(new Error("Domain rename restored backup could not be verified"))
+              failures.push(new Error(`${operationLabel} restored backup could not be verified`))
             } else {
               await removeOwnedFile(backup, parent, refreshedBackup.identity, original).catch(
                 (cleanupError: unknown) => failures.push(cleanupError),
@@ -2811,7 +2831,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
             }
           }
         } else if (backupDrifted) {
-          failures.push(new Error("Domain rename source was edited during publication"))
+          failures.push(new Error(`${operationLabel} source was edited during publication`))
         } else {
           await guardedMutation(() =>
             removeOwnedFile(backup, parent, backupCurrent.identity, original),
@@ -2821,7 +2841,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
       }
       if (failures.length === 0 && temporaryCurrent !== undefined) {
         if (!temporaryCurrent.bytes.equals(bytes)) {
-          failures.push(new Error("Domain rename staging file changed during rollback"))
+          failures.push(new Error(`${operationLabel} staging file changed during rollback`))
         } else {
           await guardedMutation(() =>
             removeOwnedFile(temporary, parent, temporaryCurrent!.identity, bytes),
@@ -2838,7 +2858,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
         const currentQuarantine = await readOwnedBytes(quarantine, parent)
         if (currentQuarantine !== undefined) {
           if (!currentQuarantine.bytes.equals(original)) {
-            failures.push(new Error("Domain rename quarantine changed during rollback"))
+            failures.push(new Error(`${operationLabel} quarantine changed during rollback`))
           } else {
             await removeOwnedFile(quarantine, parent, currentQuarantine.identity, original).catch(
               (cleanupError: unknown) => failures.push(cleanupError),
@@ -2913,12 +2933,13 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
     if (parsed.data.gardenDomain !== true) throw invalidMetadata(page.path)
     const renamed = replaceTitleScalar(page.source, input.name, page.path)
     await options.hooks?.afterRenameRead?.(page.path)
-    await durableRenamePage(
+    await durableReplaceDomainPage(
       canonical.directory,
       [canonical, content, privateRoot],
       page,
       Buffer.from(renamed, "utf8"),
       input.name,
+      { operation: "rename" },
     )
     return discoverDomains(canonical.directory)
   }
@@ -2955,16 +2976,24 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
         slug: input.slug,
       })
     }
+    if (
+      metadata.description === input.description &&
+      metadata.tags.length === input.tags.length &&
+      metadata.tags.every((tag, index) => tag === input.tags[index])
+    ) {
+      return discoverDomains(canonical.directory)
+    }
     const updated = replaceDomainMetadata(page.source, input.description, input.tags, page.path)
     await options.hooks?.afterUpdateMetadataRead?.(page.path)
     let updatedDomains: readonly DomainSummary[] | undefined
-    await durableRenamePage(
+    await durableReplaceDomainPage(
       canonical.directory,
       [canonical, content, privateRoot],
       page,
       Buffer.from(updated, "utf8"),
       metadata.name,
       {
+        operation: "metadata",
         beforeCommit: async () => {
           await options.hooks?.afterUpdateMetadataReplace?.(page.path)
           updatedDomains = await discoverDomains(canonical.directory)
