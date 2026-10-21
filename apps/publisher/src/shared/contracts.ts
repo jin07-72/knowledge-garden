@@ -217,6 +217,7 @@ export interface DomainSummary {
   readonly slug: DomainSlug
   readonly name: string
   readonly description: string
+  readonly tags: readonly string[]
   readonly order: number
   readonly publicNotes: number
   readonly privateNotes: number
@@ -230,6 +231,12 @@ export interface DomainCreateRequest {
 export interface DomainRenameRequest {
   readonly slug: DomainSlug
   readonly name: string
+}
+
+export interface DomainUpdateMetadataRequest {
+  readonly slug: DomainSlug
+  readonly description: string
+  readonly tags: readonly string[]
 }
 
 export interface DomainRemoveRequest {
@@ -459,6 +466,7 @@ export const IPC_CHANNELS = {
     domainsList: "garden:domains:list",
     domainsCreate: "garden:domains:create",
     domainsRename: "garden:domains:rename",
+    domainsUpdateMetadata: "garden:domains:update-metadata",
     domainsRemove: "garden:domains:remove",
     notesList: "garden:notes:list",
     notesRead: "garden:notes:read",
@@ -735,6 +743,9 @@ export interface GardenApi {
     list(): Promise<IpcResult<readonly DomainSummary[]>>
     create(request: DomainCreateRequest): Promise<IpcResult<readonly DomainSummary[]>>
     rename(request: DomainRenameRequest): Promise<IpcResult<readonly DomainSummary[]>>
+    updateMetadata(
+      request: DomainUpdateMetadataRequest,
+    ): Promise<IpcResult<readonly DomainSummary[]>>
     remove(request: DomainRemoveRequest): Promise<IpcResult<readonly DomainSummary[]>>
   }
   readonly notes: {

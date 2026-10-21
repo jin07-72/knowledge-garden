@@ -28,6 +28,7 @@ import {
   domainCreateSchema,
   domainRemoveSchema,
   domainRenameSchema,
+  domainUpdateMetadataSchema,
   imageLibraryCommitRequestSchema,
   imageLibraryDeleteRequestSchema,
   imageLibraryItemRequestSchema,
@@ -136,6 +137,7 @@ const customDomain = {
   slug: "artificial-intelligence",
   name: "人工智能",
   description: "人工智能领域的学习记录。",
+  tags: ["ai", "learning"],
   order: 5,
   publicNotes: 2,
   privateNotes: 1,
@@ -179,6 +181,7 @@ const validByChannel: Record<string, unknown> = {
   [IPC_CHANNELS.requests.domainsList]: [customDomain],
   [IPC_CHANNELS.requests.domainsCreate]: [customDomain],
   [IPC_CHANNELS.requests.domainsRename]: [customDomain],
+  [IPC_CHANNELS.requests.domainsUpdateMetadata]: [customDomain],
   [IPC_CHANNELS.requests.domainsRemove]: [customDomain],
   [IPC_CHANNELS.requests.notesList]: [note],
   [IPC_CHANNELS.requests.notesRead]: {
@@ -861,6 +864,83 @@ describe("IPC success schemas", () => {
         { ...customDomain, order: -1 },
       ]).success,
     ).toBe(false)
+  })
+
+  it("defines the domain metadata update channel and accepts empty metadata", () => {
+    expect(IPC_CHANNELS.requests.domainsUpdateMetadata).toBe(
+      "garden:domains:update-metadata",
+    )
+    expect(
+      domainUpdateMetadataSchema.parse({
+        slug: "artificial-intelligence",
+        description: "",
+        tags: [],
+      }),
+    ).toEqual({ slug: "artificial-intelligence", description: "", tags: [] })
+    expect(
+      IPC_SUCCESS_SCHEMAS[IPC_CHANNELS.requests.domainsUpdateMetadata].parse([
+        { ...customDomain, description: "", tags: [] },
+      ]),
+    ).toEqual([{ ...customDomain, description: "", tags: [] }])
+  })
+
+  it("accepts valid trimmed domain metadata updates", () => {
+    const request = {
+      slug: "artificial-intelligence",
+      description: "Models, systems, and practical experiments.",
+      tags: ["ai", "machine-learning"],
+    }
+
+    expect(domainUpdateMetadataSchema.parse(request)).toEqual(request)
+  })
+
+  it("rejects duplicate and whitespace-padded domain metadata", () => {
+    const request = {
+      slug: "artificial-intelligence",
+      description: "Models and systems.",
+      tags: ["ai", "machine-learning"],
+    }
+
+    expect(
+      domainUpdateMetadataSchema.safeParse({ ...request, tags: ["ai", "ai"] }).success,
+    ).toBe(false)
+    expect(
+      domainUpdateMetadataSchema.safeParse({ ...request, description: " Models and systems." })
+        .success,
+    ).toBe(false)
+    expect(
+      domainUpdateMetadataSchema.safeParse({ ...request, description: "Models and systems. " })
+        .success,
+    ).toBe(false)
+    for (const tag of [" ai", "ai ", "", " "]) {
+      expect(
+        domainUpdateMetadataSchema.safeParse({ ...request, tags: [tag] }).success,
+        JSON.stringify(tag),
+      ).toBe(false)
+    }
+  })
+
+  it("rejects oversized and unknown domain metadata fields", () => {
+    const request = {
+      slug: "artificial-intelligence",
+      description: "Models and systems.",
+      tags: ["ai"],
+    }
+
+    expect(
+      domainUpdateMetadataSchema.safeParse({ ...request, description: "x".repeat(2_001) })
+        .success,
+    ).toBe(false)
+    expect(
+      domainUpdateMetadataSchema.safeParse({ ...request, tags: ["x".repeat(129)] }).success,
+    ).toBe(false)
+    expect(
+      domainUpdateMetadataSchema.safeParse({
+        ...request,
+        tags: Array.from({ length: 101 }, (_, index) => `tag-${index}`),
+      }).success,
+    ).toBe(false)
+    expect(domainUpdateMetadataSchema.safeParse({ ...request, extra: true }).success).toBe(false)
   })
 
   it("preserves strict note request constraints for custom domains", () => {

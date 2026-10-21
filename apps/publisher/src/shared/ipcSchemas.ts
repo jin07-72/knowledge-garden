@@ -89,18 +89,39 @@ export const domainSlugSchema = z
   .regex(new RegExp(`^${KEBAB_SLUG_SOURCE}$`))
   .refine((value) => !RESERVED_DOMAIN_SLUGS.has(value))
 export const domainNameSchema = z.string().trim().min(1).max(80)
+const domainDescriptionSchema = z
+  .string()
+  .max(2_000)
+  .refine((value) => value === value.trim())
+const domainTagSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .refine((value) => value === value.trim())
+const domainTagsSchema = z
+  .array(domainTagSchema)
+  .max(100)
+  .refine((tags) => new Set(tags).size === tags.length)
 export const domainCreateSchema = z
   .object({ name: domainNameSchema, slug: domainSlugSchema })
   .strict()
 export const domainRenameSchema = z
   .object({ slug: domainSlugSchema, name: domainNameSchema })
   .strict()
+export const domainUpdateMetadataSchema = z
+  .object({
+    slug: domainSlugSchema,
+    description: domainDescriptionSchema,
+    tags: domainTagsSchema,
+  })
+  .strict()
 export const domainRemoveSchema = z.object({ slug: domainSlugSchema }).strict()
 export const domainSummarySchema = z
   .object({
     slug: domainSlugSchema,
     name: domainNameSchema,
-    description: z.string().min(1).max(2_000),
+    description: domainDescriptionSchema,
+    tags: domainTagsSchema,
     order: z.number().int().nonnegative(),
     publicNotes: z.number().int().nonnegative(),
     privateNotes: z.number().int().nonnegative(),
@@ -764,6 +785,7 @@ export const IPC_SUCCESS_SCHEMAS = {
   [IPC_CHANNELS.requests.domainsList]: z.array(domainSummarySchema).max(1_000),
   [IPC_CHANNELS.requests.domainsCreate]: z.array(domainSummarySchema).max(1_000),
   [IPC_CHANNELS.requests.domainsRename]: z.array(domainSummarySchema).max(1_000),
+  [IPC_CHANNELS.requests.domainsUpdateMetadata]: z.array(domainSummarySchema).max(1_000),
   [IPC_CHANNELS.requests.domainsRemove]: z.array(domainSummarySchema).max(1_000),
   [IPC_CHANNELS.requests.notesList]: z.array(noteSummarySchema).max(100_000),
   [IPC_CHANNELS.requests.notesRead]: noteDocumentSchema,
