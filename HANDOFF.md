@@ -1,15 +1,15 @@
 # Knowledge Garden Handoff
 
-更新时间：2026-10-21 21:53（Asia/Shanghai）
+更新时间：2026-10-22 12:54（Asia/Shanghai）
 
 本文档用于在 DeepSeek Harness 临时接管结束后，让 Codex 不依赖完整聊天记录也能理解当前状态。
 
 ## 0. 当前状态
 
-- 当前发布准备分支：`codex/editable-domain-metadata`
+- 当前发布准备分支：`codex/editable-domain-metadata`（待合并）
 - 当前发布器源码版本：`0.1.5`
 - 当前发布器版本提交：见 `codex/editable-domain-metadata` 当前 HEAD（不在文档内嵌 SHA，避免 amend 后失效）
-- `0.1.5` 仍处于发布准备状态：尚未打包、安装、合并或推送；正式安装目录仍是 `0.1.4`。
+- `0.1.5` 已完成打包并更新正式安装目录；尚未合并或推送。
 - 工作区仍保留用户原有的 `highlight.js` 依赖修改和 `.tmp-render-check.png`，未纳入本次提交。
 
 ## 1. 项目目标
@@ -170,7 +170,10 @@ Knowledge Garden 是一个公开的个人知识花园：
 - 本次 `npm run typecheck`：通过。
 - 本次对变更文件执行 Prettier：通过。
 - 本次 `git diff --check`：通过。
-- 本次 `npm run build`：通过（仅生成已忽略的 `apps/publisher/out/`，未打包或安装）。
+- 本次 `npm run build`：通过。
+- 完整发布器测试套件（单工作线程、`--testTimeout=10000`）：`1695 passed, 16 skipped`。默认 5 秒超时下仅 `noteIndex` 元数据一致性测试以 5.061 秒超时；该测试单独运行通过，扩大超时后的完整套件全部通过。
+- Windows `0.1.5` 安装包：生成成功。
+- 正式安装目录已更新为 `0.1.5`，可执行文件 SHA256：`B0F11D6FAE8C6BB0A597EE2BFCB1CF878BD07A567F4434371AF7C6575DA23554`。
 - 本次定向 Electron E2E 使用普通命令运行：`npm run test:e2e -- --grep "manages custom domains"` 为 `1 passed`；对照测试 `npm run test:e2e -- --grep "recovers a corrupt registry"` 也为 `1 passed`。Playwright 全局设置会自动为每次运行创建唯一的工作树内 `TEMP` / `TMP`，并在全局 teardown 中校验路径后清理，无需 shell 预设。
 - E2E 启动诊断：本机原始 Electron 44.4.2 在 Chromium Windows sandbox 初始化时以 `0x80000003` 退出，且 Codex 运行边界外的系统临时目录对 Electron 写入返回 `EPERM`。测试启动器仅在 Windows E2E 进程加入 `--no-sandbox`；正式打包应用的 sandbox 配置未修改。
 
@@ -191,13 +194,14 @@ Knowledge Garden 是一个公开的个人知识花园：
 
 尚未完成：
 
-- `0.1.5` 尚未打包或安装，也尚未合并、推送；发布前必须完成这些步骤并核验正式安装版本。
+- `0.1.5` 尚未合并、推送；发布前必须完成这些步骤并核验远端提交。
 
 ## 6. 本机运行方式
 
-- 正式 `0.1.4` 安装目录：`C:\Users\11546\AppData\Local\Programs\Knowledge Garden Publisher`
+- 正式 `0.1.5` 安装目录：`C:\Users\11546\AppData\Local\Programs\Knowledge Garden Publisher`
 - 更新前的完整 `0.1.3` 目录保留在 `C:\Users\11546\AppData\Local\Programs\Knowledge Garden Publisher Backup 0.1.3`，可用于回滚。
 - 审查补丁前的完整 `0.1.4` 目录保留在 `C:\Users\11546\AppData\Local\Programs\Knowledge Garden Publisher Backup 0.1.4-pre-review-20261021-104628`。
+- 本次更新前的完整 `0.1.4` 目录保留在 `C:\Users\11546\AppData\Local\Programs\Knowledge Garden Publisher Backup 0.1.4-before-0.1.5-20261022-125335`。
 - 桌面和开始菜单中旧的 **Fixed** 快捷方式仍指向正式安装目录。
 - 旧便携目录仍保留，但常用快捷方式不再启动它。
 
@@ -208,7 +212,7 @@ Knowledge Garden 是一个公开的个人知识花园：
 
 ## 8. 建议下一步
 
-1. 完成 `0.1.5` 打包、正式安装、合并与推送，并核对安装目录中的版本和可执行文件哈希。
+1. 完成 `0.1.5` 合并与推送，并核对两个远端 `main` 的提交。
 2. 如需扩大覆盖，可在正常桌面环境运行完整 Electron E2E；本次两个定向场景已经通过。
 3. 用真实博客再验证一次：
    - 私密→公开并发布，确认线上新增。
@@ -218,10 +222,10 @@ Knowledge Garden 是一个公开的个人知识花园：
 
 ## 9. 给 Codex 的注意事项
 
-- `0.1.5` 发布准备修改仍在 `codex/editable-domain-metadata`，尚未合并或推送；后续必须完成合并、打包安装和推送。
+- `0.1.5` 发布准备修改仍在 `codex/editable-domain-metadata`，已打包安装但尚未合并或推送；后续必须完成合并和推送。
 - 不要丢弃工作区中的 `apps/publisher/package*.json` 修改和 `.tmp-render-check.png`。
 - 用户要求本次发布保留现有自动清理入站 WikiLink 行为，不在通用线上地址修复中改动它。
 - 自动清理只处理公开 Markdown 中指向本次转私密笔记的 WikiLink；不要扩大到私有 Markdown、代码块或无关链接。
 - 不要因为 Git push 成功就宣称线上页面已上线；必须等待 Pages 部署运行成功。
 - 外部浏览器缓存不属于应用控制范围；应用已清理 Electron 会话缓存并提供带 refresh 参数的线上站。
-- 正式安装目录和常用快捷方式均已更新至 `0.1.4`。
+- 正式安装目录和常用快捷方式均已更新至 `0.1.5`。
