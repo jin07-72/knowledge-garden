@@ -43,7 +43,6 @@ import {
   type RendererTrustPolicy,
 } from "./rendererTrust"
 import { createProductionPreviewManager } from "./services/previewRuntime"
-import { isPreviewPortAvailable } from "./services/previewRuntime"
 import { createElectronTrashAdapter } from "./services/trash"
 import {
   createSystemBoundedCommandRunner,
@@ -456,7 +455,6 @@ app.whenReady().then(async () => {
       openExternal: (url) => shell.openExternal(url),
       clearHttpCache: () => session.defaultSession.clearCache(),
       ...(bundledRuntime ? { runtime: bundledRuntime } : {}),
-      ...(e2e ? {} : { previewPortAvailable: () => isPreviewPortAvailable(8080) }),
       online: () => (e2e ? true : net.isOnline()),
       branchRepair: createPublishBranchRepair({ workspace }),
       publisherFactory,

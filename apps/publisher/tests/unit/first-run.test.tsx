@@ -91,7 +91,7 @@ describe("first-run diagnostics", () => {
     expect(onRepair).toHaveBeenCalledWith("install-dependencies")
   })
 
-  it("checks dependencies, credentialed origin/main access, and the preview port", async () => {
+  it("checks dependencies and credentialed origin/main access without flagging an occupied preferred port", async () => {
     const root = await repository()
     const runner = {
       run: vi.fn(async ({ args }: { args: readonly string[] }) => {
@@ -112,7 +112,6 @@ describe("first-run diagnostics", () => {
       checkGit: true,
       runner,
       runtime: { nodePath: "bundled-node.exe", npmCliPath: "bundled-npm-cli.js" },
-      previewPortAvailable: async () => false,
       checkRemote: true,
     })
     expect(inspection.ok).toBe(false)
@@ -121,8 +120,10 @@ describe("first-run diagnostics", () => {
       expect.arrayContaining([
         expect.objectContaining({ code: "DEPENDENCIES_MISSING", repair: "install-dependencies" }),
         expect.objectContaining({ code: "GIT_FETCH_AUTH_FAILED" }),
-        expect.objectContaining({ code: "PREVIEW_PORT_UNAVAILABLE" }),
       ]),
+    )
+    expect(inspection.issues).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "PREVIEW_PORT_UNAVAILABLE" })]),
     )
   })
 

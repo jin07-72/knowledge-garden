@@ -76,7 +76,6 @@ export interface PublisherServiceDependencies {
   readonly openExternal?: (url: string) => Promise<void>
   readonly clearHttpCache?: () => Promise<void>
   readonly runtime?: BundledNpmRuntime
-  readonly previewPortAvailable?: () => Promise<boolean>
   readonly online?: () => boolean | Promise<boolean>
   readonly reconcileTrash?: (signal: AbortSignal) => Promise<{
     readonly pending: boolean
@@ -334,7 +333,6 @@ export async function createPublisherServices(
           checkRemote: dependencies.runtime !== undefined,
           online: dependencies.online,
           runtime: dependencies.runtime,
-          previewPortAvailable: dependencies.previewPortAvailable,
         }),
       repair: (request) => {
         if (!dependencies.runtime) return reject("Dependency repair")

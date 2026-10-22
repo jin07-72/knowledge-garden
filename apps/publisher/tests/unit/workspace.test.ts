@@ -89,16 +89,15 @@ describe("inspectWorkspace", () => {
     expect(result.capabilities.publish).toBe(false)
   })
 
-  it("keeps preview capability when only the preferred port is occupied", async () => {
+  it("does not treat the preferred preview port as a workspace requirement", async () => {
     const root = await createGarden()
 
     const result = await inspectWorkspace(root, {
       checkGit: false,
-      previewPortAvailable: async () => false,
     })
 
-    expect(result.ok).toBe(false)
-    expect(result.issues.map((issue) => issue.code)).toContain("PREVIEW_PORT_UNAVAILABLE")
+    expect(result.ok).toBe(true)
+    expect(result.issues.map((issue) => issue.code)).not.toContain("PREVIEW_PORT_UNAVAILABLE")
     expect(result.capabilities).toMatchObject({ files: true, preview: true })
   })
 

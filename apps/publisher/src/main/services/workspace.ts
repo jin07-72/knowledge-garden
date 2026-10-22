@@ -72,7 +72,6 @@ export interface InspectWorkspaceOptions {
   readonly runtime?: BundledNpmRuntime
   readonly checkRemote?: boolean
   readonly online?: () => boolean | Promise<boolean>
-  readonly previewPortAvailable?: () => Promise<boolean>
 }
 
 export interface BundledNpmRuntime {
@@ -622,23 +621,13 @@ export async function inspectWorkspace(
         )
       : []
   issues.push(...dependencyIssues)
-  if (options.previewPortAvailable && workspaceRoot.issues.length === 0) {
-    let available = false
-    try {
-      available = await options.previewPortAvailable()
-    } catch {
-      available = false
-    }
-    if (!available) {
-      issues.push(issue("PREVIEW_PORT_UNAVAILABLE", "The local preview port is already in use."))
-    }
-  }
   const git = options.checkGit && workspaceRoot.issues.length === 0 && gitIssues.length === 0
   const dependencies = dependencyIssues.length === 0
   const capabilities: WorkspaceCapabilities = {
     files,
-    // Preview startup chooses an available fallback port. Occupancy of the
-    // preferred port remains diagnostic information, not a lost capability.
+    // Preview startup chooses an available fallback port, so occupancy of the
+    // preferred port is not a workspace problem. Actual startup failures are
+    // reported by the preview service.
     preview: files && tooling && dependencies,
     git,
     publish: files && tooling && dependencies && git,
