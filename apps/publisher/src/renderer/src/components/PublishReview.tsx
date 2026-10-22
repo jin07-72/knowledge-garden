@@ -46,6 +46,10 @@ export function PublishReview({
   const mounted = useRef(true)
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set())
   const [publishing, setPublishing] = useState(false)
+  const visibleGroups = useMemo(
+    () => review?.groups.filter((group) => group.kind !== "private") ?? [],
+    [review],
+  )
 
   useEffect(() => {
     setSelected(
@@ -53,7 +57,7 @@ export function PublishReview({
         review?.blockedReason
           ? []
           : review?.groups
-              .filter((group) => group.selection === "default")
+              .filter((group) => group.kind !== "private" && group.selection === "default")
               .map((group) => group.id),
       ),
     )
@@ -143,7 +147,7 @@ export function PublishReview({
             {review.blockedReason}
           </div>
         ) : null}
-        {state === "ready" && (review?.groups.length ?? 0) === 0 ? (
+        {state === "ready" && visibleGroups.length === 0 ? (
           <div className="review-state">
             <strong>当前没有可发布变化</strong>
             <span>继续写作即可，需要时再回来检查。</span>
@@ -152,16 +156,19 @@ export function PublishReview({
             </button>
           </div>
         ) : null}
-        {state === "ready" && review && review.groups.length > 0 ? (
+        {state === "ready" && review && visibleGroups.length > 0 ? (
           <div className="change-groups" aria-label="可发布内容">
-            {review.groups.map((group, index) => {
+            {visibleGroups.map((group, index) => {
               const locked = group.selection === "locked" || Boolean(review.blockedReason)
               const paths = visiblePaths(group)
               return (
                 <Fragment key={group.id}>
                   {group.kind === "config" &&
-                  !review.groups.slice(0, index).some((item) => item.kind === "config") ? (
-                    <h3 className="advanced-heading">高级选项</h3>
+                  !visibleGroups.slice(0, index).some((item) => item.kind === "config") ? (
+                    <div className="advanced-copy">
+                      <h3 className="advanced-heading">高级选项</h3>
+                      <p>项目配置与其他非笔记文件；默认不发布。仅在明确知道影响时选择。</p>
+                    </div>
                   ) : null}
                   <section className={`change-group change-${group.kind}`}>
                     <label>

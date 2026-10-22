@@ -2153,11 +2153,22 @@ button {
   gap: 8px;
 }
 .advanced-heading {
-  margin: 8px 2px 0;
+  margin: 0;
   color: #aeb7c2;
   font-size: 11px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
+}
+.advanced-copy {
+  display: grid;
+  gap: 3px;
+  margin: 8px 2px 0;
+}
+.advanced-copy p {
+  margin: 0;
+  color: #7f8b98;
+  font-size: 11px;
+  line-height: 1.5;
 }
 .change-group {
   padding: 11px 12px;

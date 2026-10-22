@@ -48,7 +48,7 @@ const review: ChangeReview = {
 afterEach(cleanup)
 
 describe("PublishReview", () => {
-  it("defaults public work on, locks private work, leaves config off, and submits selected ids", async () => {
+  it("shows publishable work, hides private work, leaves config off, and submits selected ids", async () => {
     const user = userEvent.setup()
     const onClose = vi.fn()
     const onPublish = vi.fn(async () => undefined)
@@ -65,14 +65,16 @@ describe("PublishReview", () => {
     const dialog = screen.getByRole("dialog", { name: "检查并发布" })
     const publicBox = within(dialog).getByRole("checkbox", { name: /修改.*CSS Grid/ })
     const unpublishBox = within(dialog).getByRole("checkbox", { name: /下线.*Retired/ })
-    const privateBox = within(dialog).getByRole("checkbox", { name: /私密.*Journal/ })
     const configBox = within(dialog).getByRole("checkbox", { name: /配置.*配置修改/ })
     expect(publicBox).toBeChecked()
     expect(unpublishBox).toBeChecked()
-    expect(privateBox).toBeDisabled()
-    expect(privateBox).not.toBeChecked()
+    expect(within(dialog).queryByText("Journal")).not.toBeInTheDocument()
+    expect(within(dialog).queryByText("只保留在本机，不会发布")).not.toBeInTheDocument()
     expect(configBox).not.toBeChecked()
     expect(within(dialog).getByRole("heading", { name: "高级选项" })).toBeVisible()
+    expect(
+      within(dialog).getByText("项目配置与其他非笔记文件；默认不发布。仅在明确知道影响时选择。"),
+    ).toBeVisible()
     expect(within(dialog).getByText("quartz.config.yaml")).toBeVisible()
     expect(within(dialog).getByText("package-lock.json")).toBeVisible()
     expect(within(dialog).getByText("将从公开网站移除")).toBeVisible()
