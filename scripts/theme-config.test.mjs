@@ -6,6 +6,7 @@ import test from "node:test"
 import { parse } from "yaml"
 
 const configPath = fileURLToPath(new URL("../quartz.config.yaml", import.meta.url))
+const customStylesPath = fileURLToPath(new URL("../quartz/styles/custom.scss", import.meta.url))
 
 async function readConfig() {
   return parse(await readFile(configPath, "utf8"))
@@ -37,4 +38,17 @@ test("keeps the configured always-dark palette and syntax theme authoritative", 
   const syntaxTheme = plugin(config, "@quartz-community/syntax-highlighting").options.theme
   assert.equal(syntaxTheme.light, "github-dark")
   assert.equal(syntaxTheme.dark, "github-dark")
+})
+
+test("keeps a long desktop table of contents inside the visible right sidebar", async () => {
+  const stylesheet = await readFile(customStylesPath, "utf8")
+
+  assert.match(
+    stylesheet,
+    /@media all and \(\$desktop\)[\s\S]*?\.sidebar\.right\s*>\s*\.toc\s*\{[^}]*flex:\s*1 1 auto;[^}]*min-height:\s*0;/,
+  )
+  assert.match(
+    stylesheet,
+    /\.sidebar\.right\s*>\s*\.toc\s*>\s*\.toc-content\.overflow\s*\{[^}]*min-height:\s*0;/,
+  )
 })

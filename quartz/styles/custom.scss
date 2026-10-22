@@ -128,6 +128,17 @@ body:not([data-slug="index"]) .recent-notes {
   color: var(--darkgray);
 }
 
+@media all and ($desktop) {
+  .sidebar.right > .toc {
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+
+  .sidebar.right > .toc > .toc-content.overflow {
+    min-height: 0;
+  }
+}
+
 @media all and ($mobile) {
   .domain-grid {
     grid-template-columns: 1fr;
