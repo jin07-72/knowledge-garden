@@ -1,7 +1,8 @@
 ---
 title: 概率论
 date: 2026-10-14
-description: 无
+updated: 2026-10-22
+description: 电科格院大二韦鵾老师的概率论
 tags:
   - 大学
   - 概率论
@@ -9,16 +10,16 @@ tags:
 
 # 概率论
 
-> **笔记定位**：按照课程 PPT 的 Chapter 1～4 编写，供课堂学习、作业复习和期末复习使用；以后可以直接在文末续写新章节，不必更改开头或现有章节编号。
+> **笔记定位**：按照课程 PPT编写，供课堂学习、作业复习和期末复习使用。
 >
-> **参考材料**：《Probability and Statistics》（Morris H. DeGroot、Mark J. Schervish，第 4 版）及本课程的四份 PPT。`例题（PPT）`表示来自课件的题目情境；`补充例题`表示为解释方法而新增的例子。部分 PPT 中的数学表达式以图片形式存储，本笔记根据可辨认的题目条件和相应定理展开计算；没有足够题目数据的地方不擅自补写原题数值。
+> **参考材料**：《Probability and Statistics》（Morris H. DeGroot、Mark J. Schervish，第 4 版）及本课程的PPT。`例题（PPT）`表示来自课件的题目情境；`补充例题`表示为解释方法而新增的例子。部分 PPT 中的数学表达式以图片形式存储，本笔记根据课件可辨认的题目条件和定理展开计算；没有足够题目数据的地方不擅自补写原题数值。**对于课件四舍五入或近似造成的严格数值差异，额外标出精确结果。**
 
 ## 使用方法与目录
 
 - **学习顺序**：概念 → 公式 → 适用条件 → 例题的“分析—计算—检查” → 易错点。
-- **长期更新约定**：一级标题 `# 概率论` 固定；每新增一章使用 `## 第五章 ……`，章内用 `### 5.1 ……`；新增例题放到对应知识点下面。
+- **长期更新约定**：一级标题 `# 概率论` 固定；每新增一章使用 `## 第七章 ……`，章内用 `### 5.1 ……`；新增例题放到对应知识点下面。
 - **计算约定**：$P(A)$ 表示事件概率；$f_X(x)$ 可表示离散概率质量函数或连续概率密度函数（依上下文辨别）；$F_X(x)$ 是累积分布函数；$E(X)$ 是期望。
-- **主要内容**：第 1 章概率与计数；第 2 章条件概率与独立性；第 3 章随机变量与分布；第 4 章期望、方差、矩、协方差及相关系数。
+- **主要内容**：第 1 章概率与计数；第 2 章条件概率与独立性；第 3 章随机变量与分布；第 4 章期望、方差、矩、协方差及相关系数；第 5 章独立正态变量的线性组合；第 6 章大数定律、概率收敛与中心极限定理。
 
 ---
 
@@ -1496,6 +1497,924 @@ $$
 
 ---
 
+## 第五章 特殊分布：正态随机变量的线性组合（Special Distributions）
+
+> **本章课件范围**：上传的 `P&S-Chapter-5.ppt` 仅涵盖 **Section 5.6 Linear Combinations of Normally Distributed Variables**，即定理 5.6.7 与推论 5.6.1。这里不把课件未讲的其他“特殊分布”写成课程内容。下面标注“补充例题”的数值是为掌握定理而另设的。
+>
+> **与第四章的联系**：4.5 已给出公式；本章重点解释**为什么得到正态分布、均值与方差各如何计算，以及如何应用于概率题**。
+
+### 5.1 线性组合是什么
+
+给定随机变量 $X_1,\ldots,X_k$ 和固定常数 $a_1,\ldots,a_k,b$，称
+
+$$
+Y=a_1X_1+\cdots+a_kX_k+b
+$$
+
+为这些随机变量的**线性组合（Linear Combination）加常数**。
+
+- **期望的线性性**无需独立：
+
+  $$
+  E(Y)=\sum_{i=1}^{k}a_iE(X_i)+b.
+  $$
+
+- **方差的一般公式**需要考虑协方差：
+
+  $$
+  \mathrm{Var}(Y)=\sum_{i=1}^{k}a_i^2\mathrm{Var}(X_i)
+  +2\sum_{i<j}a_ia_j\mathrm{Cov}(X_i,X_j).
+  $$
+
+- 如果 $X_1,\ldots,X_k$ **相互独立**，各对协方差为 0，方差公式才简化为 $\sum_i a_i^2\mathrm{Var}(X_i)$。
+
+**注意**：只知道每个变量都服从正态分布，若没有独立性或联合正态性等额外条件，不能保证它们的和仍服从正态分布。课件使用的是**独立正态随机变量**这一充分条件。
+
+### 5.2 独立正态变量的和——定理 5.6.7
+
+**PPT 原定理（Theorem 5.6.7）**：若 $X_1,\ldots,X_k$ 相互独立，且
+
+$$
+X_i\sim N(\mu_i,\sigma_i^2),\qquad i=1,\ldots,k,
+$$
+
+则
+
+$$
+\boxed{\sum_{i=1}^{k}X_i\sim
+N\!\left(\sum_{i=1}^{k}\mu_i,\ \sum_{i=1}^{k}\sigma_i^2\right)}.
+$$
+
+也就是说：**独立正态随机变量相加，结果仍是正态；均值相加，方差相加。**
+
+#### 公式推导（补充：利用第四章的矩母函数）
+
+已知正态分布的矩母函数为
+
+$$
+M_{X_i}(t)=\exp\!\left(\mu_it+\frac12\sigma_i^2t^2\right).
+$$
+
+设 $S=\sum_iX_i$，利用**独立性**得到
+
+$$
+\begin{aligned}
+M_S(t)
+&=E\left[e^{t\sum_iX_i}\right]\\
+&=\prod_{i=1}^{k}E(e^{tX_i})\\
+&=\prod_{i=1}^{k}\exp\!\left(\mu_it+\frac12\sigma_i^2t^2\right)\\
+&=\exp\!\left[\left(\sum_i\mu_i\right)t+
+\frac12\left(\sum_i\sigma_i^2\right)t^2\right].
+\end{aligned}
+$$
+
+这正是均值 $\sum_i\mu_i$、方差 $\sum_i\sigma_i^2$ 的正态分布的矩母函数，故结论成立。
+
+**推导关键**：第三行把 $E(\prod e^{tX_i})$ 写成 $\prod E(e^{tX_i})$，必须使用独立性。
+
+### 5.3 一般线性组合——推论 5.6.1
+
+**PPT 原推论（Corollary 5.6.1）**：若 $X_i$ 相互独立并满足 $X_i\sim N(\mu_i,\sigma_i^2)$，则对于常数 $a_i,b$，当至少有一个 $a_i\ne0$ 且所得方差为正时，
+
+$$
+\boxed{Y=\sum_{i=1}^{k}a_iX_i+b
+\sim N\!\left(\sum_{i=1}^{k}a_i\mu_i+b,\
+\sum_{i=1}^{k}a_i^2\sigma_i^2\right)}.
+$$
+
+**怎么理解每一部分**：
+
+| 变换 | 对均值的影响 | 对方差的影响 |
+| --- | --- | --- |
+| $aX$ | 乘 $a$ | 乘 $a^2$ |
+| $X+b$ | 加 $b$ | 不变 |
+| $X+Y$（独立） | $E(X)+E(Y)$ | $\mathrm{Var}(X)+\mathrm{Var}(Y)$ |
+| $X-Y$（独立） | $E(X)-E(Y)$ | **仍为** $\mathrm{Var}(X)+\mathrm{Var}(Y)$ |
+
+**为什么减号不影响方差的正负？** 因为 $\mathrm{Var}(-Y)=(-1)^2\mathrm{Var}(Y)=\mathrm{Var}(Y)$。若所有对应项均退化为常数，则结果为常数随机变量，不是通常具有正密度的非退化正态分布。
+
+### 5.4 用正态分布的 CDF 计算概率
+
+若已经通过定理或推论得到 $Y\sim N(m,v)$，令 $s=\sqrt v$（**标准差**），则
+
+$$
+Z=\frac{Y-m}{s}\sim N(0,1).
+$$
+
+因此
+
+$$
+\boxed{P(c\le Y\le d)=
+\Phi\!\left(\frac{d-m}{s}\right)
+-\Phi\!\left(\frac{c-m}{s}\right)}.
+$$
+
+常用对称性：$\Phi(-z)=1-\Phi(z)$。当 $Y$ 连续时，端点取等号与否不影响概率。
+
+#### 补充例题 1：两个独立正态变量的和
+
+设 $X\sim N(10,4)$、$Y\sim N(20,9)$，且二者独立。求 $S=X+Y$ 的分布，并求 $P(S>35)$。
+
+**分析**：均值、方差分别相加；比较值 35 与新分布的均值，并标准化。
+
+$$
+S\sim N(10+20,4+9)=\boxed{N(30,13)}.
+$$
+
+$$
+\begin{aligned}
+P(S>35)
+&=P\!\left(\frac{S-30}{\sqrt{13}}>\frac{35-30}{\sqrt{13}}\right)\\
+&=1-\Phi\!\left(\frac5{\sqrt{13}}\right)
+\approx\boxed{0.083}.
+\end{aligned}
+$$
+
+**检查**：35 高于均值 30，因此右尾概率应小于 $0.5$。
+
+#### 补充例题 2：含负系数和常数的组合
+
+仍令 $X\sim N(10,4)$、$Y\sim N(20,9)$ 独立。设 $W=2X-Y+5$，求 $W$ 的分布及 $P(0\le W\le10)$。
+
+**第一步——均值**：
+
+$$
+E(W)=2\times10-20+5=\boxed{5}.
+$$
+
+**第二步——方差**：
+
+$$
+\mathrm{Var}(W)=2^2\times4+(-1)^2\times9=\boxed{25}.
+$$
+
+所以 $W\sim N(5,25)$，标准差为 5。于是
+
+$$
+P(0\le W\le10)=\Phi(1)-\Phi(-1)
+\approx\boxed{0.6827}.
+$$
+
+**易错点**：不能写成 $4\times4-9$，方差不会因为 $-Y$ 而减去 $\mathrm{Var}(Y)$。
+
+#### 补充例题 3：正态总体的样本均值
+
+设 $X_1,\ldots,X_{16}$ 相互独立且均服从 $N(60,8^2)$。求样本均值 $\overline X$ 的分布及 $P(58\le\overline X\le62)$。
+
+$$
+\overline X=\frac1{16}\sum_{i=1}^{16}X_i,
+\quad E(\overline X)=60,
+\quad \mathrm{Var}(\overline X)=\frac{64}{16}=4.
+$$
+
+因此
+
+$$
+\overline X\sim\boxed{N(60,4)},\qquad
+P(58\le\overline X\le62)=\Phi(1)-\Phi(-1)
+\approx\boxed{0.6827}.
+$$
+
+这里的样本均值**精确服从正态分布**，因为原始数据本来就是正态；第六章中心极限定理讨论原分布未必为正态时的**近似正态**。
+
+### 5.5 第五章小结
+
+解题步骤：**判断是否独立正态 → 写出组合系数 → 求新均值 → 求新方差 → 开根号得到标准差 → 标准化计算区间或尾部概率**。
+
+核心公式为
+
+$$
+\boxed{\sum_i a_iX_i+b\sim N\!\left(\sum_i a_i\mu_i+b,\sum_i a_i^2\sigma_i^2\right)}
+\quad\text{（独立正态，非退化情形）}.
+$$
+
+---
+
+## 第六章 大样本、概率收敛与中心极限定理（Large Random Samples）
+
+> **课件组织**：引入样本比例与等待时间；大数定律（Law of Large Numbers）、Markov/Chebyshev 不等式；中心极限定理（Central Limit Theorem）；课件例题 6.1.1、6.1.2、6.2.1、6.2.3、6.3.1～6.3.4，以及四道中文补充例题。
+>
+> **编号说明**：PPT 个别页把中心极限定理标作 Section 6.2，但原教学例题编号为 6.3.x；本笔记按知识逻辑顺序整理，不据此重编号原例题。
+
+### 6.1 大样本的直观意义：频率与平均值
+
+在独立同分布（independent and identically distributed，**i.i.d.**）的试验中，样本量 $n$ 增大时，**样本平均值/样本比例往往稳定在总体期望附近**。这里的“稳定”并不等于每次恰好等于期望。
+
+#### 例题（PPT：Example 6.1.1，正面频率）
+
+独立投掷公平硬币 $n$ 次，设 $T_n$ 为正面数，$\widehat p_n=T_n/n$ 为正面出现的比例。则
+
+$$
+T_n\sim\mathrm{Bin}(n,1/2),\qquad
+E(\widehat p_n)=\frac12.
+$$
+
+**问题 A：恰好一半是正面的概率。**
+
+$$
+P(T_{10}=5)=\binom{10}{5}2^{-10}\approx0.2461,
+$$
+
+$$
+P(T_{100}=50)=\binom{100}{50}2^{-100}\approx0.0796.
+$$
+
+反而是**恰好等于** $1/2$ 的概率随样本数变大而下降；不能因此认为大数定律失效。
+
+**问题 B：正面比例落在 $[0.4,0.6]$ 的概率。**
+
+$$
+\begin{aligned}
+P(0.4\le\widehat p_{10}\le0.6)
+&=\sum_{k=4}^{6}\binom{10}{k}2^{-10}
+=\boxed{0.65625},\\
+P(0.4\le\widehat p_{100}\le0.6)
+&=\sum_{k=40}^{60}\binom{100}{k}2^{-100}
+\approx\boxed{0.9648}.
+\end{aligned}
+$$
+
+**结论**：样本量越大，频率在给定误差范围内接近真实概率的可能性越大。**“恰好等于”与“落在一个小区间内”是不同事件**。
+
+#### 例题（PPT：Example 6.1.2，平均等待时间）
+
+顾客等待时间 $X_1,\ldots,X_n$ i.i.d.，每个 $X_i\sim U(0,1)$。因此
+
+$$
+E(X_i)=\frac12,\quad \mathrm{Var}(X_i)=\frac1{12},\quad
+\overline X_n=\frac1n\sum_{i=1}^{n}X_i.
+$$
+
+即使 $n>1$ 时样本均值的精确分布求起来不容易，我们仍能知道
+
+$$
+E(\overline X_n)=\frac12,\qquad
+\mathrm{Var}(\overline X_n)=\frac1{12n}.
+$$
+
+方差随 $n$ 增大而缩小，这是大数定律的直观基础。
+
+### 6.2 随机样本与样本均值的性质
+
+**简单随机样本（Simple Random Sample）**：本课程采用模型 $X_1,\ldots,X_n$ **独立、同分布**，共同均值 $\mu$、方差 $\sigma^2$，样本均值为
+
+$$
+\boxed{\overline X_n=\frac1n\sum_{i=1}^{n}X_i}.
+$$
+
+由期望的线性性：
+
+$$
+E(\overline X_n)=\frac1n\sum_iE(X_i)
+=\boxed{\mu}.
+$$
+
+由独立性，协方差交叉项为零：
+
+$$
+\begin{aligned}
+\mathrm{Var}(\overline X_n)
+&=\mathrm{Var}\!\left(\frac1n\sum_iX_i\right)\\
+&=\frac1{n^2}\sum_i\mathrm{Var}(X_i)
+=\frac{n\sigma^2}{n^2}
+=\boxed{\frac{\sigma^2}{n}}.
+\end{aligned}
+$$
+
+于是样本均值的**标准差（Standard Error，标准误）**为
+
+$$
+\boxed{\mathrm{SD}(\overline X_n)=\frac\sigma{\sqrt n}}.
+$$
+
+**核心区别**：单次观测 $X_i$ 的标准差是 $\sigma$，样本均值 $\overline X_n$ 的标准差是 $\sigma/\sqrt n$。把 $n$ 增大到原来的 4 倍，样本均值的标准误才缩小到一半。
+
+### 6.3 Markov 与 Chebyshev 不等式
+
+两者均用于**不知道完整概率分布时，为尾部概率提供保守上界**，不是计算精确概率。
+
+#### 6.3.1 Markov 不等式（Markov Inequality）
+
+若 $X\ge0$ 几乎必然成立，且 $E(X)$ 有限，对任何 $t>0$：
+
+$$
+\boxed{P(X\ge t)\le\frac{E(X)}{t}}.
+$$
+
+**推导**：因为 $X\ge t\,\mathbf1_{\{X\ge t\}}$，两边取期望：
+
+$$
+E(X)\ge tE\bigl(\mathbf1_{\{X\ge t\}}\bigr)
+=tP(X\ge t).
+$$
+
+**适用条件**：被直接代入的随机变量必须非负。课件证明页还使用了更一般的 $E(|Y|^k)/\varepsilon^k$ 形式。
+
+#### 6.3.2 Chebyshev 不等式（切比雪夫不等式）
+
+若随机变量 $X$ 具有有限方差，则对 $t>0$：
+
+$$
+\boxed{P\bigl(|X-E(X)|\ge t\bigr)
+\le\frac{\mathrm{Var}(X)}{t^2}}.
+$$
+
+等价地：
+
+$$
+\boxed{P\bigl(|X-\mu|<t\bigr)
+\ge1-\frac{\sigma^2}{t^2}}.
+$$
+
+**推导（重点）**：令 $Y=(X-E(X))^2\ge0$，将 Markov 不等式应用于 $Y$：
+
+$$
+\begin{aligned}
+P(|X-E(X)|\ge t)
+&=P(Y\ge t^2)\\
+&\le\frac{E(Y)}{t^2}
+=\frac{\mathrm{Var}(X)}{t^2}.
+\end{aligned}
+$$
+
+若已知 $\mu,\sigma$，取 $t=k\sigma$ 还可写为
+
+$$
+P(|X-\mu|<k\sigma)\ge1-\frac1{k^2}.
+$$
+
+**注意**：上界 $\sigma^2/t^2$ 可以大于 1，此时不提供实质信息；它也可能远大于真实尾部概率。
+
+#### 例题（PPT：Example 6.2.1，不知道总体形状时估计样本量）
+
+设 $X_1,\ldots,X_n$ 是 i.i.d. 样本，总体均值 $\mu$ 未知，但标准差已知为 2。希望
+
+$$
+P(|\overline X_n-\mu|<1)\ge0.99.
+$$
+
+**第一步——样本均值的方差**：$\mathrm{Var}(\overline X_n)=4/n$。
+
+**第二步——用 Chebyshev 给出下界**：
+
+$$
+P(|\overline X_n-\mu|<1)
+\ge1-\frac{4/n}{1^2}=1-\frac4n.
+$$
+
+**第三步——让下界满足要求**：
+
+$$
+1-\frac4n\ge0.99
+\Longrightarrow\frac4n\le0.01
+\Longrightarrow\boxed{n\ge400}.
+$$
+
+**结果含义**：400 是按 Chebyshev 不等式给出的**充分样本量**，不一定是满足题目条件的真实最小样本量。
+
+#### 例题（PPT：Example 6.2.3，抛硬币至少多少次）
+
+独立抛公平硬币 $n$ 次，$X_i=1$ 表示正面、$X_i=0$ 表示反面。令
+
+$$
+\widehat p_n=\overline X_n=\frac1n\sum_iX_i,
+\quad E(\widehat p_n)=\frac12,
+\quad\mathrm{Var}(\widehat p_n)=\frac1{4n}.
+$$
+
+希望 $P(0.4\le\widehat p_n\le0.6)\ge0.7$。
+
+**方法一：Chebyshev 给充分条件。** 因为事件为 $|\widehat p_n-1/2|\le0.1$，
+
+$$
+\begin{aligned}
+P(0.4\le\widehat p_n\le0.6)
+&\ge P(|\widehat p_n-1/2|<0.1)\\
+&\ge1-\frac{1/(4n)}{0.1^2}
+=1-\frac{25}{n}.
+\end{aligned}
+$$
+
+令 $1-25/n\ge0.7$，得到
+
+$$
+\boxed{n\ge84}\quad\text{（Chebyshev 充分条件）}.
+$$
+
+**方法二：精确二项分布。** 令 $T=\sum_iX_i\sim\mathrm{Bin}(n,1/2)$，则
+
+$$
+P(0.4\le\widehat p_n\le0.6)
+=\sum_{k=\lceil0.4n\rceil}^{\lfloor0.6n\rfloor}
+\binom nk2^{-n}.
+$$
+
+课件称 $n=15$ 时概率为 $0.70$，但这是**保留两位小数的结果**：
+
+$$
+P(6\le T\le9)=\frac{22880}{32768}
+=\boxed{0.6982421875}.
+$$
+
+所以如果题目严格要求“$\ge0.7000$”，**$n=15$ 实际上不满足**；逐个检查整数 $n$ 可得最小满足值为 $\boxed{n=20}$（此时概率约 $0.7368$）。这不影响 Chebyshev 的 $n\ge84$ 是充分条件这一结论。
+
+### 6.4 依概率收敛和大数定律（Law of Large Numbers）
+
+#### 6.4.1 依概率收敛（Convergence in Probability）
+
+如果对**每一个** $\varepsilon>0$ 都有
+
+$$
+\lim_{n\to\infty}P(|Z_n-b|<\varepsilon)=1,
+$$
+
+则称 $Z_n$ **依概率收敛**到常数 $b$，记作
+
+$$
+\boxed{Z_n\xrightarrow{P}b}.
+$$
+
+意思是：样本量很大时，$Z_n$ 偏离 $b$ 超过任何固定误差的概率趋于 0。它**不要求每一次试验的序列从某一项起都永远靠近** $b$。
+
+#### 6.4.2 切比雪夫大数定律
+
+**PPT 定理**：$X_1,X_2,\ldots$ 相互独立，均值和方差存在，且存在常数 $C$ 使 $\mathrm{Var}(X_i)\le C$。则
+
+$$
+\boxed{\frac1n\sum_{i=1}^{n}\bigl[X_i-E(X_i)\bigr]
+\xrightarrow{P}0}.
+$$
+
+**推导**：令 $A_n=\frac1n\sum_i(X_i-E(X_i))$，则
+
+$$
+E(A_n)=0,\qquad
+\mathrm{Var}(A_n)
+=\frac1{n^2}\sum_i\mathrm{Var}(X_i)
+\le\frac Cn.
+$$
+
+再用 Chebyshev：
+
+$$
+P(|A_n|\ge\varepsilon)
+\le\frac{\mathrm{Var}(A_n)}{\varepsilon^2}
+\le\frac{C}{n\varepsilon^2}\longrightarrow0.
+$$
+
+**关键点**：变量之间不必完全同分布；只需按该定理满足独立性与统一的方差上界。
+
+#### 6.4.3 i.i.d. 弱大数定律——Theorem 6.2.4
+
+若 $X_1,\ldots,X_n$ i.i.d.，满足 $E(X_i)=\mu$，且 $\mathrm{Var}(X_i)=\sigma^2<\infty$，则
+
+$$
+\boxed{\overline X_n\xrightarrow{P}\mu}.
+$$
+
+证明是上述情况的特例：
+
+$$
+P(|\overline X_n-\mu|\ge\varepsilon)
+\le\frac{\sigma^2}{n\varepsilon^2}\to0.
+$$
+
+#### 6.4.4 课件列出的几种大数定律
+
+| 名称 | PPT 使用的条件与含义 | 典型结论 |
+| --- | --- | --- |
+| 切比雪夫大数定律 | 独立、各方差有统一上界 | 样本均值与对应期望均值之差依概率趋于 0 |
+| 泊松大数定律 | 独立但成功率可不同的伯努利变量 $X_i\sim\mathrm{Bern}(p_i)$ | $\frac1n\sum_i(X_i-p_i)\xrightarrow{P}0$ |
+| 伯努利大数定律 | i.i.d. 伯努利试验，成功率 $p$ | $\frac1n\sum_i X_i\xrightarrow{P}p$，即频率趋于概率 |
+| 辛钦（Khinchin）大数定律 | i.i.d. 且 $E(\lvert X_i\rvert)<\infty$ | $\overline X_n\xrightarrow{P}\mu$，无须假设有限方差 |
+
+**为什么“频率稳定”有理论依据？** 对事件 $A$，定义指示变量 $X_i=\mathbf1_{\{A\text{ 在第 }i\text{ 次发生}\}}$，则 $E(X_i)=P(A)=p$，而 $\frac1n\sum_iX_i$ 正是事件发生的相对频率。
+
+#### 6.4.5 连续函数与频率直方图——Theorem 6.2.6
+
+课件给出**连续映射性质**：如果 $Z_n\xrightarrow{P} b$，且 $g$ 在 $b$ 处连续，则
+
+$$
+\boxed{g(Z_n)\xrightarrow{P} g(b)}.
+$$
+
+例如 $\overline X_n\xrightarrow{P}\mu$ 且 $\mu\ne0$ 时，$1/\overline X_n\xrightarrow{P}1/\mu$（表达式在定义域上有意义）。
+
+**频率直方图的概率依据**：设 $c_1<c_2$，并令
+
+$$
+Y_i=\begin{cases}
+1,&c_1\le X_i<c_2,\\
+0,&\text{其他}.
+\end{cases}
+$$
+
+则区间 $[c_1,c_2)$ 内观测值所占比例为
+
+$$
+\frac1n\sum_iY_i\xrightarrow{P}
+P(c_1\le X<c_2).
+$$
+
+即随着观测量增多，固定区间的**经验频率**趋近它的真实概率。
+
+#### 6.4.6 强大数定律与弱大数定律
+
+**几乎必然收敛（Almost Sure Convergence）**：
+
+$$
+\boxed{P\!\left(\lim_{n\to\infty}Z_n=b\right)=1},
+\quad Z_n\xrightarrow{a.s.}b.
+$$
+
+强大数定律：对于 i.i.d. 且具有有限绝对一阶矩的样本（PPT 简写为均值有限），有
+
+$$
+\boxed{\overline X_n\xrightarrow{a.s.}\mu}.
+$$
+
+**关系**：几乎必然收敛 $\Rightarrow$ 依概率收敛，反过来一般不成立。强大数定律描述的是几乎所有无限样本序列上的长期行为；弱大数定律描述偏差概率趋于零。
+
+### 6.5 中心极限定理（Central Limit Theorem, CLT）
+
+#### 6.5.1 中心思想
+
+**大数定律**告诉我们 $\overline X_n$ 会靠近 $\mu$；**中心极限定理**进一步描述它围绕 $\mu$ 的**波动分布**。
+
+**PPT：林德伯格—列维中心极限定理（Lindeberg–Lévy）**。设 $X_1,\ldots,X_n$ i.i.d.，满足
+
+$$
+E(X_i)=\mu,\qquad0<\mathrm{Var}(X_i)=\sigma^2<\infty.
+$$
+
+那么对标准正态分布 CDF $\Phi$ 的每个实数 $x$，
+
+$$
+\boxed{\lim_{n\to\infty}P\!\left(
+\frac{\overline X_n-\mu}{\sigma/\sqrt n}\le x
+\right)=\Phi(x)}.
+$$
+
+这写作**依分布收敛（Convergence in Distribution）**：
+
+$$
+\boxed{\frac{\sqrt n(\overline X_n-\mu)}\sigma
+\xrightarrow{d}N(0,1)}.
+$$
+
+对于较大的 $n$，做题常用近似表达
+
+$$
+\boxed{\overline X_n\ \dot\sim\ N\!\left(\mu,\frac{\sigma^2}{n}\right)},
+\qquad
+\boxed{\sum_{i=1}^{n}X_i\ \dot\sim\ N(n\mu,n\sigma^2)}.
+$$
+
+这里 $\dot\sim$ 表示**近似服从**；不像第五章“原本独立正态”时的**精确服从**。CLT 的近似精度依赖总体分布及样本量，并非任何 $n$ 都足够好。
+
+#### 6.5.2 标准化与正态 CDF
+
+对任何具有有限正方差的 $X$，定义标准化变量
+
+$$
+X^*=\frac{X-E(X)}{\sqrt{\mathrm{Var}(X)}}.
+$$
+
+那么必有 $E(X^*)=0$、$\mathrm{Var}(X^*)=1$。但**标准化不等于变成正态分布**：只有在 $X$ 本来为正态或应用大样本近似等情况下，才可使用 $\Phi$。
+
+若 $Z\sim N(0,1)$，则
+
+$$
+\Phi(z)=P(Z\le z)
+=\int_{-\infty}^{z}\frac1{\sqrt{2\pi}}e^{-t^2/2}\,dt.
+$$
+
+利用对称性：
+
+$$
+\Phi(-z)=1-\Phi(z),\qquad
+P(|Z|<z)=2\Phi(z)-1\quad(z>0).
+$$
+
+#### 6.5.3 棣莫佛—拉普拉斯中心极限定理
+
+如果 $T_n\sim\mathrm{Bin}(n,p)$，且 $0<p<1$ 固定，令 $q=1-p$，则
+
+$$
+\boxed{\frac{T_n-np}{\sqrt{npq}}\xrightarrow{d}N(0,1)}.
+$$
+
+从而当 $n$ 足够大时
+
+$$
+T_n\ \dot\sim\ N(np,npq).
+$$
+
+**补充技巧：连续性修正（Continuity Correction）**。二项随机变量是离散的，正态变量是连续的；若要近似 $P(T_n\le k)$，常以 $P(N\le k+0.5)$ 代替，以提高数值精度。这不是课件所列推导的必需步骤，但可解释课件正态近似与精确二项概率的差别。
+
+#### 6.5.4 依分布收敛（Asymptotic Distribution）
+
+设 $F_n$ 是 $Z_n$ 的 CDF，$F$ 是极限 CDF。若在 $F$ 的所有连续点 $x$ 处
+
+$$
+\lim_{n\to\infty}F_n(x)=F(x),
+$$
+
+则称 $Z_n$ **依分布收敛**到 $F$，记作 $Z_n\xrightarrow{d}Z$（$Z$ 具有 CDF $F$）。这里 $F$ 也叫**渐近分布**（Asymptotic Distribution）。一般来说，依概率收敛到常数蕴含依分布收敛到该常数，但反过来并不一定成立。
+
+### 6.6 中心极限定理：课件原例题
+
+#### 例题（PPT：Example 6.3.1，100 人临床试验）
+
+课件假定某治疗下 100 名患者的 18 个月存活情况相互独立。如果治疗并未提高原本的存活概率 $0.5$，那么存活人数
+
+$$
+X\sim\mathrm{Bin}(100,0.5),\quad
+E(X)=50,\quad\mathrm{Var}(X)=25.
+$$
+
+由于 $n=100$ 较大，二项分布的柱形图呈钟形，课件用 $N(50,25)$ 的正态密度曲线对照，说明近似思想：
+
+$$
+X\ \dot\sim\ N(50,25).
+$$
+
+**问题理解**：这是在“治疗无效”的假设下刻画存活人数的分布；若观察到比 50 高很多的数值，可以在后续假设检验中评估其显著性。课件这一页主要强调两种分布的图形比较，未指定额外的检验阈值。
+
+#### 例题（PPT：Example 6.3.2，900 次掷硬币）
+
+独立抛公平硬币 $900$ 次，设 $H$ 为正面数，求 $P(H>495)$ 的近似值。
+
+**第一步——识别分布与参数**：
+
+$$
+H\sim\mathrm{Bin}(900,1/2),\quad
+E(H)=450,\quad
+\mathrm{Var}(H)=225,\quad\mathrm{SD}(H)=15.
+$$
+
+**第二步——正态标准化**：
+
+$$
+Z=\frac{H-450}{15}\ \dot\sim\ N(0,1).
+$$
+
+**第三步——求右尾**：
+
+$$
+P(H>495)\approx P\!\left(Z>\frac{495-450}{15}\right)
+=1-\Phi(3)\approx\boxed{0.0013}.
+$$
+
+**补充说明**：严格的 $H>495$ 表示 $H\ge496$；若用连续性修正，阈值改为 $495.5$，可以得到略有不同且通常更精确的正态近似。课件答案 $0.0013$ 使用**未修正**的方法。
+
+#### 例题（PPT：Example 6.3.3，均匀分布样本平均值）
+
+独立抽取 $X_1,\ldots,X_{12}\sim U(0,1)$，近似求
+
+$$
+P\!\left(\left|\overline X_{12}-\frac12\right|\le0.1\right).
+$$
+
+**第一步——单个观测的参数**：
+
+$$
+\mu=\frac12,\qquad\sigma^2=\frac1{12}.
+$$
+
+**第二步——样本均值方差与标准差**：
+
+$$
+\mathrm{Var}(\overline X_{12})=\frac{1/12}{12}=\frac1{144},
+\quad\mathrm{SD}(\overline X_{12})=\frac1{12}.
+$$
+
+**第三步——构造标准化变量**：
+
+$$
+Z=12\left(\overline X_{12}-\frac12\right)
+=\left(\sum_{i=1}^{12}X_i\right)-6
+\ \dot\sim\ N(0,1).
+$$
+
+**第四步——转为标准正态概率**：
+
+$$
+\begin{aligned}
+P\!\left(\left|\overline X_{12}-\frac12\right|\le0.1\right)
+&\approx P(|Z|\le1.2)\\
+&=2\Phi(1.2)-1
+\approx\boxed{0.7698}.
+\end{aligned}
+$$
+
+**课件趣闻**：早期一些伪随机数生成方法将 12 个独立均匀随机数相加再减去 6，以构造近似标准正态随机数。这只是近似，并非精确正态。
+
+#### 例题（PPT：Example 6.3.4，泊松样本均值）
+
+设 $X_1,\ldots,X_n$ i.i.d. 且 $X_i\sim\mathrm{Pois}(\theta)$，$\theta>0$。令 $\overline X_n$ 为样本均值，则
+
+$$
+E(X_i)=\theta,\qquad\mathrm{Var}(X_i)=\theta.
+$$
+
+由 CLT：
+
+$$
+Z=\frac{\sqrt n(\overline X_n-\theta)}{\sqrt\theta}
+\ \dot\sim\ N(0,1).
+$$
+
+**目标**：近似求 $P(|\overline X_n-\theta|<c)$，其中 $c>0$。
+
+$$
+\begin{aligned}
+P(|\overline X_n-\theta|<c)
+&=P\!\left(|Z|<c\sqrt{\frac n\theta}\right)\\
+&\approx\boxed{2\Phi\!\left(c\sqrt{\frac n\theta}\right)-1}.
+\end{aligned}
+$$
+
+这是课件所给的结果。它表明：固定 $c,\theta$ 后，$n$ 变大，样本均值落在 $\theta\pm c$ 内的概率趋近 1。
+
+### 6.7 课件四道中文补充例题：比较不同方法
+
+#### 例题 1：用 Chebyshev 保证硬币频率误差不超过 0.01
+
+独立抛公平硬币 $n$ 次，$\widehat p_n$ 为正面频率。利用 Chebyshev 寻找充分样本量，使
+
+$$
+P(|\widehat p_n-0.5|<0.01)\ge0.99.
+$$
+
+因为 $E(\widehat p_n)=0.5$、$\mathrm{Var}(\widehat p_n)=1/(4n)$，
+
+$$
+P(|\widehat p_n-0.5|<0.01)
+\ge1-\frac{1/(4n)}{(0.01)^2}
+=1-\frac{2500}{n}.
+$$
+
+令 $1-2500/n\ge0.99$，可得
+
+$$
+\boxed{n\ge250000}\quad\text{（Chebyshev 的充分条件）}.
+$$
+
+**思路**：已知均值与方差，要求“误差不超过 $\varepsilon$ 的概率至少 $1-\alpha$”，可从 $\sigma^2/(n\varepsilon^2)\le\alpha$ 出发。
+
+#### 例题 2：同一题用 CLT 近似估算
+
+仍要求 $P(|\widehat p_n-0.5|<0.01)\ge0.99$。由二项分布的 CLT，
+
+$$
+Z=\frac{\widehat p_n-0.5}{0.5/\sqrt n}
+=2\sqrt n\,(\widehat p_n-0.5)
+\ \dot\sim\ N(0,1).
+$$
+
+因此
+
+$$
+\begin{aligned}
+P(|\widehat p_n-0.5|<0.01)
+&\approx P(|Z|<0.02\sqrt n)\\
+&=2\Phi(0.02\sqrt n)-1.
+\end{aligned}
+$$
+
+令其至少为 0.99，则
+
+$$
+\Phi(0.02\sqrt n)\ge0.995.
+$$
+
+课件查表采用 $\Phi(2.58)\approx0.995$，所以
+
+$$
+0.02\sqrt n\ge2.58
+\Longrightarrow\boxed{n\ge16641}
+\quad\text{（课件的 CLT 近似估计）}.
+$$
+
+**比较**：Chebyshev 给 $250000$，CLT 估计约 $16641$。前者是理论下界保证，后者是依赖正态近似的估计；**不能直接把 CLT 近似结果当作严格保证**。
+
+#### 例题 3：5 吨载重汽车最多能装多少箱
+
+每箱平均重 50 kg，标准差 5 kg；假设各箱重量独立同分布。汽车最大载重量 5000 kg，要求不超载概率 $>0.977$。设装 $n$ 箱，总重 $T_n=\sum_iX_i$。
+
+**第一步——总重量的参数**：
+
+$$
+E(T_n)=50n,\quad
+\mathrm{Var}(T_n)=25n,\quad
+\mathrm{SD}(T_n)=5\sqrt n.
+$$
+
+**第二步——用 CLT 建模**：
+
+$$
+T_n\ \dot\sim\ N(50n,25n).
+$$
+
+**第三步——标准化载重上限**：
+
+$$
+P(T_n\le5000)
+\approx\Phi\!\left(\frac{5000-50n}{5\sqrt n}\right)
+=\Phi\!\left(\frac{1000-10n}{\sqrt n}\right).
+$$
+
+课件取 $\Phi(2)\approx0.977$，据此要求标准化值大约大于 2：
+
+$$
+\frac{1000-10n}{\sqrt n}>2
+\quad\Longrightarrow\quad n<98.0199\ldots
+$$
+
+所以按课件采用的正态近似与查表精度，最多装 $\boxed{98\text{ 箱}}$。
+
+**易错点**：题目给的是**标准差 5 kg**，不是方差 5；总重量方差应是 $25n$，标准差为 $5\sqrt n$。课件某页出现 $D(X_i)=5$ 的写法，与题干“标准差为 5”和后续 $25n$ 不一致，本笔记按题意使用方差 25。
+
+#### 例题 4：次品率为 10% 时的抽检数量
+
+抽检 $n$ 件，若查出**超过 10 件次品**就拒收。假设独立且每件为次品的概率是 $0.1$，希望拒收概率不低于 $0.9$。令 $T_n$ 为次品数，则
+
+$$
+T_n\sim\mathrm{Bin}(n,0.1),\quad
+E(T_n)=0.1n,\quad
+\mathrm{Var}(T_n)=0.09n.
+$$
+
+**课件的未做连续性修正的 CLT 计算**：
+
+$$
+\begin{aligned}
+P(T_n>10)
+&\approx 1-\Phi\!\left(\frac{10-0.1n}{0.3\sqrt n}\right)\\
+&=\Phi\!\left(\frac{0.1n-10}{0.3\sqrt n}\right).
+\end{aligned}
+$$
+
+由于 $\Phi(1.28)\approx0.9$，令
+
+$$
+\frac{0.1n-10}{0.3\sqrt n}\ge1.28.
+$$
+
+课件求得 $n\ge146.8$，故给出 $\boxed{147}$，这是**未做连续性修正的正态近似答案**。
+
+**重要：课件近似值与精确要求不一致。** 用二项分布精确计算：
+
+$$
+P(T_n>10)
+=1-\sum_{k=0}^{10}\binom nk(0.1)^k(0.9)^{n-k}.
+$$
+
+其中
+
+$$
+\begin{aligned}
+P(T_{147}>10)&\approx\boxed{0.8792}<0.9,\\
+P(T_{151}>10)&\approx0.8986<0.9,\\
+P(T_{152}>10)&\approx\boxed{0.9031}\ge0.9.
+\end{aligned}
+$$
+
+因此，如果“**不低于 0.9**”必须严格满足，二项模型下的**精确最小抽检量为** $\boxed{n=152}$。课件的 147 是粗略 CLT 估计，不能说它在精确二项模型下“保证”达到要求。
+
+### 6.8 第五章与第六章的联系及易错点
+
+| 容易混淆 | 正确理解 |
+| --- | --- |
+| 正态变量的和 vs 中心极限定理 | 前者在独立正态条件下**精确正态**；后者对很多非正态总体的样本均值给出**大样本近似正态** |
+| 大数定律 vs 中心极限定理 | 大数定律说均值趋近 $\mu$；中心极限定理刻画放大 $\sqrt n$ 后的波动分布 |
+| 单次标准差 vs 样本均值标准误 | $\sigma$ vs $\sigma/\sqrt n$ |
+| 标准化 vs 正态化 | 标准化只保证均值 0、方差 1，不保证正态 |
+| Markov vs Chebyshev | Markov 直接要求非负变量；Chebyshev 对中心化平方应用 Markov |
+| 不等式上界 vs 精确概率 | Chebyshev 给保守的界，不能把上下界当成真实概率 |
+| CLT 近似 vs 严格保证 | 近似结果可能与精确二项分布的阈值不同；必要时计算精确概率 |
+| 弱收敛 vs 强收敛 | 几乎必然收敛蕴含依概率收敛；反之不一定 |
+| $P(X\le k)$ vs $P(X>k)$ | 离散变量必须明确端点，$X>10$ 意味着 $X\ge11$ |
+
+
+### 6.9 第六章小结与公式速查
+
+| 知识点 | 核心公式 | 何时使用 |
+| --- | --- | --- |
+| 样本均值 | $\overline X_n=n^{-1}\sum_iX_i$ | 平均观测值 |
+| 均值和方差 | $E(\overline X_n)=\mu$，$\mathrm{Var}(\overline X_n)=\sigma^2/n$ | i.i.d. 样本 |
+| Markov | $P(X\ge t)\le E(X)/t$ | $X\ge0$ |
+| Chebyshev | $P(\lvert X-\mu\rvert\ge t)\le\sigma^2/t^2$ | 仅知均值与方差 |
+| 弱大数定律 | $\overline X_n\xrightarrow{P}\mu$ | 说明长期稳定性 |
+| CLT（样本均值） | $\sqrt n(\overline X_n-\mu)/\sigma\xrightarrow{d}N(0,1)$ | 估计大样本均值的概率 |
+| CLT（样本和） | $\sum_iX_i\ \dot\sim\ N(n\mu,n\sigma^2)$ | 大样本总和 |
+| 二项正态近似 | $\mathrm{Bin}(n,p)\ \dot\sim\ N(np,np(1-p))$ | 大样本计数 |
+
+**推荐解题顺序**：先判断题目究竟求“频率/均值趋近多少”，还是求一个**数值概率**；再根据题目是否给出完整分布、是否已知均值方差、是否可以用大样本近似，选择**精确分布 / Chebyshev / CLT**。
+
+---
+
 ## 常见易错点总表
 
 | 容易混淆的概念           | 正确区分                                                   |
@@ -1513,6 +2432,11 @@ $$
 | 期望可加 vs 方差可加     | 期望线性不需要独立；方差需要处理协方差                     |
 | 不相关 vs 独立           | 独立通常推出不相关；不相关仍可能非线性依赖                 |
 | 卷积积分限               | 必须看支撑区域随 $z$ 如何变化                              |
+| 独立正态的和 vs 大样本近似 | 前者在假设成立时精确正态；CLT 对一般总体给出近似正态        |
+| 标准化 vs 正态化           | 减均值除标准差后，不会自动变成正态                          |
+| 样本均值标准误 vs 总体标准差 | 前者是 $\sigma/\sqrt n$，后者是 $\sigma$             |
+| Chebyshev 界 vs 精确概率  | 给出保守保证，不等于精确概率                                |
+| CLT 近似 vs 严格概率约束  | 近似阈值可能不足以满足精确二项概率的要求                    |
 
 ## 复习时的公式速查
 
@@ -1527,18 +2451,22 @@ f_{Y\mid X}(y\mid x)&=\frac{f_{X,Y}(x,y)}{f_X(x)},\\
 E(X)&=\sum_xxf_X(x)\ \text{或}\ \int xf_X(x)\,dx,\\
 \mathrm{Var}(X)&=E(X^2)-[E(X)]^2,\\
 \mathrm{Cov}(X,Y)&=E(XY)-E(X)E(Y),\\
-\rho_{X,Y}&=\frac{\mathrm{Cov}(X,Y)}{\sigma_X\sigma_Y}.
+\rho_{X,Y}&=\frac{\mathrm{Cov}(X,Y)}{\sigma_X\sigma_Y},\\
+E(\overline X_n)&=\mu,\quad\mathrm{Var}(\overline X_n)=\frac{\sigma^2}{n},\\
+P(|X-\mu|\ge t)&\le\frac{\sigma^2}{t^2}\quad(\text{Chebyshev}),\\
+\overline X_n&\xrightarrow{P}\mu\quad(\text{WLLN}),\\
+\frac{\sqrt n(\overline X_n-\mu)}{\sigma}&\xrightarrow{d}N(0,1)\quad(\text{CLT}).
 \end{aligned}
 $$
 
 ## 后续新增章节模板
 
-<!-- 将下面的模板复制到文档末尾，并改为第五章、第六章等。不要将本章模板当成已经学习过的课程内容。 -->
+<!-- 将下面的模板复制到文档末尾，并按课程内容更改章节序号。不要将本章模板当成已经学习过的课程内容。 -->
 
 ```markdown
-## 第五章 待补充章节标题
+## 第七章 待补充章节标题
 
-### 5.1 知识点名称
+### 7.1 知识点名称
 
 **核心概念**：
 
@@ -1558,7 +2486,7 @@ $$
 
 **常见错误**：
 
-### 5.2 知识点名称
+### 7.2 知识点名称
 ```
 
 ## 更新记录
@@ -1566,3 +2494,4 @@ $$
 | 日期       | 内容                                                                        |
 | ---------- | --------------------------------------------------------------------------- |
 | 2026-10-14 | 建立长期更新版笔记；依据四份 PPT 整理第 1～4 章知识点、公式和典型例题解答。 |
+| 2026-10-22 | 根据 Chapter 5 和 Chapter 6 PPT 新增第 5～6 章：独立正态线性组合、大数定律、Markov/Chebyshev、CLT 与课件例题；补充课件近似值和严格概率要求之间的差异，并更新公式速查。 |
