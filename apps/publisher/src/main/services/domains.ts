@@ -90,6 +90,17 @@ interface FileIdentity {
   readonly ctimeNs: bigint
 }
 
+interface RemovableDirectoryEntry {
+  readonly path: string
+  readonly kind: "directory" | "file"
+  readonly identity: FileIdentity
+}
+
+interface RemovableDirectorySnapshot {
+  readonly directoryIdentity: string
+  readonly entries: readonly RemovableDirectoryEntry[]
+}
+
 interface SerializedFileIdentity {
   readonly dev: string
   readonly ino: string
@@ -3078,12 +3089,10 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
   async function inspectRemovableDirectory(
     workspace: string,
     directory: string,
-    expectedEntries: readonly string[],
-    expectedDirectoryIdentity?: string,
+    expectedSnapshot?: RemovableDirectorySnapshot,
     expectedIndexIdentity?: FileIdentity,
-  ): Promise<string> {
+  ): Promise<RemovableDirectorySnapshot> {
     let details: BigIntStats
-    let entries
     try {
       details = await lstat(directory, { bigint: true })
       const canonical = await realpath(directory)
@@ -3091,55 +3100,76 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
         details.isSymbolicLink() ||
         !details.isDirectory() ||
         !pathsEqual(directory, canonical) ||
-        (expectedDirectoryIdentity !== undefined &&
-          inodeIdentity(details) !== expectedDirectoryIdentity)
+        (expectedSnapshot !== undefined &&
+          inodeIdentity(details) !== expectedSnapshot.directoryIdentity)
       ) {
         throw unsafePath(displayPath(workspace, directory))
       }
-      entries = await readdir(directory, { withFileTypes: true })
     } catch (error) {
       if (isDomainDiscoveryError(error)) throw error
       throw unsafePath(displayPath(workspace, directory))
     }
-    const expected = [...expectedEntries].sort(compareText)
-    entries.sort((left, right) => compareText(left.name, right.name))
-    for (const entry of entries) {
-      const candidate = resolve(directory, entry.name)
-      let entryDetails: BigIntStats
-      try {
-        entryDetails = await lstat(candidate, { bigint: true })
-        if (
-          entryDetails.isSymbolicLink() ||
-          !pathsEqual(candidate, await realpath(candidate)) ||
-          !isInside(directory, candidate)
-        ) {
+
+    const captured: RemovableDirectoryEntry[] = []
+    const walk = async (parent: string, prefix: string): Promise<void> => {
+      const entries = await readdir(parent, { withFileTypes: true })
+      entries.sort((left, right) => compareText(left.name, right.name))
+      for (const entry of entries) {
+        const candidate = resolve(parent, entry.name)
+        const path = prefix ? `${prefix}/${entry.name}` : entry.name
+        let entryDetails: BigIntStats
+        try {
+          entryDetails = await lstat(candidate, { bigint: true })
+          if (
+            entryDetails.isSymbolicLink() ||
+            !pathsEqual(candidate, await realpath(candidate)) ||
+            !isInside(directory, candidate) ||
+            (!entryDetails.isFile() && !entryDetails.isDirectory())
+          ) {
+            throw unsafePath(displayPath(workspace, candidate))
+          }
+        } catch (error) {
+          if (isDomainDiscoveryError(error)) throw error
           throw unsafePath(displayPath(workspace, candidate))
         }
-      } catch (error) {
-        if (isDomainDiscoveryError(error)) throw error
-        throw unsafePath(displayPath(workspace, candidate))
-      }
-      if (!expected.includes(entry.name)) {
-        throw catalogError(
-          "DOMAIN_NOT_EMPTY",
-          "The domain still contains files or directories and cannot be removed.",
-          { path: displayPath(workspace, candidate) },
-        )
-      }
-      if (
-        entry.name === "index.md" &&
-        (entryDetails.isSymbolicLink() ||
-          !entryDetails.isFile() ||
-          (expectedIndexIdentity !== undefined &&
-            !sameFileIdentity(expectedIndexIdentity, fileIdentity(entryDetails))))
-      ) {
-        throw unsafePath(displayPath(workspace, candidate))
+        const kind = entryDetails.isDirectory() ? "directory" : "file"
+        captured.push({ path, kind, identity: fileIdentity(entryDetails) })
+        if (kind === "directory") await walk(candidate, path)
       }
     }
-    if (entries.map(({ name }) => name).join("\0") !== expected.join("\0")) {
-      throw unsafePath(displayPath(workspace, directory))
+    await walk(directory, "")
+
+    const index = captured.find(({ path }) => path === "index.md")
+    if (
+      expectedIndexIdentity !== undefined &&
+      (index === undefined ||
+        index.kind !== "file" ||
+        !sameFileIdentity(expectedIndexIdentity, index.identity))
+    ) {
+      throw unsafePath(displayPath(workspace, resolve(directory, "index.md")))
     }
-    return inodeIdentity(details)
+    const snapshot = { directoryIdentity: inodeIdentity(details), entries: captured } as const
+    if (expectedSnapshot !== undefined) {
+      const matches =
+        captured.length === expectedSnapshot.entries.length &&
+        captured.every((entry, index) => {
+          const expected = expectedSnapshot.entries[index]
+          return (
+            expected !== undefined &&
+            entry.path === expected.path &&
+            entry.kind === expected.kind &&
+            (entry.kind === "directory"
+              ? inodeIdentity(entry.identity) === inodeIdentity(expected.identity)
+              : sameFileIdentity(entry.identity, expected.identity))
+          )
+        })
+      if (!matches) {
+        throw catalogError("DOMAIN_NOT_EMPTY", "The domain contents changed during removal.", {
+          path: displayPath(workspace, directory),
+        })
+      }
+    }
+    return snapshot
   }
 
   async function restoreStagedDirectory(
@@ -3219,27 +3249,23 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
     if (page === undefined || parseDomainPage(page, input.slug) === undefined) {
       throw unsafePath(displayPath(canonical.directory, resolve(publicDirectory, "index.md")))
     }
-    const publicIdentity = await inspectRemovableDirectory(
+    const publicSnapshot = await inspectRemovableDirectory(
       canonical.directory,
       publicDirectory,
-      ["index.md"],
       undefined,
       page.identity,
     )
-    const privateIdentity = await inspectRemovableDirectory(
-      canonical.directory,
-      privateDirectory,
-      [],
-    )
+    const privateSnapshot = await inspectRemovableDirectory(canonical.directory, privateDirectory)
+    const publicIdentity = publicSnapshot.directoryIdentity
+    const privateIdentity = privateSnapshot.directoryIdentity
     await options.hooks?.afterRemoveInspection?.(input.slug)
     await inspectRemovableDirectory(
       canonical.directory,
       publicDirectory,
-      ["index.md"],
-      publicIdentity,
+      publicSnapshot,
       page.identity,
     )
-    await inspectRemovableDirectory(canonical.directory, privateDirectory, [], privateIdentity)
+    await inspectRemovableDirectory(canonical.directory, privateDirectory, privateSnapshot)
     await Promise.all([
       revalidateMutatedBoundary(canonical.directory, canonical),
       revalidateMutatedBoundary(canonical.directory, content),
@@ -3447,15 +3473,13 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
         await inspectRemovableDirectory(
           canonical.directory,
           publicDirectory,
-          ["index.md"],
-          publicIdentity,
+          publicSnapshot,
           page.identity,
         ).catch((error: unknown) => failures.push(error))
         await inspectRemovableDirectory(
           canonical.directory,
           privateDirectory,
-          [],
-          privateIdentity,
+          privateSnapshot,
         ).catch((error: unknown) => failures.push(error))
       }
       if (failures.length === 0) {
@@ -3516,8 +3540,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
       await inspectRemovableDirectory(
         canonical.directory,
         stagedPublic,
-        ["index.md"],
-        publicIdentity,
+        publicSnapshot,
         page.identity,
       )
       await Promise.all([
@@ -3538,7 +3561,7 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
       ) {
         throw new Error("The staged private domain identity changed")
       }
-      await inspectRemovableDirectory(canonical.directory, stagedPrivate, [], privateIdentity)
+      await inspectRemovableDirectory(canonical.directory, stagedPrivate, privateSnapshot)
       await Promise.all([
         syncDirectory(privateRoot.directory, openFile),
         syncDirectory(transaction, openFile),
@@ -3579,11 +3602,10 @@ export function createDomainCatalog(options: DomainCatalogOptions): DomainCatalo
       await inspectRemovableDirectory(
         canonical.directory,
         stagedPublic,
-        ["index.md"],
-        publicIdentity,
+        publicSnapshot,
         page.identity,
       )
-      await inspectRemovableDirectory(canonical.directory, stagedPrivate, [], privateIdentity)
+      await inspectRemovableDirectory(canonical.directory, stagedPrivate, privateSnapshot)
       try {
         await verifyTransactionStructure()
       } catch (error) {

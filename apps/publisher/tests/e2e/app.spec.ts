@@ -1433,7 +1433,7 @@ test("manages custom domains across restarts and blogs", async () => {
     await expect(nonEmptyDomain).toContainText("私密 1")
     await expect(
       nonEmptyDomain.getByRole("button", { name: "删除（公开 1，私密 1）" }),
-    ).toBeDisabled()
+    ).toBeEnabled()
     await nonEmptyDomain.getByRole("button", { name: "编辑 人工智能 的信息" }).click()
     const metadataEditor = page.getByRole("dialog", { name: "编辑领域信息" })
     await metadataEditor.getByLabel("描述（选填）").fill("人工智能领域说明")

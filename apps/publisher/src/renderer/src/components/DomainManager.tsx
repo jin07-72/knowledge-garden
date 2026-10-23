@@ -311,7 +311,6 @@ export function DomainManager({
                       <button
                         type="button"
                         className="secondary-button domain-remove-button"
-                        disabled={noteCount > 0}
                         aria-label={
                           noteCount > 0
                             ? `删除（公开 ${domain.publicNotes}，私密 ${domain.privateNotes}）`
@@ -350,7 +349,12 @@ export function DomainManager({
         </>
       ) : mode.kind === "confirm-remove" ? (
         <div className="domain-manager-confirm">
-          <p>确认删除「{mode.domain.name}」？此操作会移除领域目录，且不能撤销。</p>
+          <p>
+            确认删除「{mode.domain.name}」？领域目录会移入系统回收站。
+            {mode.domain.publicNotes + mode.domain.privateNotes > 0
+              ? `同时移入回收站：公开 ${mode.domain.publicNotes} 篇、私密 ${mode.domain.privateNotes} 篇笔记。`
+              : ""}
+          </p>
           {error ? (
             <p className="form-error" role="alert">
               {error}

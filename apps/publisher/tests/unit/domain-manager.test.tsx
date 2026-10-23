@@ -226,7 +226,7 @@ describe("DomainManager", () => {
   it.each([
     ["create", "DOMAIN_ALREADY_EXISTS", "A domain with that name or path already exists."],
     ["rename", "DOMAIN_ALREADY_EXISTS", "A domain with that name or path already exists."],
-    ["remove", "DOMAIN_NOT_EMPTY", "This domain is not empty and cannot be removed."],
+    ["remove", "DOMAIN_NOT_EMPTY", "The domain contents changed. Review them and try again."],
     [
       "rename",
       "DOMAIN_ROLLBACK_UNCERTAIN",
@@ -377,7 +377,7 @@ describe("DomainManager", () => {
     await waitFor(() => expect(onRename).toHaveBeenCalledWith({ slug: "technology", name: "工程" }))
   })
 
-  it("requires confirmation for an empty domain and disables non-empty delete", async () => {
+  it("requires confirmation for both populated and empty domains", async () => {
     const user = userEvent.setup()
     const onRemove = vi.fn(async () => domains)
     render(
@@ -391,7 +391,10 @@ describe("DomainManager", () => {
       />,
     )
     const nonEmpty = screen.getByRole("article", { name: "技术" })
-    expect(within(nonEmpty).getByRole("button", { name: /删除/ })).toBeDisabled()
+    await user.click(within(nonEmpty).getByRole("button", { name: /删除/ }))
+    expect(screen.getByText("确认删除领域？")).toBeInTheDocument()
+    expect(screen.getByText(/同时移入回收站：公开 2 篇、私密 1 篇笔记/)).toBeVisible()
+    await user.click(screen.getByRole("button", { name: "取消" }))
     const empty = screen.getByRole("article", { name: "空领域" })
     await user.click(
       within(screen.getByRole("article", { name: "空领域" })).getByRole("button", {

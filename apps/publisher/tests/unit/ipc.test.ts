@@ -395,7 +395,7 @@ describe("secure publisher IPC", () => {
       "domainsRemove",
       { slug: "existing" },
       "DOMAIN_NOT_EMPTY",
-      "This domain is not empty and cannot be removed.",
+      "The domain contents changed. Review them and try again.",
     ],
     [
       "domainsRename",

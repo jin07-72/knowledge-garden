@@ -2827,25 +2827,45 @@ describe("DomainCatalog.remove", () => {
     ])
   }
 
+  it("moves a populated public and private domain tree to trash as one transaction", async () => {
+    const root = await createGarden()
+    await createEmptyDomain(root)
+    await Promise.all([
+      writeFixture(root, "content/ai/public-note.md", "public note"),
+      writeFixture(root, "private/ai/private-note.md", "private note"),
+      writeFixture(root, "content/ai/assets/chart.png", "image"),
+    ])
+    const trashItem = vi.fn(async (target: string) => {
+      await rm(target, { recursive: true })
+    })
+    const catalog = createDomainCatalog({ workspace: root, trash: { trashItem } })
+
+    await expect(catalog.remove({ slug: "ai" })).resolves.toEqual([])
+
+    expect(trashItem).toHaveBeenCalledTimes(1)
+    await expect(lstat(join(root, "content", "ai"))).rejects.toMatchObject({ code: "ENOENT" })
+    await expect(lstat(join(root, "private", "ai"))).rejects.toMatchObject({ code: "ENOENT" })
+  })
+
   it.each([
     ["a direct public note", "content/ai/note.md"],
     ["a direct private note", "private/ai/note.md"],
     ["an attachment", "content/ai/assets/chart.png"],
     ["an unexpected public file", "content/ai/readme.txt"],
     ["an extra private directory", "private/ai/archive/keep.txt"],
-  ])("blocks removal when the domain contains %s", async (_label, extraPath) => {
+  ])("moves the domain to trash when it contains %s", async (_label, extraPath) => {
     const root = await createGarden()
     await createEmptyDomain(root)
     await writeFixture(root, extraPath, "keep")
-    const trashItem = vi.fn(async () => undefined)
+    const trashItem = vi.fn(async (target: string) => {
+      await rm(target, { recursive: true })
+    })
     const catalog = createDomainCatalog({ workspace: root, trash: { trashItem } })
 
-    await expect(catalog.remove({ slug: "ai" })).rejects.toMatchObject({
-      code: "DOMAIN_NOT_EMPTY",
-    })
+    await expect(catalog.remove({ slug: "ai" })).resolves.toEqual([])
 
-    expect(trashItem).not.toHaveBeenCalled()
-    await expect(readFile(join(root, extraPath), "utf8")).resolves.toBe("keep")
+    expect(trashItem).toHaveBeenCalledTimes(1)
+    await expect(lstat(join(root, extraPath))).rejects.toMatchObject({ code: "ENOENT" })
   })
 
   it("rejects linked entries inside a removable domain as unsafe", async () => {

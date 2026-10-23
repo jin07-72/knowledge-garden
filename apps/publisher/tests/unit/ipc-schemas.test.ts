@@ -69,7 +69,7 @@ describe("public domain failures", () => {
     ["DOMAIN_BUSY", "A domain operation is still in progress. Try again when it finishes."],
     ["DOMAIN_DISPOSED", "Domain management is unavailable. Reopen the workspace."],
     ["DOMAIN_NOT_FOUND", "The requested domain no longer exists. Refresh the domain list."],
-    ["DOMAIN_NOT_EMPTY", "This domain is not empty and cannot be removed."],
+    ["DOMAIN_NOT_EMPTY", "The domain contents changed. Review them and try again."],
     ["DOMAIN_ORDER_EXHAUSTED", "No safe domain order remains for a new domain."],
     [
       "DOMAIN_ROLLBACK_UNCERTAIN",
