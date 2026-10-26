@@ -102,6 +102,8 @@ function setup(
     readOnly?: boolean
     images?: GardenApi["images"]
     onSaved?: (receipt: NoteWriteReceipt) => void
+    onRevealPreview?: (selection: { readonly text: string; readonly positionRatio: number }) => void
+    previewNavigationMessage?: string
   } = {},
 ) {
   const selectedDocument = options.document ?? document
@@ -111,6 +113,7 @@ function setup(
   const writeRecovery = vi.fn(async () => ok({ contentHash: "c".repeat(64) }))
   const discardRecovery = vi.fn(options.discardRecovery ?? (async () => ok(undefined)))
   const onSaved = vi.fn(options.onSaved)
+  const onRevealPreview = vi.fn(options.onRevealPreview)
   const images = options.images ?? imageApi()
   const ref = createRef<MarkdownEditorHandle>()
   const editor = (currentDocument = selectedDocument, readOnly = options.readOnly) => (
@@ -124,6 +127,8 @@ function setup(
       images={images}
       readOnly={readOnly}
       onSaved={onSaved}
+      onRevealPreview={onRevealPreview}
+      previewNavigationMessage={options.previewNavigationMessage}
     />
   )
   const view = render(editor())
@@ -136,6 +141,7 @@ function setup(
     writeRecovery,
     discardRecovery,
     onSaved,
+    onRevealPreview,
     images,
     sourceDocument: selectedDocument,
     rerenderReadOnly: (readOnly: boolean) => view.rerender(editor(selectedDocument, readOnly)),
@@ -253,6 +259,44 @@ beforeEach(() => {
 })
 
 describe("MarkdownEditor", () => {
+  it("requests preview navigation for the selected editor text", async () => {
+    const user = userEvent.setup()
+    const harness = setup({ previewNavigationMessage: "已定位到预览" })
+    await waitFor(() => expect(editorView().contentDOM).toHaveAttribute("contenteditable", "true"))
+    const view = editorView()
+    const editorMarkdown = view.state.doc.toString()
+    const from = editorMarkdown.lastIndexOf("Grid")
+    act(() => {
+      view.dispatch({ selection: { anchor: from, head: from + "Grid".length } })
+    })
+
+    await user.click(screen.getByRole("button", { name: "定位预览" }))
+
+    expect(harness.onRevealPreview).toHaveBeenCalledWith({
+      text: "Grid",
+      positionRatio: (from + (from + "Grid".length)) / 2 / editorMarkdown.length,
+    })
+    expect(screen.getByRole("status", { name: "预览定位状态" })).toHaveTextContent("已定位到预览")
+  })
+
+  it("asks for a non-empty selection before locating the preview", async () => {
+    const user = userEvent.setup()
+    const harness = setup()
+    await waitFor(() => expect(editorView().contentDOM).toHaveAttribute("contenteditable", "true"))
+
+    await user.click(screen.getByRole("button", { name: "定位预览" }))
+
+    expect(harness.onRevealPreview).not.toHaveBeenCalled()
+    expect(screen.getByRole("status", { name: "预览定位状态" })).toHaveTextContent(
+      "请先选择要定位的文字",
+    )
+  })
+
+  it("disables preview navigation while the editor is read-only", () => {
+    setup({ readOnly: true })
+    expect(screen.getByRole("button", { name: "定位预览" })).toBeDisabled()
+  })
+
   it("opens the current note image library and keeps the editor state untouched through image actions", async () => {
     const user = userEvent.setup()
     const photo: ImageLibraryItem = {

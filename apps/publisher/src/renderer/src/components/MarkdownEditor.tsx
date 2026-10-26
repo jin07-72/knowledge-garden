@@ -153,6 +153,11 @@ export const MarkdownEditor = forwardRef<
     readonly onSaved?: (receipt: NoteWriteReceipt) => void
     readonly onSaveStateChange?: (label: string) => void
     readonly onPreviewChange?: (markdown: string) => void
+    readonly onRevealPreview?: (selection: {
+      readonly text: string
+      readonly positionRatio: number
+    }) => void
+    readonly previewNavigationMessage?: string
   }
 >(function MarkdownEditor(
   {
@@ -167,6 +172,8 @@ export const MarkdownEditor = forwardRef<
     onSaved,
     onSaveStateChange,
     onPreviewChange,
+    onRevealPreview,
+    previewNavigationMessage,
   },
   ref,
 ) {
@@ -206,6 +213,7 @@ export const MarkdownEditor = forwardRef<
   const [recoveryActionError, setRecoveryActionError] = useState<string>()
   const [imageLibraryPath, setImageLibraryPath] = useState<string>()
   const [editorWritable, setEditorWritable] = useState(false)
+  const [previewSelectionMessage, setPreviewSelectionMessage] = useState<string>()
   const autosave = useAutosave({
     document,
     save,
@@ -365,7 +373,24 @@ export const MarkdownEditor = forwardRef<
 
   useEffect(() => {
     setImageLibraryPath(undefined)
+    setPreviewSelectionMessage(undefined)
   }, [document.path, editorWritable])
+
+  const revealPreview = (): void => {
+    const view = editor.current
+    if (!view || readOnly) return
+    const selection = view.state.selection.main
+    const text = view.state.sliceDoc(selection.from, selection.to)
+    if (!text.trim()) {
+      setPreviewSelectionMessage("请先选择要定位的文字")
+      return
+    }
+    setPreviewSelectionMessage(undefined)
+    onRevealPreview?.({
+      text,
+      positionRatio: (selection.from + selection.to) / 2 / Math.max(1, view.state.doc.length),
+    })
+  }
 
   useEffect(() => {
     const view = editor.current
@@ -493,6 +518,9 @@ export const MarkdownEditor = forwardRef<
         >
           搜索
         </button>
+        <button type="button" disabled={readOnly} onClick={revealPreview} aria-label="定位预览">
+          定位预览
+        </button>
         <button
           type="button"
           disabled={!editorWritable}
@@ -501,6 +529,16 @@ export const MarkdownEditor = forwardRef<
         >
           图片库
         </button>
+        {(previewSelectionMessage ?? previewNavigationMessage) ? (
+          <span
+            className="preview-navigation-status"
+            role="status"
+            aria-live="polite"
+            aria-label="预览定位状态"
+          >
+            {previewSelectionMessage ?? previewNavigationMessage}
+          </span>
+        ) : null}
       </div>
       {readOnly ? (
         <p role="status" aria-label="编辑器切换状态" className="save-state">
