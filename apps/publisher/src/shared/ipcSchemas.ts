@@ -767,6 +767,13 @@ export const blogImportProgressSchema = z
   .strict()
 
 export const previewProgressSchema = previewStatusSchema
+export const previewRevealRequestSchema = z
+  .object({
+    url: loopbackUrlSchema,
+    text: z.string().trim().min(1).max(4_096),
+    positionRatio: z.number().finite().min(0).max(1),
+  })
+  .strict()
 export const beforeCloseSchema = z.object({ requestId: z.string().uuid() }).strict()
 export const closeBlockedSchema = z.object({ message: z.string().min(1).max(1_000) }).strict()
 export const trashRecoveryUpdateSchema = z
@@ -806,6 +813,7 @@ export const IPC_SUCCESS_SCHEMAS = {
   [IPC_CHANNELS.requests.previewStart]: previewStatusSchema,
   [IPC_CHANNELS.requests.previewStop]: previewStatusSchema,
   [IPC_CHANNELS.requests.previewStatus]: previewStatusSchema,
+  [IPC_CHANNELS.requests.previewRevealSelection]: z.enum(["found", "not-found", "not-ready"]),
   [IPC_CHANNELS.requests.changesList]: changeReviewSchema,
   [IPC_CHANNELS.requests.changesCancel]: z.undefined(),
   [IPC_CHANNELS.requests.publishStart]: publishStartReceiptSchema,

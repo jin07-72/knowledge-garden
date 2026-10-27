@@ -50,7 +50,12 @@ import {
   createPublisherForTest,
   type PublishProgressEvent,
 } from "./services/publish"
-import type { PreviewStatus, PublishProgress } from "../shared/contracts"
+import type {
+  PreviewRevealRequest,
+  PreviewRevealResult,
+  PreviewStatus,
+  PublishProgress,
+} from "../shared/contracts"
 import { resolveMainRuntimeFiles } from "./mainRuntime"
 import { createBlogRegistry } from "./services/blogRegistry"
 import { createBlogAddressResolver } from "./services/blogAddresses"
@@ -61,6 +66,7 @@ import {
 } from "./services/blogImport"
 import { createElectronImageLibraryAdapter } from "./services/imageLibraryElectron"
 import { createPublishBranchRepair } from "./services/publishBranchRepair"
+import { revealSelectionInPreviewFrames } from "./previewFrameNavigation"
 
 let mainWindow: BrowserWindow | undefined
 let mainWindowTrust: RendererTrustPolicy | undefined
@@ -71,6 +77,14 @@ let prepareBlogManagementShutdown: (() => Promise<void>) | undefined
 let restoreBlogManagementAfterFailedShutdown: (() => void) | undefined
 let previewManager: (PreviewServicePort & { dispose(): Promise<void> }) | undefined
 let publisherServices: PublisherRuntimeServices | undefined
+
+async function revealSelectionInCurrentPreview(
+  request: PreviewRevealRequest,
+): Promise<PreviewRevealResult> {
+  const window = mainWindow
+  if (!window || window.isDestroyed() || window.webContents.isDestroyed()) return "not-ready"
+  return revealSelectionInPreviewFrames([...window.webContents.mainFrame.framesInSubtree], request)
+}
 
 const runtimeShutdown = createPublisherRuntimeShutdown({
   getServices: () => publisherServices,
@@ -464,7 +478,13 @@ app.whenReady().then(async () => {
     })
     unregisterIpc = registerPublisherIpc({
       ipcMain,
-      services: publisherServices,
+      services: {
+        ...publisherServices,
+        preview: {
+          ...publisherServices.preview,
+          revealSelection: revealSelectionInCurrentPreview,
+        },
+      },
       isTrustedSender,
       eventTargets,
       includeBlogManagement: false,

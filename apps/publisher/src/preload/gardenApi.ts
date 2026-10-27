@@ -51,6 +51,8 @@ import {
   type NoteWriteReceipt,
   type PreviewStartRequest,
   type PreviewStatus,
+  type PreviewRevealRequest,
+  type PreviewRevealResult,
   type PublishCancelRequest,
   type PublishBranchRepairReceipt,
   type PublishProgress,
@@ -243,6 +245,8 @@ export function createGardenApi(ipc: IpcRendererPort): GardenApi {
       invoke<PreviewStatus>(ipc, IPC_CHANNELS.requests.previewStart, request),
     stop: () => invoke<PreviewStatus>(ipc, IPC_CHANNELS.requests.previewStop),
     status: () => invoke<PreviewStatus>(ipc, IPC_CHANNELS.requests.previewStatus),
+    revealSelection: (request: PreviewRevealRequest) =>
+      invoke<PreviewRevealResult>(ipc, IPC_CHANNELS.requests.previewRevealSelection, request),
     onProgress: (listener: (status: PreviewStatus) => void) =>
       subscription(ipc, IPC_CHANNELS.events.previewProgress, previewProgressSchema, listener),
   })

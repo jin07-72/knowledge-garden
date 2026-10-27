@@ -2093,6 +2093,11 @@ describe("preload garden API", () => {
     await api.preview.start({ preferredPort: 4173 })
     await api.preview.stop()
     await api.preview.status()
+    await api.preview.revealSelection?.({
+      url: "http://127.0.0.1:8080/life/a",
+      text: "目标",
+      positionRatio: 0.5,
+    })
     await api.changes.list()
     await api.changes.cancel()
     await api.publish.start({ changeGroupIds: ["note:a"], message: "Publish A" })

@@ -52,6 +52,8 @@ import {
   type NoteWriteReceipt,
   type PreviewStartRequest,
   type PreviewStatus,
+  type PreviewRevealRequest,
+  type PreviewRevealResult,
   type PublishCancelRequest,
   type PublishBranchRepairReceipt,
   type PublishProgress,
@@ -86,6 +88,7 @@ import {
   imageLibraryPathRequestSchema,
   markdownSchema,
   previewProgressSchema,
+  previewRevealRequestSchema,
   publishProgressSchema,
   trashRecoveryUpdateSchema,
 } from "../shared/ipcSchemas"
@@ -145,6 +148,7 @@ export interface PublisherIpcServices {
     start(request: PreviewStartRequest): Promise<PreviewStatus>
     stop(): Promise<PreviewStatus>
     status(): Promise<PreviewStatus> | PreviewStatus
+    revealSelection?(request: PreviewRevealRequest): Promise<PreviewRevealResult>
     subscribe(listener: (status: PreviewStatus) => void): () => void
   }
   readonly changes: {
@@ -1004,6 +1008,15 @@ export function registerPublisherIpc(options: RegisterPublisherIpcOptions): () =
       IPC_CHANNELS.requests.previewStatus,
       secureHandler(IPC_CHANNELS.requests.previewStatus, noRequestSchema, isTrustedSender, () =>
         services.preview.status(),
+      ),
+    ],
+    [
+      IPC_CHANNELS.requests.previewRevealSelection,
+      secureHandler(
+        IPC_CHANNELS.requests.previewRevealSelection,
+        previewRevealRequestSchema,
+        isTrustedSender,
+        (request) => services.preview.revealSelection?.(request) ?? "not-ready",
       ),
     ],
     [

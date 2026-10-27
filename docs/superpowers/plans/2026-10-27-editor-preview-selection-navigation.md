@@ -4,7 +4,7 @@
 
 **Goal:** Add a “定位预览” editor-toolbar action that reveals the selected Markdown text in the current local preview, scrolls it into view, and briefly highlights the matching rendered block.
 
-**Architecture:** Keep matching and DOM navigation in a focused renderer utility, pass immutable navigation requests from `MarkdownEditor` through `App` into `PreviewPane`, and report a small result state back to the editor. `PreviewPane` owns tab switching and access to the same-origin Quartz iframe or simplified local preview, while the utility owns normalization, candidate ranking, scrolling, highlighting, and cleanup.
+**Architecture:** Keep matching and DOM navigation in focused utilities, pass immutable navigation requests from `MarkdownEditor` through `App` into `PreviewPane`, and report a small result state back to the editor. `PreviewPane` owns tab switching and the simplified local preview; the trusted main process locates only the matching loopback Quartz child frame and executes the same bounded reveal behavior without weakening iframe isolation.
 
 **Tech Stack:** React 19, TypeScript, CodeMirror 6, Vitest, Testing Library, jsdom, Electron/Vite.
 
@@ -13,6 +13,7 @@
 ## File Map
 
 - Create `apps/publisher/src/renderer/src/previewNavigation.ts`: request/result types, Markdown-aware text normalization, rendered-block matching, position disambiguation, highlight lifecycle.
+- Create `apps/publisher/src/main/previewFrameNavigation.ts`: validate the loopback target, select the exact child frame, and execute bounded reveal code in the cross-origin Quartz frame.
 - Create `apps/publisher/tests/unit/preview-navigation.test.ts`: pure matching and DOM navigation regression tests.
 - Modify `apps/publisher/src/renderer/src/components/MarkdownEditor.tsx`: read CodeMirror selection, add toolbar button, emit requests, display navigation feedback.
 - Modify `apps/publisher/src/renderer/src/components/PreviewPane.tsx`: switch to current-note tab, resolve iframe/fallback roots, run only the latest request, report results.
@@ -26,6 +27,7 @@
 ### Task 1: Build the Markdown-aware preview matcher
 
 **Files:**
+
 - Create: `apps/publisher/src/renderer/src/previewNavigation.ts`
 - Create: `apps/publisher/tests/unit/preview-navigation.test.ts`
 
@@ -118,6 +120,7 @@ git commit -m "feat(publisher): match editor selections in previews"
 ### Task 2: Add the editor toolbar request
 
 **Files:**
+
 - Modify: `apps/publisher/src/renderer/src/components/MarkdownEditor.tsx`
 - Modify: `apps/publisher/tests/unit/editor.test.tsx`
 
@@ -126,8 +129,8 @@ git commit -m "feat(publisher): match editor selections in previews"
 Extend the editor render helper with:
 
 ```ts
-onRevealPreview={onRevealPreview}
-previewNavigationMessage={message}
+onRevealPreview = { onRevealPreview }
+previewNavigationMessage = { message }
 ```
 
 Use the existing CodeMirror test access pattern to dispatch a non-empty selection, click “定位预览”, and expect:
@@ -185,6 +188,7 @@ git commit -m "feat(publisher): request preview location from editor"
 ### Task 3: Navigate the current-note preview
 
 **Files:**
+
 - Modify: `apps/publisher/src/renderer/src/components/PreviewPane.tsx`
 - Modify: `apps/publisher/src/renderer/src/components/PrivateNotePreview.tsx`
 - Modify: `apps/publisher/src/renderer/src/app.css`
@@ -219,11 +223,11 @@ readonly navigation?: PreviewNavigationRequest
 readonly onNavigationResult?: (requestId: number, result: PreviewNavigationResult) => void
 ```
 
-Keep refs for the current-note iframe and simplified-preview article. On a new request, set the tab to `note`; after the tab renders, resolve `iframe.contentDocument?.querySelector("article")` or the simplified article ref. Run `revealPreviewSelection`, clear the previous cleanup/timer, report the result only if the request is still latest, and remove the highlight after 2,000 ms. Retry once from iframe `onLoad` for a still-current `not-ready` request. Never inspect the online-public iframe.
+Keep a ref for the simplified-preview article. On a new request, set the tab to `note`; after the tab renders, use `revealPreviewSelection` for the fallback or call the restricted preview IPC for the exact Quartz URL. The main process accepts only `http://127.0.0.1` URLs, selects the exact matching child frame, and executes the reveal there. Clear previous cleanup/timers, report only the latest request, and retry once from iframe `onLoad` for a still-current `not-ready` request. Never inspect the online-public iframe.
 
 Update `LocalNotePreview` to accept an optional `articleRef: Ref<HTMLElement>` and attach it only to the rendered article.
 
-Add `.publisher-preview-locate-highlight` to app CSS and inject the equivalent rule into the same-origin Quartz iframe document with a single `<style data-publisher-preview-navigation>` node. Use outline/background only; do not mutate text nodes.
+Add `.publisher-preview-locate-highlight` to app CSS and inject the equivalent rule inside the validated Quartz child frame with a single `<style data-publisher-preview-navigation>` node. Use outline/background only; do not mutate text nodes.
 
 - [ ] **Step 4: Verify GREEN and commit**
 
@@ -245,6 +249,7 @@ git commit -m "feat(publisher): reveal selections in current preview"
 ### Task 4: Wire requests through App and invalidate stale work
 
 **Files:**
+
 - Modify: `apps/publisher/src/renderer/src/App.tsx`
 - Modify: `apps/publisher/tests/unit/main-layout.test.tsx`
 
@@ -294,6 +299,7 @@ git commit -m "feat(publisher): connect editor preview navigation"
 ### Task 5: Full verification, packaging, installation, and sync
 
 **Files:**
+
 - Verify all files from Tasks 1–4.
 - Preserve unrelated user changes in `apps/publisher/package.json`, `apps/publisher/package-lock.json`, `content/extracurricular/agent-study.md`, and `.tmp-render-check.png`.
 

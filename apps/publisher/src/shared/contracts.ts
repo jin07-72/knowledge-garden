@@ -487,6 +487,7 @@ export const IPC_CHANNELS = {
     previewStart: "garden:preview:start",
     previewStop: "garden:preview:stop",
     previewStatus: "garden:preview:status",
+    previewRevealSelection: "garden:preview:reveal-selection",
     changesList: "garden:changes:list",
     changesCancel: "garden:changes:cancel",
     publishStart: "garden:publish:start",
@@ -679,6 +680,14 @@ export interface PreviewStartRequest {
   readonly preferredPort?: number
 }
 
+export interface PreviewRevealRequest {
+  readonly url: string
+  readonly text: string
+  readonly positionRatio: number
+}
+
+export type PreviewRevealResult = "found" | "not-found" | "not-ready"
+
 export interface PublishCancelRequest {
   readonly operationId: string
 }
@@ -775,6 +784,7 @@ export interface GardenApi {
     start(request?: PreviewStartRequest): Promise<IpcResult<PreviewStatus>>
     stop(): Promise<IpcResult<PreviewStatus>>
     status(): Promise<IpcResult<PreviewStatus>>
+    revealSelection?(request: PreviewRevealRequest): Promise<IpcResult<PreviewRevealResult>>
     onProgress(listener: (status: PreviewStatus) => void): Unsubscribe
   }
   readonly changes: {

@@ -40,6 +40,7 @@ import { BlogSwitcher } from "./components/BlogSwitcher"
 import { BlogManager, type BlogImportUiState } from "./components/BlogManager"
 import { DomainManager } from "./components/DomainManager"
 import { publishedDeploymentStatus } from "./publishDeploymentStatus"
+import type { PreviewNavigationRequest, PreviewNavigationResult } from "./previewNavigation"
 import "./app.css"
 
 type LoadState = "loading" | "ready" | "error"
@@ -210,6 +211,8 @@ export function PublisherApp({
   const [notesState, setNotesState] = useState<LoadState>("loading")
   const [notesMessage, setNotesMessage] = useState("正在读取花园…")
   const [preview, setPreview] = useState<PreviewStatus>(stoppedPreview)
+  const [previewNavigation, setPreviewNavigation] = useState<PreviewNavigationRequest>()
+  const [previewNavigationMessage, setPreviewNavigationMessage] = useState<string>()
   const [changeCount, setChangeCount] = useState<number>()
   const [changeReview, setChangeReview] = useState<ChangeReview>()
   const [changeReviewState, setChangeReviewState] = useState<LoadState>("loading")
@@ -250,6 +253,8 @@ export function PublisherApp({
   const loadedBlogId = useRef(initialRegistry.activeBlogId)
   const publishBlogId = useRef(initialRegistry.activeBlogId)
   const previewRequest = useRef(0)
+  const previewNavigationId = useRef(0)
+  const latestPreviewNavigation = useRef<PreviewNavigationRequest | undefined>(undefined)
   const changesRequest = useRef(0)
   const hasChangeReview = useRef(false)
   const pendingPublishRequest = useRef<PublishRequest | undefined>(undefined)
@@ -383,7 +388,59 @@ export function PublisherApp({
 
   useEffect(() => {
     setLocalPreview(undefined)
+    latestPreviewNavigation.current = undefined
+    setPreviewNavigation(undefined)
+    setPreviewNavigationMessage(undefined)
   }, [selectedPath])
+
+  const requestPreviewNavigation = useCallback(
+    (selection: { readonly text: string; readonly positionRatio: number }): void => {
+      if (!document) return
+      previewNavigationId.current += 1
+      const request: PreviewNavigationRequest = {
+        id: previewNavigationId.current,
+        documentPath: document.path,
+        text: selection.text,
+        positionRatio: selection.positionRatio,
+      }
+      latestPreviewNavigation.current = request
+      setPreviewNavigation(request)
+      setPreviewNavigationMessage("正在定位预览…")
+    },
+    [document],
+  )
+
+  const reportPreviewNavigation = useCallback(
+    (requestId: number, result: PreviewNavigationResult): void => {
+      const request = latestPreviewNavigation.current
+      if (
+        !request ||
+        request.id !== requestId ||
+        request.documentPath !== documentRef.current?.path
+      )
+        return
+      setPreviewNavigationMessage(
+        result === "found"
+          ? "已定位到预览"
+          : result === "not-found"
+            ? "预览中未找到对应内容"
+            : "当前预览尚未就绪",
+      )
+    },
+    [],
+  )
+
+  const revealInExactPreview = useCallback(
+    async (request: PreviewNavigationRequest, url: string): Promise<PreviewNavigationResult> => {
+      const result = await api.preview.revealSelection?.({
+        url,
+        text: request.text,
+        positionRatio: request.positionRatio,
+      })
+      return result?.ok ? result.value : "not-ready"
+    },
+    [api],
+  )
 
   const selectNote = useCallback(
     async (path: string): Promise<void> => {
@@ -1292,6 +1349,8 @@ export function PublisherApp({
                   }}
                   onSaveStateChange={setSaveStateLabel}
                   onPreviewChange={(markdown) => setLocalPreview({ path: document.path, markdown })}
+                  onRevealPreview={requestPreviewNavigation}
+                  previewNavigationMessage={previewNavigationMessage}
                 />
               ) : (
                 <p className="editor-notice">正在载入 Markdown…</p>
@@ -1318,6 +1377,9 @@ export function PublisherApp({
             const result = await api.history.clearCache?.()
             if (result && !result.ok) throw new Error(result.error.message)
           }}
+          navigation={previewNavigation}
+          onNavigationResult={reportPreviewNavigation}
+          onRevealExactPreview={revealInExactPreview}
         />
       </div>
 

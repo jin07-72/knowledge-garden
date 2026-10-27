@@ -24,6 +24,7 @@ interface PreviewPaneProps {
   readonly onNavigationResult?: (requestId: number, result: PreviewNavigationResult) => void
   readonly onRevealExactPreview?: (
     request: PreviewNavigationRequest,
+    url: string,
   ) => Promise<PreviewNavigationResult>
 }
 
@@ -43,10 +44,10 @@ export function PreviewPane({
   const [tab, setTab] = useState<PreviewTab>("note")
   const [exactPreviewLoad, setExactPreviewLoad] = useState(0)
   const fallbackArticle = useRef<HTMLElement>(null)
-  const latestNavigationId = useRef<number>()
+  const latestNavigationId = useRef<number | undefined>(undefined)
   const navigationCleanup = useRef<(() => void) | undefined>(undefined)
   const navigationTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
-  const retriedExactNavigationId = useRef<number>()
+  const retriedExactNavigationId = useRef<number | undefined>(undefined)
   const [publicRefresh, setPublicRefresh] = useState(() => Date.now().toString(36))
   const refreshPublicSite = (): void => {
     if (!publicWebsiteUrl) return
@@ -104,7 +105,7 @@ export function PreviewPane({
     if (noteUrl) {
       if (!onRevealExactPreview) report("not-ready")
       else {
-        void onRevealExactPreview(navigation).then(report, () => report("not-ready"))
+        void onRevealExactPreview(navigation, noteUrl).then(report, () => report("not-ready"))
       }
     } else if (fallbackArticle.current) {
       const outcome = revealPreviewSelection(fallbackArticle.current, navigation)

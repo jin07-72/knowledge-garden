@@ -317,6 +317,7 @@ function createGardenMock(): GardenApi {
       start: vi.fn(async () => ok(ready)),
       stop: vi.fn(),
       status: vi.fn(async () => ok(ready)),
+      revealSelection: vi.fn(async () => ok("found" as const)),
       onProgress: vi.fn(() => () => undefined),
     },
     changes: {
@@ -2050,6 +2051,59 @@ describe("publisher main layout", () => {
     const deploymentRequest = vi.mocked(garden.history.deployments).mock.calls.at(-1)?.[0]
     expect(gitRequest?.requestId).toMatch(/^history-/)
     expect(deploymentRequest?.requestId).toBe(gitRequest?.requestId)
+  })
+
+  it("locates selected editor text in the exact current-note preview", async () => {
+    const user = userEvent.setup()
+    render(<App />)
+    const view = await waitFor(() =>
+      EditorView.findFromDOM(document.querySelector(".cm-content") as HTMLElement),
+    )
+    await waitFor(() => expect(view!.contentDOM).toHaveAttribute("contenteditable", "true"))
+    const source = view!.state.doc.toString()
+    const from = source.indexOf("正文")
+    act(() => {
+      view!.dispatch({ selection: { anchor: from, head: from + 2 } })
+    })
+
+    await user.click(screen.getByRole("button", { name: "定位预览" }))
+
+    await waitFor(() =>
+      expect(garden.preview.revealSelection).toHaveBeenCalledWith({
+        url: "http://127.0.0.1:8080/technology/css-grid",
+        text: "正文",
+        positionRatio: (from + from + 2) / 2 / source.length,
+      }),
+    )
+    expect(screen.getByRole("status", { name: "预览定位状态" })).toHaveTextContent("已定位到预览")
+  })
+
+  it("ignores a preview-navigation result after switching notes", async () => {
+    const user = userEvent.setup()
+    const result =
+      deferred<Awaited<ReturnType<NonNullable<GardenApi["preview"]["revealSelection"]>>>>()
+    vi.mocked(garden.preview.revealSelection!).mockReturnValue(result.promise)
+    render(<App />)
+    const view = await waitFor(() =>
+      EditorView.findFromDOM(document.querySelector(".cm-content") as HTMLElement),
+    )
+    await waitFor(() => expect(view!.contentDOM).toHaveAttribute("contenteditable", "true"))
+    const source = view!.state.doc.toString()
+    const from = source.indexOf("正文")
+    act(() => view!.dispatch({ selection: { anchor: from, head: from + 2 } }))
+    await user.click(screen.getByRole("button", { name: "定位预览" }))
+    await waitFor(() => expect(garden.preview.revealSelection).toHaveBeenCalledOnce())
+
+    await user.click(screen.getByRole("button", { name: /私密阅读札记/ }))
+    await waitFor(() =>
+      expect(document.querySelector(".editor-placeholder")).toHaveAttribute(
+        "data-editor-document",
+        notes[1].path,
+      ),
+    )
+    await act(async () => result.resolve(ok("found")))
+
+    expect(screen.queryByRole("status", { name: "预览定位状态" })).not.toBeInTheDocument()
   })
 
   it("keeps the private Quartz route while editing", async () => {

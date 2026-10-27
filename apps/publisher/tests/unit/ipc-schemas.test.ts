@@ -240,6 +240,7 @@ const validByChannel: Record<string, unknown> = {
   [IPC_CHANNELS.requests.previewStart]: preview,
   [IPC_CHANNELS.requests.previewStop]: preview,
   [IPC_CHANNELS.requests.previewStatus]: preview,
+  [IPC_CHANNELS.requests.previewRevealSelection]: "found",
   [IPC_CHANNELS.requests.changesList]: {
     groups: [
       {
