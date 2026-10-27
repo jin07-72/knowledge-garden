@@ -1,6 +1,6 @@
 import DOMPurify from "dompurify"
 import { Marked } from "marked"
-import { useMemo } from "react"
+import { useMemo, type Ref } from "react"
 
 const markdown = new Marked({ async: false, gfm: true, breaks: false })
 
@@ -56,10 +56,12 @@ export function LocalNotePreview({
   title,
   markdown: source,
   privateNote,
+  articleRef,
 }: {
   readonly title: string
   readonly markdown?: string
   readonly privateNote: boolean
+  readonly articleRef?: Ref<HTMLElement>
 }): React.JSX.Element {
   const html = useMemo(() => (source === undefined ? "" : renderLocalMarkdown(source)), [source])
   return (
@@ -72,6 +74,7 @@ export function LocalNotePreview({
       ) : null}
       {html ? (
         <article
+          ref={articleRef}
           className="local-note-preview"
           aria-label={`${title}的本地渲染`}
           dangerouslySetInnerHTML={{ __html: html }}

@@ -1,8 +1,13 @@
-import { useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { Monitor, RefreshCw, TriangleAlert } from "lucide-react"
 import type { NoteSummary, PreviewStatus } from "../../../shared/contracts"
 import { HistoryView, type HistorySnapshot } from "./HistoryView"
 import { LocalNotePreview } from "./PrivateNotePreview"
+import {
+  revealPreviewSelection,
+  type PreviewNavigationRequest,
+  type PreviewNavigationResult,
+} from "../previewNavigation"
 
 type PreviewTab = "note" | "site" | "public" | "history"
 
@@ -15,6 +20,11 @@ interface PreviewPaneProps {
   readonly onCancelHistory: (requestId: string) => Promise<void>
   readonly onOpenHistoryLink: (url: string) => Promise<void>
   readonly onClearPublicCache: () => Promise<void>
+  readonly navigation?: PreviewNavigationRequest
+  readonly onNavigationResult?: (requestId: number, result: PreviewNavigationResult) => void
+  readonly onRevealExactPreview?: (
+    request: PreviewNavigationRequest,
+  ) => Promise<PreviewNavigationResult>
 }
 
 export function PreviewPane({
@@ -26,8 +36,17 @@ export function PreviewPane({
   onCancelHistory,
   onOpenHistoryLink,
   onClearPublicCache,
+  navigation,
+  onNavigationResult,
+  onRevealExactPreview,
 }: PreviewPaneProps): React.JSX.Element {
   const [tab, setTab] = useState<PreviewTab>("note")
+  const [exactPreviewLoad, setExactPreviewLoad] = useState(0)
+  const fallbackArticle = useRef<HTMLElement>(null)
+  const latestNavigationId = useRef<number>()
+  const navigationCleanup = useRef<(() => void) | undefined>(undefined)
+  const navigationTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const retriedExactNavigationId = useRef<number>()
   const [publicRefresh, setPublicRefresh] = useState(() => Date.now().toString(36))
   const refreshPublicSite = (): void => {
     if (!publicWebsiteUrl) return
@@ -61,6 +80,65 @@ export function PreviewPane({
       return undefined
     }
   })()
+
+  useEffect(() => {
+    if (!navigation) return
+    latestNavigationId.current = navigation.id
+    retriedExactNavigationId.current = undefined
+    setTab("note")
+  }, [navigation])
+
+  useEffect(() => {
+    if (!navigation || tab !== "note" || navigation.documentPath !== note?.path) return
+    let active = true
+    navigationCleanup.current?.()
+    navigationCleanup.current = undefined
+    if (navigationTimer.current) clearTimeout(navigationTimer.current)
+    navigationTimer.current = undefined
+
+    const report = (result: PreviewNavigationResult): void => {
+      if (!active || latestNavigationId.current !== navigation.id) return
+      onNavigationResult?.(navigation.id, result)
+    }
+
+    if (noteUrl) {
+      if (!onRevealExactPreview) report("not-ready")
+      else {
+        void onRevealExactPreview(navigation).then(report, () => report("not-ready"))
+      }
+    } else if (fallbackArticle.current) {
+      const outcome = revealPreviewSelection(fallbackArticle.current, navigation)
+      navigationCleanup.current = outcome.cleanup
+      report(outcome.result)
+      if (outcome.cleanup) {
+        navigationTimer.current = setTimeout(() => {
+          outcome.cleanup?.()
+          if (navigationCleanup.current === outcome.cleanup) navigationCleanup.current = undefined
+          navigationTimer.current = undefined
+        }, 2_000)
+      }
+    } else report("not-ready")
+
+    return () => {
+      active = false
+    }
+  }, [
+    exactPreviewLoad,
+    navigation,
+    note?.path,
+    noteUrl,
+    onNavigationResult,
+    onRevealExactPreview,
+    tab,
+  ])
+
+  useEffect(
+    () => () => {
+      navigationCleanup.current?.()
+      if (navigationTimer.current) clearTimeout(navigationTimer.current)
+    },
+    [],
+  )
 
   const tabs: readonly { id: PreviewTab; label: string }[] = [
     { id: "note", label: "当前笔记" },
@@ -137,6 +215,16 @@ export function PreviewPane({
               title={`${note.title}的 Quartz 精确预览`}
               src={noteUrl}
               sandbox="allow-same-origin allow-scripts"
+              onLoad={() => {
+                if (
+                  navigation &&
+                  latestNavigationId.current === navigation.id &&
+                  retriedExactNavigationId.current !== navigation.id
+                ) {
+                  retriedExactNavigationId.current = navigation.id
+                  setExactPreviewLoad((current) => current + 1)
+                }
+              }}
             />
           </div>
         ) : null}
@@ -150,6 +238,7 @@ export function PreviewPane({
               markdown={markdown}
               title={note.title}
               privateNote={note.visibility === "private"}
+              articleRef={fallbackArticle}
             />
           </div>
         ) : null}

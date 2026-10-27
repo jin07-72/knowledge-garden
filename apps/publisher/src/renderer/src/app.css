@@ -1169,6 +1169,16 @@ button {
   font-size: 14px;
   line-height: 1.75;
 }
+
+.publisher-preview-locate-highlight {
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+  outline: 2px solid var(--accent);
+  outline-offset: 0.2rem;
+  border-radius: 0.2rem;
+  transition:
+    background 160ms ease,
+    outline-color 160ms ease;
+}
 .local-note-preview > :first-child {
   margin-top: 0;
 }
