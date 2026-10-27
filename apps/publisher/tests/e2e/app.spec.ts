@@ -664,6 +664,66 @@ tags:
 ${body}
 `
 
+test("locates selected editor text in the current preview", async () => {
+  const garden = await createQuartzGardenFixture({
+    directoryName: "Preview Navigation Garden",
+    noteTitle: "Preview Navigation",
+    noteBody: "A uniquely located preview sentence.",
+  })
+  const stateRoot = await createTemporaryDirectory("garden-publisher-e2e-preview-navigation-")
+  const notePath = join(garden.root, ...garden.notePath.split("/"))
+  const noteBefore = await readFile(notePath)
+  let application: ElectronApplication | undefined
+  try {
+    application = await launchApplication(stateRoot, {
+      ...process.env,
+      GARDEN_PUBLISHER_E2E: "1",
+      GARDEN_PUBLISHER_E2E_WORKSPACE: garden.root,
+      GARDEN_PUBLISHER_E2E_RUNTIME: await createE2eRuntime(stateRoot),
+      GARDEN_PUBLISHER_E2E_REGISTRY: join(stateRoot, "blogs.json"),
+    })
+    const page = await application.firstWindow()
+    await expect(page.getByTitle("Preview Navigation的 Quartz 精确预览")).toBeVisible()
+    await expect
+      .poll(
+        () =>
+          application!.evaluate(({ BrowserWindow }) =>
+            BrowserWindow.getAllWindows()[0].webContents.mainFrame.framesInSubtree.map(
+              (frame) => frame.url,
+            ),
+          ),
+        { timeout: 30_000 },
+      )
+      .toContainEqual(expect.stringContaining("/life/fixture"))
+    await application.evaluate(async ({ BrowserWindow }) => {
+      const frame = BrowserWindow.getAllWindows()[0].webContents.mainFrame.framesInSubtree.find(
+        (candidate) => candidate.url.includes("/life/fixture"),
+      )
+      if (!frame) throw new Error("Exact preview frame was not available")
+      await frame.executeJavaScript(
+        'document.body.innerHTML = "<main><h1>Preview Navigation</h1><p>A uniquely located preview sentence.</p></main>"',
+      )
+    })
+    const editor = page.locator(".cm-content")
+    await expect(editor).toHaveAttribute("contenteditable", "true")
+    await editor.click()
+    await page.keyboard.press("Control+A")
+    await page.getByRole("button", { name: "定位预览" }).click()
+
+    await expect(page.getByRole("status", { name: "预览定位状态" })).toHaveText("已定位到预览")
+    await expect(
+      page
+        .frameLocator('iframe[title="Preview Navigation的 Quartz 精确预览"]')
+        .locator(".publisher-preview-locate-highlight"),
+    ).toBeVisible()
+    expect(await readFile(notePath)).toEqual(noteBefore)
+  } finally {
+    await closeApplication(application)
+    await garden.cleanup()
+    await removeTemporaryDirectory(stateRoot)
+  }
+})
+
 test("manages a note image library", async () => {
   const guide = await readFile(join(publisherRoot, "README.md"), "utf8")
   for (const expected of [
