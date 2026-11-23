@@ -1,11 +1,12 @@
 import test, { describe } from "node:test"
 import assert from "node:assert"
-import { renderTranscludes, pageResources } from "./renderPage"
+import { renderTranscludes, pageResources, resolvePageBasePath } from "./renderPage"
 import { Root, Element } from "hast"
 import { FullSlug } from "../util/path"
 import { GlobalConfiguration } from "../cfg"
 import { QuartzComponentProps } from "./types"
 import { StaticResources } from "../util/resources"
+import { BuildCtx } from "../util/ctx"
 
 function makeTranscludeBlockquote(targetSlug: string, block?: string): Element {
   return {
@@ -323,5 +324,30 @@ describe("pageResources", () => {
       !inlineJsServe.script.includes("/quartz/static/contentIndex.json"),
       `expected contentIndex fetch without /quartz/ prefix in serve mode, got: ${inlineJsServe.script}`,
     )
+  })
+})
+
+describe("resolvePageBasePath", () => {
+  function makeCtx(serve: boolean, baseDir: string): BuildCtx {
+    return {
+      argv: { serve, baseDir },
+    } as unknown as BuildCtx
+  }
+
+  test("uses the CLI baseDir for a prefixed local preview", () => {
+    assert.equal(resolvePageBasePath(makeCtx(true, "preview-id/"), cfg), "/preview-id")
+  })
+
+  test("keeps ordinary local previews at the server root", () => {
+    assert.equal(resolvePageBasePath(makeCtx(true, ""), cfg), "")
+  })
+
+  test("uses the configured URL path for production pages", () => {
+    const productionCfg = {
+      ...cfg,
+      baseUrl: "example.com/garden",
+    } as GlobalConfiguration
+
+    assert.equal(resolvePageBasePath(makeCtx(false, ""), productionCfg), "/garden")
   })
 })

@@ -29,6 +29,15 @@ interface RenderComponents {
   frame?: string
 }
 
+export function resolvePageBasePath(ctx: BuildCtx, cfg: GlobalConfiguration): string {
+  if (ctx.argv.serve) {
+    const baseDir = ctx.argv.baseDir.trim().replace(/^\/+|\/+$/g, "")
+    return baseDir === "" ? "" : `/${baseDir}`
+  }
+
+  return cfg.baseUrl ? new URL(`https://${cfg.baseUrl}`).pathname.replace(/\/$/, "") : ""
+}
+
 const headerRegex = new RegExp(/h[1-6]/)
 export function pageResources(
   baseDir: FullSlug | RelativeURL,
@@ -337,12 +346,7 @@ export function renderPage(
 
   const lang = componentData.fileData.frontmatter?.lang ?? cfg.locale?.split("-")[0] ?? "en"
   const direction = i18n(cfg.locale).direction ?? "ltr"
-  // During local dev (--serve), the dev server serves from root without the
-  // baseUrl subpath, so basePath must be empty to avoid broken links.
-  const basePath =
-    componentData.ctx.argv.serve || !cfg.baseUrl
-      ? ""
-      : new URL(`https://${cfg.baseUrl}`).pathname.replace(/\/$/, "")
+  const basePath = resolvePageBasePath(componentData.ctx, cfg)
   const doc = (
     <html lang={lang} dir={direction}>
       <Head {...componentData} />
