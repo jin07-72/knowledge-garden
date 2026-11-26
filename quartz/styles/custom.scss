@@ -1,4 +1,7 @@
 @use "./variables.scss" as *;
+/* publisher-appearance:start */
+@use "./publisher-appearance.scss";
+/* publisher-appearance:end */
 
 :root {
   color-scheme: dark;

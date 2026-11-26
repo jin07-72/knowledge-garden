@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 2,
+  "settings": {
+    "schemaVersion": 2,
+    "preset": "custom",
+    "background": {
+      "kind": "solid",
+      "color": "#f4efe3"
+    },
+    "colors": {
+      "page": "#f4efe3",
+      "surface": "#fffaf0",
+      "text": "#3f3a32",
+      "heading": "#201d18",
+      "accent": "#9f3d2e",
+      "secondary": "#746b5f",
+      "border": "#d8cdbb",
+      "code": "#ebe2d3"
+    },
+    "componentColors": {
+      "domainCard": {
+        "normal": {
+          "surface": "#B9BBA5",
+          "title": "#C18C35",
+          "description": "#67481D"
+        }
+      }
+    },
+    "typography": {
+      "header": "\"Iowan Old Style\", Georgia, serif",
+      "body": "\"Source Serif 4\", Georgia, serif",
+      "code": "\"JetBrains Mono\", ui-monospace, monospace",
+      "baseSizePx": 17,
+      "lineHeight": 1.8
+    },
+    "layout": {
+      "articleWidthCh": 68,
+      "pageWidthPx": 1360,
+      "sidebarWidthPx": 260,
+      "sidebars": "left",
+      "gapPx": 36
+    },
+    "customCss": ""
+  },
+  "assets": []
+}
