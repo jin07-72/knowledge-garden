@@ -55,7 +55,7 @@ input,
 }
 
 .garden-kicker {
-  color: var(--secondary);
+  color: var(--publisher-component-home-stats-normal-accent, var(--secondary));
   font-family: var(--codeFont);
   font-size: 0.78rem;
   letter-spacing: 0.12em;
@@ -63,7 +63,7 @@ input,
 }
 
 .garden-stats {
-  color: var(--darkgray);
+  color: var(--publisher-component-home-stats-normal-text, var(--darkgray));
   font-family: var(--codeFont);
   font-size: 0.8rem;
 }
@@ -96,11 +96,11 @@ body:not([data-slug="index"]) .recent-notes {
   display: block;
   min-height: 8rem;
   padding: 1.15rem;
-  color: var(--dark);
+  color: var(--publisher-component-domain-card-normal-title, var(--dark));
   text-decoration: none;
-  border: 1px solid var(--lightgray);
+  border: 1px solid var(--publisher-component-domain-card-normal-border, var(--lightgray));
   border-radius: 0.65rem;
-  background: rgba(24, 29, 36, 0.82);
+  background: var(--publisher-component-domain-card-normal-surface, rgba(24, 29, 36, 0.82));
   transition:
     transform 140ms ease,
     border-color 140ms ease,
@@ -109,14 +109,15 @@ body:not([data-slug="index"]) .recent-notes {
 
 .domain-card:hover {
   transform: translateY(-2px);
-  border-color: var(--secondary);
-  background: rgba(37, 43, 52, 0.9);
+  color: var(--publisher-component-domain-card-hover-title, var(--dark));
+  border-color: var(--publisher-component-domain-card-hover-border, var(--secondary));
+  background: var(--publisher-component-domain-card-hover-surface, rgba(37, 43, 52, 0.9));
 }
 
 .domain-card span {
   display: block;
   margin-bottom: 1.8rem;
-  color: var(--secondary);
+  color: var(--publisher-component-domain-card-normal-number, var(--secondary));
   font-family: var(--codeFont);
   font-size: 0.75rem;
 }
@@ -124,11 +125,24 @@ body:not([data-slug="index"]) .recent-notes {
 .domain-card strong {
   display: block;
   margin-bottom: 0.35rem;
+  color: var(--publisher-component-domain-card-normal-title, var(--dark));
   font-size: 1.05rem;
 }
 
 .domain-card small {
-  color: var(--darkgray);
+  color: var(--publisher-component-domain-card-normal-description, var(--darkgray));
+}
+
+.domain-card:hover span {
+  color: var(--publisher-component-domain-card-hover-number, var(--secondary));
+}
+
+.domain-card:hover strong {
+  color: var(--publisher-component-domain-card-hover-title, var(--dark));
+}
+
+.domain-card:hover small {
+  color: var(--publisher-component-domain-card-hover-description, var(--darkgray));
 }
 
 @media all and ($desktop) {
