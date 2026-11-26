@@ -20,7 +20,7 @@
     "componentColors": {
       "domainCard": {
         "normal": {
-          "surface": "#B9BBA5",
+          "surface": "#FFFFFF",
           "title": "#C18C35",
           "description": "#67481D"
         }
